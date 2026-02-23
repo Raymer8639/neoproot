@@ -44,7 +44,6 @@ extern void convert_user_regs_struct(bool reverse, uint64_t *user_regs64,
 static inline word_t convert_user_offset(word_t offset UNUSED)
 {
 	assert(0);
-	return 0;
 }
 
 static inline void convert_user_regs_struct(bool reverse UNUSED,

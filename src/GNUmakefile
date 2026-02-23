@@ -15,7 +15,7 @@ OBJCOPY  ?= $(CROSS_COMPILE)objcopy
 OBJDUMP  ?= $(CROSS_COMPILE)objdump
 
 CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH)
-CFLAGS   += -Wall -Wextra -O2 -DNDEBUG -DTALLOC_NO_DEBUG
+CFLAGS   += -Wall -Wextra -O2
 LDFLAGS  += -ltalloc -Wl,-z,noexecstack
 
 OBJECTS += \
@@ -115,7 +115,7 @@ all: proot
 ######################################################################
 # Beautified output
 
-quiet_GEN = @echo "  GEN	$@";
+quiet_GEN = @echo "  GEN	$@"; $(GEN)
 quiet_CC  = @echo "  CC	$@"; $(CC)
 quiet_LD  = @echo "  LD	$@"; $(LD)
 quiet_INSTALL = @echo "  INSTALL	$?"; $(INSTALL)
@@ -177,7 +177,8 @@ OBJIFY = $($(quiet)GEN)									\
 		--input-target=binary								\
 		--output-target=`env LANG=C $(OBJDUMP) -f cli/cli.o |				\
 			grep 'file format' | awk '{print $$4}'`				\
-		--binary-architecture=`env LANG=C $(OBJDUMP) -f cli/cli.o | grep architecture | cut -f 1 -d , | awk '{print $$2}'`	\
+		--binary-architecture `env LANG=C $(OBJDUMP) -f cli/cli.o |		\
+				grep architecture | cut -f 1 -d , | awk '{print $$2}'`	\
 		$< $@
 
 proot: $(OBJECTS)
@@ -185,7 +186,7 @@ proot: $(OBJECTS)
 
 # Special case to compute which files depend on the auto-generated
 # file "build.h".
-USE_BUILD_H := $(patsubst $(SRC)%.c,%.o,$(shell grep -s -l 'include "build.h"' $(patsubst %.o,$(SRC)%.c,$(OBJECTS))))
+USE_BUILD_H := $(patsubst $(SRC)%.c,%.o,$(shell egrep -sl 'include[[:space:]]+"build.h"' $(patsubst %.o,$(SRC)%.c,$(OBJECTS))))
 $(USE_BUILD_H): build.h
 
 %.o: %.c
@@ -267,5 +268,8 @@ endif
 uninstall:
 	-$(RM) -f $(DESTDIR)$(BINDIR)/proot
 ifdef PROOT_UNBUNDLE_LOADER
-	-$(RM) -f $(PROOT_UNBUNDLE_LOADER)/loader $(PROOT_UNBUNDLE_LOADER)/loader32
+	$(INSTALL) -D loader/loader $(PROOT_UNBUNDLE_LOADER)/loader
+ifdef HAS_LOADER_32BIT
+	$(INSTALL) -D loader/loader-m32 $(PROOT_UNBUNDLE_LOADER)/loader32
+endif
 endif
