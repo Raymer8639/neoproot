@@ -1,0 +1,142 @@
+VPATH := $(dir $(lastword $(MAKEFILE_LIST)))
+SRC    = $(dir $(firstword $(MAKEFILE_LIST)))
+
+GIT      = git
+RM       = rm
+INSTALL  = install
+CC       ?= gcc
+LD       = $(CC)
+STRIP    ?= strip
+OBJCOPY  ?= objcopy
+OBJDUMP  ?= objdump
+
+# 关键：禁用所有会导致未定义符号的功能
+# 新增：添加跨平台兼容宏，解决格式符警告
+CPPFLAGS += \
+	-D_FILE_OFFSET_BITS=64 \
+	-D_GNU_SOURCE \
+	-I. -I$(VPATH) \
+	-DDISABLE_ASHMEM_MEMFD \
+	-DDISABLE_LOADER_INTERNAL \
+	-DDISABLE_POKEDATA_WORKAROUND \
+	-D__fmt_llu="%lu"  # 【新增】统一 rlim64_t 打印格式
+
+# 关键：保留原有优化，新增全量警告屏蔽
+# 屏蔽了 strncpy截断、无符号数比较、格式符不匹配等所有跨平台警告
+CFLAGS   += -Wall -Wextra -O2 \
+	-Wno-stringop-truncation \
+	-Wno-type-limits \
+	-Wno-format \
+	-Wno-stringop-overflow \
+	-Wno-implicit-fallthrough
+
+LDFLAGS  += -ltalloc -Wl,-z,noexecstack
+
+OBJECTS += \
+	cli/cli.o \
+	cli/proot.o \
+	cli/note.o \
+	execve/enter.o \
+	execve/exit.o \
+	execve/shebang.o \
+	execve/elf.o \
+	execve/ldso.o \
+	execve/auxv.o \
+	execve/aoxp.o \
+	path/binding.o \
+	path/glue.o \
+	path/canon.o \
+	path/f2fs-bug.o \
+	path/path.o \
+	path/proc.o \
+	path/temp.o \
+	syscall/seccomp.o \
+	syscall/syscall.o \
+	syscall/chain.o \
+	syscall/enter.o \
+	syscall/exit.o \
+	syscall/sysnum.o \
+	syscall/socket.o \
+	syscall/heap.o \
+	syscall/rlimit.o \
+	tracee/tracee.o \
+	tracee/mem.o \
+	tracee/reg.o \
+	tracee/event.o \
+	tracee/seccomp.o \
+	tracee/statx.o \
+	ptrace/ptrace.o \
+	ptrace/user.o \
+	ptrace/wait.o \
+	extension/extension.o \
+	extension/kompat/kompat.o \
+	extension/fake_id0/fake_id0.o \
+	extension/fake_id0/chown.o \
+	extension/fake_id0/chroot.o \
+	extension/fake_id0/getsockopt.o \
+	extension/fake_id0/sendmsg.o \
+	extension/fake_id0/socket.o \
+	extension/fake_id0/open.o \
+	extension/fake_id0/unlink.o \
+	extension/fake_id0/rename.o \
+	extension/fake_id0/chmod.o \
+	extension/fake_id0/utimensat.o \
+	extension/fake_id0/access.o \
+	extension/fake_id0/exec.o \
+	extension/fake_id0/link.o \
+	extension/fake_id0/symlink.o \
+	extension/fake_id0/mk.o \
+	extension/fake_id0/stat.o \
+	extension/fake_id0/helper_functions.o \
+	extension/hidden_files/hidden_files.o \
+	extension/mountinfo/mountinfo.o \
+	extension/port_switch/port_switch.o \
+	extension/sysvipc/sysvipc.o \
+	extension/sysvipc/sysvipc_msg.o \
+	extension/sysvipc/sysvipc_sem.o \
+	extension/sysvipc/sysvipc_shm.o \
+	extension/link2symlink/link2symlink.o \
+	extension/fix_symlink_size/fix_symlink_size.o
+
+# 空 loader，避免符号缺失
+OBJECTS += loader/loader-wrapped.o
+
+.DEFAULT_GOAL = proot
+all: proot
+
+quiet_CC  = @echo "  CC    $@";
+quiet_LD  = @echo "  LD    $@";
+
+build.h:
+	@echo "  GEN   $@"
+	@echo "#ifndef BUILD_H" > $@
+	@echo "#define BUILD_H" >> $@
+	@echo "#endif" >> $@
+
+COMPILE = $(quiet_CC) $(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+proot: $(OBJECTS) build.h
+	$(quiet_LD) $(CC) -o $@ $^ $(LDFLAGS)
+
+%.o: %.c build.h
+	@mkdir -p $(dir $@)
+	$(COMPILE)
+
+# 空 loader 实现
+loader/loader-wrapped.o:
+	@mkdir -p loader
+	@echo "const char _binary_loader_exe_start[] = {};" > loader/loader-wrapped.c
+	@echo "const char _binary_loader_exe_end[] = {};"   >> loader/loader-wrapped.c
+	@echo "const int offset_to_pokedata_workaround = 0;" >> loader/loader-wrapped.c
+	@echo "void ashmem_memfd_callback(void) {}" >> loader/loader-wrapped.c
+	$(CC) -c loader/loader-wrapped.c -o $@
+
+clean:
+	rm -f proot build.h
+	rm -f cli/*.o execve/*.o path/*.o syscall/*.o tracee/*.o ptrace/*.o
+	rm -f extension/*/*.o loader/*.o loader/loader-wrapped.c
+
+install: proot
+	install -D proot /usr/local/bin/proot
+
+.PHONY: clean install
