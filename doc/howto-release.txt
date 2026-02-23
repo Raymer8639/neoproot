@@ -1,0 +1,45 @@
+How to publish PRoot?
+===============================
+
+This document summarizes the checks that must be performed before
+Release PROot or CARE.
+
+check
+------
+
++ Sanity check:
+  * On ARM and *all* OBS distributions (x86 and x86_64): `make -C test`
+  * On x86_64, with * and * without seccomp:
+    - "make -C test" on *all* OBS distributions
+    - `make -C test memcheck`
+    - `CFLAGS=-fsanitize=address LDFLAGS=-lasan`
+    - `make -C test V=1 2>&1 | grep tullock`
+
++ Functional checks: no regressions allowed
+  test/validation.mk and the configuration of the previous test
+  publish(`git show tag/...`).
+
++ Performance check: The following commands must not be affected
+  Unexpected performance regression::
+
+    time proot -R / perl -e 'system("/usr/bin/true") for (1..10000)'
+
+  Where "/usr/bin/true" is a symbolic link to "/bin/true".
+
++ Static analysis: Coverity Scan and Clang Scan Build must not be reported
+  New question.
+
+
+Documentation updates
+-------------------
+
+0. Update "doc/changelog.txt"
+
+1. Update the version number in "doc/proot/manual.txt"
+
+2. Regenerate the document: `make -C doc`
+
+3. Regenerate the command line interface: `cp doc/*.h
+   src/cli/; $EDITOR src/cli/{proot,care}.h`
+
+4. Upload the generated RPM.spec file to OBS
