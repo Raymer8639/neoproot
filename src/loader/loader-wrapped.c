@@ -1,1 +1,0 @@
-char dummy_loader[] = {};
