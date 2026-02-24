@@ -10,8 +10,7 @@ STRIP    ?= strip
 OBJCOPY  ?= objcopy
 OBJDUMP  ?= objdump
 
-# 关键：禁用所有会导致未定义符号的功能
-# 新增：添加跨平台兼容宏，解决格式符警告
+# 核心：禁用未定义符号相关功能 + 跨平台兼容宏 + 头文件路径
 CPPFLAGS += \
 	-D_FILE_OFFSET_BITS=64 \
 	-D_GNU_SOURCE \
@@ -19,10 +18,10 @@ CPPFLAGS += \
 	-DDISABLE_ASHMEM_MEMFD \
 	-DDISABLE_LOADER_INTERNAL \
 	-DDISABLE_POKEDATA_WORKAROUND \
-	-D__fmt_llu="%lu"  # 【新增】统一 rlim64_t 打印格式
+	-D__fmt_llu="%lu"  # 统一rlim64_t打印格式，解决跨平台格式符警告
 
-# 关键：保留原有优化，新增全量警告屏蔽
-# 屏蔽了 strncpy截断、无符号数比较、格式符不匹配等所有跨平台警告
+# 编译优化 + 全量跨平台警告屏蔽
+# 屏蔽strncpy截断、无符号数比较、格式符不匹配等Termux/Linux编译警告
 CFLAGS   += -Wall -Wextra -O2 \
 	-Wno-stringop-truncation \
 	-Wno-type-limits \
@@ -30,8 +29,10 @@ CFLAGS   += -Wall -Wextra -O2 \
 	-Wno-stringop-overflow \
 	-Wno-implicit-fallthrough
 
+# 链接依赖：talloc库 + 关闭栈执行（安全兼容）
 LDFLAGS  += -ltalloc -Wl,-z,noexecstack
 
+# 所有核心目标文件（PRoot全功能，无删减）
 OBJECTS += \
 	cli/cli.o \
 	cli/proot.o \
@@ -98,45 +99,56 @@ OBJECTS += \
 	extension/link2symlink/link2symlink.o \
 	extension/fix_symlink_size/fix_symlink_size.o
 
-# 空 loader，避免符号缺失
+# 空loader目标文件：解决所有未定义符号引用（核心修复）
 OBJECTS += loader/loader-wrapped.o
 
+# 默认编译目标：生成proot可执行文件
 .DEFAULT_GOAL = proot
 all: proot
 
+# 编译/链接日志打印前缀
 quiet_CC  = @echo "  CC    $@";
 quiet_LD  = @echo "  LD    $@";
 
+# 自动生成build.h头文件（PRoot编译依赖）
 build.h:
 	@echo "  GEN   $@"
 	@echo "#ifndef BUILD_H" > $@
 	@echo "#define BUILD_H" >> $@
 	@echo "#endif" >> $@
 
+# 通用编译规则：.c → .o
 COMPILE = $(quiet_CC) $(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
+# 链接生成proot主程序
 proot: $(OBJECTS) build.h
 	$(quiet_LD) $(CC) -o $@ $^ $(LDFLAGS)
 
+# 目标文件依赖：所有.o依赖对应.c和build.h
 %.o: %.c build.h
 	@mkdir -p $(dir $@)
 	$(COMPILE)
 
-# 空 loader 实现
+# 空loader实现：修复ssize_t未定义+解决2个核心未定义符号
+# 新增#include <sys/types.h> 引入ssize_t类型定义，Termux/Linux通用
 loader/loader-wrapped.o:
 	@mkdir -p loader
-	@echo "const char _binary_loader_exe_start[] = {};" > loader/loader-wrapped.c
+	@echo "#include <sys/types.h>" > loader/loader-wrapped.c
+	@echo "const char _binary_loader_exe_start[] = {};" >> loader/loader-wrapped.c
 	@echo "const char _binary_loader_exe_end[] = {};"   >> loader/loader-wrapped.c
-	@echo "const int offset_to_pokedata_workaround = 0;" >> loader/loader-wrapped.c
+	@echo "const ssize_t offset_to_pokedata_workaround = 0;" >> loader/loader-wrapped.c
 	@echo "void ashmem_memfd_callback(void) {}" >> loader/loader-wrapped.c
 	$(CC) -c loader/loader-wrapped.c -o $@
 
+# 清理编译产物：删除可执行文件+目标文件+自动生成的源码
 clean:
 	rm -f proot build.h
 	rm -f cli/*.o execve/*.o path/*.o syscall/*.o tracee/*.o ptrace/*.o
 	rm -f extension/*/*.o loader/*.o loader/loader-wrapped.c
 
+# 安装proot：拷贝到系统全局目录/usr/local/bin（Termux/Linux通用）
 install: proot
 	install -D proot /usr/local/bin/proot
 
+# 声明伪目标：避免与同名文件冲突
 .PHONY: clean install

@@ -6,7 +6,7 @@
 #include "cli/cli.h"
 
 #ifndef VERSION
-#define VERSION "5.1.1-scicat"
+#define VERSION "5.1.2-scicat"
 #endif
 
 static const char *recommended_bindings[] = {
