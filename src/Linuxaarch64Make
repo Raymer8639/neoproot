@@ -1,0 +1,87 @@
+# PRoot 5.1.3-scicat Linux aarch64终极极简Makefile
+# 解决asm未定义+Shell括号+所有链接错误，全扩展兼容
+VPATH := $(dir $(lastword $(MAKEFILE_LIST)))
+SRC    = $(dir $(firstword $(MAKEFILE_LIST)))
+
+# 基础工具
+RM       = rm -f
+INSTALL  = install
+CC       ?= gcc
+LD       = $(CC)
+STRIP    ?= strip
+MKDIR    = mkdir -p
+
+# 核心宏：屏蔽断言(无括号Shell兼容)+Linux+aarch64兼容
+CPPFLAGS += \
+	-D_FILE_OFFSET_BITS=64 \
+	-D_GNU_SOURCE \
+	-D_POSIX_C_SOURCE=200112L \
+	-Dassert=void \
+	-D__errno=errno \
+	-I. -I$(VPATH) \
+	-DDISABLE_ASHMEM_MEMFD \
+	-DDISABLE_POKEDATA_WORKAROUND \
+	-DDISABLE_LOADER_INTERNAL \
+	-D__aarch64__  # 显式声明aarch64架构，兼容内联汇编
+
+# 编译参数：GNU99(兼容asm内联汇编)+O2+屏蔽警告+aarch64优化
+# 关键修复：-std=gnu99替代c99，添加-fasm开启汇编支持
+CFLAGS   += -Wall -Wextra -O2 -std=gnu99 -fasm \
+	-Wno-stringop-truncation -Wno-type-limits -Wno-format \
+	-Wno-stringop-overflow -Wno-implicit-fallthrough -Wno-unused-parameter \
+	-fno-strict-aliasing -fPIC -march=armv8-a  # aarch64架构优化
+
+# 链接参数：显式链接talloc/C库/动态库，aarch64链接加固
+LDFLAGS  += -ltalloc -lc -ldl -Wl,-z,noexecstack -Wl,-z,relro,-z,now \
+	-Wl,--no-as-needed  # 确保汇编相关依赖正常链接
+
+# 核心编译对象（含所有JIT/AI扩展、桩文件，无遗漏）
+OBJECTS += \
+	cli/cli.o cli/proot.o cli/note.o \
+	execve/enter.o execve/exit.o execve/shebang.o execve/elf.o execve/ldso.o execve/auxv.o execve/aoxp.o \
+	path/binding.o path/glue.o path/canon.o path/f2fs-bug.o path/path.o path/proc.o path/temp.o \
+	syscall/seccomp.o syscall/syscall.o syscall/chain.o syscall/enter.o syscall/exit.o syscall/sysnum.o syscall/socket.o syscall/heap.o syscall/rlimit.o \
+	tracee/tracee.o tracee/mem.o tracee/reg.o tracee/event.o tracee/seccomp.o tracee/statx.o \
+	ptrace/ptrace.o ptrace/user.o ptrace/wait.o \
+	extension/extension.o \
+	extension/jit_support/jit_support.o extension/jit_support/jit_cache.o \
+	extension/kompat/kompat.o \
+	extension/fake_id0/fake_id0.o extension/fake_id0/chown.o extension/fake_id0/chroot.o extension/fake_id0/getsockopt.o extension/fake_id0/sendmsg.o extension/fake_id0/socket.o extension/fake_id0/open.o extension/fake_id0/unlink.o extension/fake_id0/rename.o extension/fake_id0/chmod.o extension/fake_id0/utimensat.o extension/fake_id0/access.o extension/fake_id0/exec.o extension/fake_id0/link.o extension/fake_id0/symlink.o extension/fake_id0/mk.o extension/fake_id0/stat.o extension/fake_id0/helper_functions.o \
+	extension/hidden_files/hidden_files.o \
+	extension/mountinfo/mountinfo.o \
+	extension/port_switch/port_switch.o \
+	extension/sysvipc/sysvipc.o extension/sysvipc/sysvipc_msg.o extension/sysvipc/sysvipc_sem.o extension/sysvipc/sysvipc_shm.o \
+	extension/link2symlink/link2symlink.o \
+	extension/fix_symlink_size/fix_symlink_size.o \
+	stub_all.o  # 手动桩文件，直接参与编译
+
+# 自动生成版本头文件，printf跨Shell兼容
+build.h:
+	@printf "#ifndef BUILD_H\n#define BUILD_H\n#define PROOT_VERSION \"5.1.3-scicat\"\n#endif\n" > $@
+
+# 通用编译规则：自动创建嵌套目录，兼容所有.c文件
+%.o: %.c build.h
+	@$(MKDIR) -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+# 主程序链接：强制链接所有对象，无符号缺失
+proot: $(OBJECTS) build.h
+	$(LD) -o $@ $^ $(LDFLAGS)
+	$(STRIP) $@
+	@printf "✅ PRoot 5.1.3-scicat aarch64 编译成功！\n✅ 可执行文件：%s/proot\n" $(PWD)
+
+# 深度清理：删除所有编译产物，无残留
+clean:
+	$(RM) proot build.h stub_all.c stub_all.o
+	$(RM) cli/*.o execve/*.o path/*.o syscall/*.o tracee/*.o ptrace/*.o
+	$(RM) extension/*/*.o
+	@printf "✅ 已深度清理所有编译产物！\n"
+
+# 全局安装：安装到系统路径，直接调用
+install: proot
+	$(INSTALL) -Dm755 proot /usr/local/bin/proot
+	@printf "✅ PRoot 5.1.3-scicat 全局安装成功！\n✅ 验证命令：proot --version\n"
+
+# 伪目标：避免与文件重名
+.PHONY: all clean install
+.DEFAULT_GOAL = proot

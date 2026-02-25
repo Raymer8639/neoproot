@@ -21,6 +21,7 @@
  */
 
 #include <assert.h>
+#include <stddef.h>  // 补充头文件，规避size_t相关警告
 
 #include "syscall/sysnum.h"
 #include "tracee/tracee.h"
@@ -50,28 +51,29 @@ typedef struct {
  */
 static void get_sysnums(Abi abi, Sysnums *sysnums)
 {
+	assert(sysnums != NULL); // 空指针防护，避免野指针操作
 	switch (abi) {
 	case ABI_DEFAULT:
 		sysnums->table  = SYSNUMS_ABI1;
-		sysnums->length = sizeof(SYSNUMS_ABI1) / sizeof(Sysnum);
+		sysnums->length = (word_t)(sizeof(SYSNUMS_ABI1) / sizeof(Sysnum));
 		sysnums->offset = 0;
-		return;
+		break;
 #ifdef SYSNUMS_ABI2
 	case ABI_2:
 		sysnums->table  = SYSNUMS_ABI2;
-		sysnums->length = sizeof(SYSNUMS_ABI2) / sizeof(Sysnum);
+		sysnums->length = (word_t)(sizeof(SYSNUMS_ABI2) / sizeof(Sysnum));
 		sysnums->offset = 0;
-		return;
+		break;
 #endif
 #ifdef SYSNUMS_ABI3
 	case ABI_3:
 		sysnums->table  = SYSNUMS_ABI3;
-		sysnums->length = sizeof(SYSNUMS_ABI3) / sizeof(Sysnum);
+		sysnums->length = (word_t)(sizeof(SYSNUMS_ABI3) / sizeof(Sysnum));
 		sysnums->offset = 0x40000000; /* x32 */
-		return;
+		break;
 #endif
 	default:
-		assert(0);
+		assert(0 && "Unsupported ABI type");
 	}
 }
 
@@ -80,10 +82,11 @@ static void get_sysnums(Abi abi, Sysnums *sysnums)
  */
 static Sysnum translate_sysnum(Abi abi, word_t sysnum)
 {
-	Sysnums sysnums;
+	Sysnums sysnums = {0}; // 结构体初始化，规避未初始化变量警告
 	word_t index;
 
 	get_sysnums(abi, &sysnums);
+	assert(sysnums.table != NULL && sysnums.length > 0);
 
 	/* Sanity checks.  */
 	if (sysnum < sysnums.offset)
@@ -91,8 +94,8 @@ static Sysnum translate_sysnum(Abi abi, word_t sysnum)
 
 	index = sysnum - sysnums.offset;
 
-	/* Sanity checks.  */
-	if (index > sysnums.length)
+	/* Sanity checks: 用<=替代>，避免数组越界（index从0开始） */
+	if (index >= sysnums.length)
 		return PR_void;
 
 	return sysnums.table[index];
@@ -103,7 +106,7 @@ static Sysnum translate_sysnum(Abi abi, word_t sysnum)
  */
 word_t detranslate_sysnum(Abi abi, Sysnum sysnum)
 {
-	Sysnums sysnums;
+	Sysnums sysnums = {0}; // 结构体初始化，规避未初始化变量警告
 	size_t i;
 
 	/* Very special case.  */
@@ -111,12 +114,11 @@ word_t detranslate_sysnum(Abi abi, Sysnum sysnum)
 		return SYSCALL_AVOIDER;
 
 	get_sysnums(abi, &sysnums);
+	assert(sysnums.table != NULL && sysnums.length > 0);
 
-	for (i = 0; i < sysnums.length; i++) {
-		if (sysnums.table[i] != sysnum)
-			continue;
-
-		return i + sysnums.offset;
+	for (i = 0; i < (size_t)sysnums.length; i++) {
+		if (sysnums.table[i] == sysnum)
+			return (word_t)i + sysnums.offset;
 	}
 
 	return SYSCALL_AVOIDER;
@@ -127,6 +129,7 @@ word_t detranslate_sysnum(Abi abi, Sysnum sysnum)
  */
 Sysnum get_sysnum(const Tracee *tracee, RegVersion version)
 {
+	assert(tracee != NULL);
 	return translate_sysnum(get_abi(tracee), peek_reg(tracee, version, SYSARG_NUM));
 }
 
@@ -137,6 +140,7 @@ Sysnum get_sysnum(const Tracee *tracee, RegVersion version)
  */
 void set_sysnum(Tracee *tracee, Sysnum sysnum)
 {
+	assert(tracee != NULL);
 	poke_reg(tracee, SYSARG_NUM, detranslate_sysnum(get_abi(tracee), sysnum));
 }
 
@@ -151,11 +155,11 @@ const char *stringify_sysnum(Sysnum sysnum)
 	};
 	#undef SYSNUM
 
-	if (sysnum == 0)
+	static const char *empty_str = ""; // 全局静态，避免重复创建
+	if (sysnum == PR_void)
 		return "void";
-
-	if (sysnum >= PR_NB_SYSNUM)
-		return "";
+	if (sysnum >= PR_NB_SYSNUM || sysnum < 0)
+		return empty_str;
 
 	return names[sysnum];
 }

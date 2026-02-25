@@ -8,7 +8,6 @@
 #include <assert.h>    /* assert(3), */
 #include <time.h>      /* time(2), */
 #include <sys/types.h> /* gid_t */
-
 #include "extension/extension.h"
 #include "cli/note.h"
 #include "syscall/chain.h"
@@ -17,13 +16,13 @@
 #include "tracee/mem.h"
 #include "tracee/statx.h"
 #include "path/path.h"
+// 👇 引入JIT支持检测头文件
+#include "extension/jit_support/jit_support.h"
 
 /*
  * Based on PRoot, modified & maintained by scicat
  */
-
 static int handle_seccomp_event_common(Tracee *tracee);
-
 /**
  * Restart syscall that caused seccomp event
  * after changing it in tracee registers
@@ -34,16 +33,13 @@ static int handle_seccomp_event_common(Tracee *tracee);
  */
 void restart_syscall_after_seccomp(Tracee* tracee) {
 	word_t instr_pointer;
-
 	/* Enable restore regs at end of replaced call.
 	 * This also defers delivering of signals until restarted syscall finishes.  */
 	tracee->restore_original_regs_after_seccomp_event = true;
 	tracee->restart_how = PTRACE_SYSCALL;
-
 	/* Move the instruction pointer back to the original trap */
 	instr_pointer = peek_reg(tracee, CURRENT, INSTR_POINTER);
 	poke_reg(tracee, INSTR_POINTER, instr_pointer - get_systrap_size(tracee));
-
 	/* X86 usually uses orig_rax when selecting syscall,
 	 * but as this code is happening outside syscall handler
 	 * we need to copy orig_eax back to eax.  */
@@ -52,12 +48,10 @@ void restart_syscall_after_seccomp(Tracee* tracee) {
 #elif defined(ARCH_X86)
 	tracee->_regs[CURRENT].eax = tracee->_regs[CURRENT].orig_eax;
 #endif
-
 	/* Write registers. (Omiting special sysnum logic as we're not during syscall
 	 * execution, but we're queueing new syscall to be called) */
 	push_specific_regs(tracee, false);
 }
-
 /**
  * Set specified result (negative for errno) and do not restart syscall.
  */
@@ -66,7 +60,6 @@ void set_result_after_seccomp(Tracee *tracee, word_t result) {
 	poke_reg(tracee, SYSARG_RESULT, result);
 	push_specific_regs(tracee, false);
 }
-
 /**
  * Handle SIGSYS signal that was caused by system seccomp policy.
  *
@@ -75,24 +68,19 @@ void set_result_after_seccomp(Tracee *tracee, word_t result) {
 int handle_seccomp_event(Tracee* tracee)
 {
 	int ret;
-
 	/* Reset status so next SIGTRAP | 0x80 is
 	 * recognized as syscall entry.  */
 	tracee->status = 0;
-
 	/* Registers are never restored at this stage as they weren't saved.  */
 	tracee->restore_original_regs = false;
-
 	/* Fetch registers.  */
 	ret = fetch_regs(tracee);
 	if (ret != 0) {
 		VERBOSE(tracee, 1, "Couldn't fetch regs on seccomp SIGSYS");
 		return SIGSYS;
 	}
-
 	/* Save regs so they can be restored at end of replaced call.  */
 	save_current_regs(tracee, ORIGINAL_SECCOMP_REWRITE);
-
 	/* X86 uses orig_rax when selecting syscall,
 	 * however at this point we are after syscall has been rejected
 	 * and orig_rax was reset to -1.  */
@@ -101,30 +89,23 @@ int handle_seccomp_event(Tracee* tracee)
 #elif defined(ARCH_X86)
 	tracee->_regs[CURRENT].orig_eax = tracee->_regs[CURRENT].eax;
 #endif
-
 	print_current_regs(tracee, 3, "seccomp SIGSYS");
-
 	return handle_seccomp_event_common(tracee);
 }
-
 void fix_and_restart_enosys_syscall(Tracee* tracee)
 {
 	/* Reset tracee state so we're not handling syscall exit */
 	tracee->status = 0;
 	tracee->restore_original_regs = false;
-
 	/* Restore and save original registers */
 	memcpy(&tracee->_regs[CURRENT], &tracee->_regs[ORIGINAL], sizeof(tracee->_regs[CURRENT]));
 	save_current_regs(tracee, ORIGINAL_SECCOMP_REWRITE);
-
 	handle_seccomp_event_common(tracee);
 }
-
 static int handle_seccomp_event_common(Tracee *tracee)
 {
 	int ret = 0; // 初始化，修复未初始化警告
 	Sysnum sysnum = get_sysnum(tracee, CURRENT);
-
 	int status = notify_extensions(tracee, SIGSYS_OCC, 0, 0);
 	if (status < 0) {
 		VERBOSE(tracee, 4, "SIGSYS errored out when being handled by an extension");
@@ -141,6 +122,25 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		return 0;
 	}
 
+	// 👇 核心新增：JIT系统调用自动放行（仅设备支持JIT时生效）
+	if (is_jit_supported()) {
+		switch (sysnum) {
+			// JIT必需的核心系统调用，直接重启原调用，不做任何修改，内核直接执行
+			case PR_mmap:
+			case PR_mprotect:
+			case PR_mremap:
+			case PR_munmap:
+			case PR_personality:
+			case PR_process_vm_readv:
+			case PR_process_vm_writev:
+				restart_syscall_after_seccomp(tracee);
+				return 0;
+			default:
+				// 非JIT调用，继续走原有兼容逻辑
+				break;
+		}
+	}
+
 	switch (sysnum) {
 	case PR_open:
 		set_sysnum(tracee, PR_openat);
@@ -150,30 +150,25 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		poke_reg(tracee, SYSARG_1, AT_FDCWD);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_accept:
 		set_sysnum(tracee, PR_accept4);
 		poke_reg(tracee, SYSARG_4, 0);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_setgroups:
 	case PR_setgroups32:
 		set_result_after_seccomp(tracee, 0);
 		break;
-
 	case PR_getpgrp:
 		/* Query value with getpgid and set it as result.  */
 		set_result_after_seccomp(tracee, getpgid(tracee->pid));
 		break;
-
 	case PR_symlink:
 		set_sysnum(tracee, PR_symlinkat);
 		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
 		poke_reg(tracee, SYSARG_2, AT_FDCWD);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_link:
 		set_sysnum(tracee, PR_linkat);
 		poke_reg(tracee, SYSARG_4, peek_reg(tracee, CURRENT, SYSARG_2));
@@ -183,7 +178,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		poke_reg(tracee, SYSARG_5, 0);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_chmod:
 		set_sysnum(tracee, PR_fchmodat);
 		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
@@ -192,7 +186,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		poke_reg(tracee, SYSARG_4, 0);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_chown:
 	case PR_lchown:
 	case PR_chown32:
@@ -209,7 +202,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		}
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_unlink:
 	case PR_rmdir:
 		set_sysnum(tracee, PR_unlinkat);
@@ -218,27 +210,23 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		poke_reg(tracee, SYSARG_3, sysnum==PR_rmdir ? AT_REMOVEDIR : 0);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_send:
 		set_sysnum(tracee, PR_sendto);
 		poke_reg(tracee, SYSARG_5, 0);
 		poke_reg(tracee, SYSARG_6, 0);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_recv:
 		set_sysnum(tracee, PR_recvfrom);
 		poke_reg(tracee, SYSARG_5, 0);
 		poke_reg(tracee, SYSARG_6, 0);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_waitpid:
 		set_sysnum(tracee, PR_wait4);
 		poke_reg(tracee, SYSARG_4, 0);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_statfs:
 	{
 		int size;
@@ -263,7 +251,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 			set_result_after_seccomp(tracee, -errno);
 			break;
 		}
-
 		/* Fake /dev/shm being tmpfs, see statfs handler in syscall/exit.c */
 		if (translate_path(tracee, devshm_path, AT_FDCWD, "/dev/shm", true) >= 0) {
 			Comparison comparison = compare_paths(devshm_path, path);
@@ -271,7 +258,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 				my_statfs64.f_type = 0x01021994;
 			}
 		}
-
 		if ((my_statfs64.f_blocks | my_statfs64.f_bfree | my_statfs64.f_bavail |
      		     my_statfs64.f_bsize | my_statfs64.f_frsize | my_statfs64.f_files | 
 		     my_statfs64.f_ffree) & 0xffffffff00000000ULL) { 
@@ -291,11 +277,9 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		my_statfs.f_flags = my_statfs64.f_flags;
 		memset(my_statfs.f_spare, 0, sizeof(my_statfs.f_spare));
                 write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), &my_statfs, sizeof(struct compat_statfs));
-
 		set_result_after_seccomp(tracee, 0);
 		break;
 	}
-
 	case PR_utimes:
 	{
 		/* int utimes(const char *filename, const struct timeval times[2]);
@@ -304,7 +288,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		 * int utimensat(int dirfd, const char *pathname, const struct timespec times[2], int flags);  */
 		struct timeval times[2];
 		struct timespec timens[2];
-
 		set_sysnum(tracee, PR_utimensat);
 		if (peek_reg(tracee, CURRENT, SYSARG_2) != 0) {
 			ret = read_data(tracee, times, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(times));
@@ -329,7 +312,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		restart_syscall_after_seccomp(tracee);
 		break;
 	}
-
 	case PR_utime:
 	{
 		/* int utime(const char *filename, const struct utimbuf *times);
@@ -338,7 +320,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		 * int utimensat(int dirfd, const char *pathname, const struct timespec times[2], int flags);  */
 		struct utimbuf times;
 		struct timespec timens[2];
-
 		set_sysnum(tracee, PR_utimensat);
 		if (peek_reg(tracee, CURRENT, SYSARG_2) != 0) {
 			ret = read_data(tracee, &times, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(times));
@@ -363,7 +344,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		restart_syscall_after_seccomp(tracee);
 		break;
 	}
-
 #if defined(ARCH_X86) || defined(ARCH_X86_64)
 	case PR_sendmmsg:
 	{
@@ -387,7 +367,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		break;
 	}
 #endif
-
 	case PR_stat:
 	case PR_lstat:
 		set_sysnum(tracee, PR_newfstatat);
@@ -397,19 +376,16 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		poke_reg(tracee, SYSARG_1, AT_FDCWD);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_pipe:
 		set_sysnum(tracee, PR_pipe2);
 		poke_reg(tracee, SYSARG_2, 0);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_dup2:
 		set_sysnum(tracee, PR_dup3);
 		poke_reg(tracee, SYSARG_3, 0);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_access:
 		set_sysnum(tracee, PR_faccessat);
 		poke_reg(tracee, SYSARG_4, 0);
@@ -418,7 +394,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		poke_reg(tracee, SYSARG_1, AT_FDCWD);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_mkdir:
 		set_sysnum(tracee, PR_mkdirat);
 		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
@@ -426,7 +401,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		poke_reg(tracee, SYSARG_1, AT_FDCWD);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_rename:
 		set_sysnum(tracee, PR_renameat);
 		poke_reg(tracee, SYSARG_4, peek_reg(tracee, CURRENT, SYSARG_2));
@@ -435,7 +409,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		poke_reg(tracee, SYSARG_1, AT_FDCWD);
 		restart_syscall_after_seccomp(tracee);
 		break;
-
 	case PR_select:
 	{
 		// TODO: This doesn't update timeout with time spent inside select(2)
@@ -468,7 +441,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		restart_syscall_after_seccomp(tracee);
 		break;
 	}
-
 	case PR_poll:
 	{
 		int ms_arg = (int) peek_reg(tracee, CURRENT, SYSARG_3);
@@ -491,7 +463,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		restart_syscall_after_seccomp(tracee);
 		break;
 	}
-
 	case PR_epoll_wait:
 	{
 		set_sysnum(tracee, PR_epoll_pwait);
@@ -500,7 +471,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		restart_syscall_after_seccomp(tracee);
 		break;
 	}
-
 	case PR_time:
 	{
 		time_t t = time(NULL);
@@ -512,13 +482,11 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		set_result_after_seccomp(tracee, errno ? -EFAULT : t);
 		break;
 	}
-
 	case PR_statx:
 	{
 		set_result_after_seccomp(tracee, handle_statx_syscall(tracee, true));
 		break;
 	}
-
 	case PR_ftruncate:
 	{
 		if (detranslate_sysnum(get_abi(tracee), PR_ftruncate64) == SYSCALL_AVOIDER) {
@@ -532,7 +500,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		restart_syscall_after_seccomp(tracee);
 		break;
 	}
-
 	case PR_setresuid:
 	case PR_setresgid:
 	{
@@ -558,12 +525,10 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		set_result_after_seccomp(tracee, ret);
 		break;
 	}
-
 	case PR_set_robust_list:
 	default:
 		/* Set errno to -ENOSYS */
 		set_result_after_seccomp(tracee, -ENOSYS);
 	}
-
 	return 0;
 }

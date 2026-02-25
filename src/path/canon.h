@@ -28,6 +28,11 @@
 
 #include "tracee/tracee.h"
 
+// AI智能学习缓存开关 & 阈值配置
+#define CANON_AI_LEARN        1    // 开启AI学习功能
+#define CANON_AI_HOT_THRESH   8    // 命中≥8次标记为热点路径
+#define CANON_AI_MAX_HIT_CNT  255  // 命中次数上限，防止溢出
+
 extern int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 			char guest_path[PATH_MAX], unsigned int nb_recursion);
 

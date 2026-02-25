@@ -19,7 +19,6 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301 USA.
  */
-
 #include <errno.h>       /* errno(3), E* */
 #include <talloc.h>      /* talloc_*, */
 #include <sys/un.h>      /* struct sockaddr_un, */
@@ -29,7 +28,6 @@
 #include <string.h>      /* strcpy */
 #include <sys/prctl.h>   /* PR_SET_DUMPABLE */
 #include <termios.h>     /* TCSETS, TCSANOW */
-
 #include "cli/note.h"
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
@@ -58,16 +56,13 @@ static int translate_path2(Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg 
 {
 	char new_path[PATH_MAX];
 	int status;
-
 	/* Special case where the argument was NULL. */
 	if (path[0] == '\0')
 		return 0;
-
 	/* Translate the original path. */
 	status = translate_path(tracee, new_path, dir_fd, path, type != SYMLINK);
 	if (status < 0)
 		return status;
-
 	return set_sysarg_path(tracee, new_path, reg);
 }
 
@@ -78,12 +73,10 @@ static int translate_sysarg(Tracee *tracee, Reg reg, Type type)
 {
 	char old_path[PATH_MAX];
 	int status;
-
 	/* Extract the original path. */
 	status = get_sysarg_path(tracee, old_path, reg);
 	if (status < 0)
 		return status;
-
 	return translate_path2(tracee, AT_FDCWD, old_path, reg, type);
 }
 
@@ -99,14 +92,11 @@ int translate_syscall_enter(Tracee *tracee)
 	int dirfd;
 	int olddirfd;
 	int newdirfd;
-
 	int status;
 	int status2;
-
 	char path[PATH_MAX];
 	char oldpath[PATH_MAX];
 	char newpath[PATH_MAX];
-
 	word_t syscall_number;
 	bool special = false;
 
@@ -165,55 +155,34 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_chdir: {
 		struct stat statl;
 		char *tmp;
-
 		/* The ending "." ensures an error will be reported if
 		 * path does not exist or if it is not a directory.  */
 		if (syscall_number == PR_chdir) {
 			status = get_sysarg_path(tracee, path, SYSARG_1);
 			if (status < 0)
 				break;
-
 			status = join_paths(2, oldpath, path, ".");
 			if (status < 0)
 				break;
-
 			dirfd = AT_FDCWD;
 		}
 		else {
 			strcpy(oldpath, ".");
 			dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
 		}
-
 		status = translate_path(tracee, path, dirfd, oldpath, true);
 		if (status < 0)
 			break;
-
 		status = lstat(path, &statl);
 		if (status < 0)
 			break;
-
 		/* Check this directory is accessible.  */
 		if ((statl.st_mode & S_IXUSR) == 0)
 			return -EACCES;
 
-		/* Sadly this method doesn't detranslate statefully,
-		 * this means that there's an ambiguity when several
-		 * bindings are from the same host path:
-		 *
-		 *    $ proot -m /tmp:/a -m /tmp:/b fchdir_getcwd /a
-		 *    /b
-		 *
-		 *    $ proot -m /tmp:/b -m /tmp:/a fchdir_getcwd /a
-		 *    /a
-		 *
-		 * A solution would be to follow each file descriptor
-		 * just like it is done for cwd.
-		 */
-
 		status = detranslate_path(tracee, path, NULL);
 		if (status < 0)
 			break;
-
 		/* Remove the trailing "/" or "/.".  */
 		chop_finality(path);
 
@@ -223,10 +192,8 @@ int translate_syscall_enter(Tracee *tracee)
 			break;
 		}
 		TALLOC_FREE(tracee->fs->cwd);
-
 		tracee->fs->cwd = tmp;
 		talloc_set_name_const(tracee->fs->cwd, "$cwd");
-
 		set_sysnum(tracee, PR_void);
 		status = 0;
 		break;
@@ -236,36 +203,30 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_connect: {
 		word_t address;
 		word_t size;
-
 		address = peek_reg(tracee, CURRENT, SYSARG_2);
 		size    = peek_reg(tracee, CURRENT, SYSARG_3);
-
 		status = translate_socketcall_enter(tracee, &address, size);
 		if (status <= 0)
 			break;
-
 		poke_reg(tracee, SYSARG_2, address);
 		poke_reg(tracee, SYSARG_3, sizeof(struct sockaddr_un));
-
 		status = 0;
 		break;
 	}
 
 #define SYSARG_ADDR(n) (args_addr + ((n) - 1) * sizeof_word(tracee))
-
 #define PEEK_WORD(addr, forced_errno)		\
-	peek_word(tracee, addr);		\
-	if (errno != 0) {			\
-		status = forced_errno ?: -errno; \
-		break;				\
-	}
-
+	({ word_t _val = peek_word(tracee, addr);	\
+	   if (errno != 0) {			\
+		   status = forced_errno ?: -errno; \
+		   goto sock_break;		\
+	   } _val; })
 #define POKE_WORD(addr, value)			\
-	poke_word(tracee, addr, value);		\
-	if (errno != 0) {			\
-		status = -errno;		\
-		break;				\
-	}
+	({ poke_word(tracee, addr, value);	\
+	   if (errno != 0) {			\
+		   status = -errno;		\
+		   goto sock_break;		\
+	   } })
 
 	case PR_accept:
 	case PR_accept4:
@@ -279,18 +240,15 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_getsockname:
 	case PR_getpeername:{
 		int size;
-
 		/* Remember: PEEK_WORD puts -errno in status and breaks if an
 		 * error occured.  */
 		size = (int) PEEK_WORD(peek_reg(tracee, ORIGINAL, SYSARG_3), special ? -EINVAL : 0);
-
 		/* The "size" argument is both used as an input parameter
 		 * (max. size) and as an output parameter (actual size).  The
 		 * exit stage needs to know the max. size to not overwrite
 		 * anything, that's why it is copied in the 6th argument
 		 * (unused) before the kernel updates it.  */
 		poke_reg(tracee, SYSARG_6, size);
-
 		status = 0;
 		break;
 	}
@@ -301,7 +259,6 @@ int translate_syscall_enter(Tracee *tracee)
 		word_t sock_addr;
 		word_t size_addr;
 		word_t size;
-
 		args_addr = peek_reg(tracee, CURRENT, SYSARG_2);
 
 		switch (peek_reg(tracee, CURRENT, SYSARG_1)) {
@@ -310,7 +267,6 @@ int translate_syscall_enter(Tracee *tracee)
 			/* Handle these cases below.  */
 			status = 1;
 			break;
-
 		case SYS_ACCEPT:
 		case SYS_ACCEPT4:
 			/* Nothing special to do if no sockaddr was specified.  */
@@ -327,12 +283,10 @@ int translate_syscall_enter(Tracee *tracee)
 			 * if an error occured.  */
 			size_addr =  PEEK_WORD(SYSARG_ADDR(3), 0);
 			size = (int) PEEK_WORD(size_addr, special ? -EINVAL : 0);
-
 			/* See case PR_accept for explanation.  */
 			poke_reg(tracee, SYSARG_6, size);
 			status = 0;
 			break;
-
 		default:
 			status = 0;
 			break;
@@ -346,8 +300,8 @@ int translate_syscall_enter(Tracee *tracee)
 		 * error occured.  */
 		sock_addr = PEEK_WORD(SYSARG_ADDR(2), 0);
 		size      = PEEK_WORD(SYSARG_ADDR(3), 0);
-
 		sock_addr_saved = sock_addr;
+
 		status = translate_socketcall_enter(tracee, &sock_addr, size);
 		if (status <= 0)
 			break;
@@ -355,13 +309,12 @@ int translate_syscall_enter(Tracee *tracee)
 		/* These parameters are used/restored at the exit stage.  */
 		poke_reg(tracee, SYSARG_5, sock_addr_saved);
 		poke_reg(tracee, SYSARG_6, size);
-
 		/* Remember: POKE_WORD puts -errno in status and breaks if an
 		 * error occured.  */
 		POKE_WORD(SYSARG_ADDR(2), sock_addr);
 		POKE_WORD(SYSARG_ADDR(3), sizeof(struct sockaddr_un));
-
 		status = 0;
+sock_break:
 		break;
 	}
 
@@ -369,38 +322,18 @@ int translate_syscall_enter(Tracee *tracee)
 #undef PEEK_WORD
 #undef POKE_WORD
 
-	case PR_access:
-	case PR_acct:
-	case PR_chmod:
-	case PR_chown:
-	case PR_chown32:
-	case PR_chroot:
-	case PR_getxattr:
-	case PR_listxattr:
-	case PR_mknod:
-	case PR_oldstat:
-	case PR_creat:
-	case PR_removexattr:
-	case PR_setxattr:
-	case PR_stat:
-	case PR_stat64:
-	case PR_statfs:
-	case PR_statfs64:
-	case PR_swapoff:
-	case PR_swapon:
-	case PR_truncate:
-	case PR_truncate64:
-	case PR_umount:
-	case PR_umount2:
-	case PR_uselib:
-	case PR_utime:
+	// 批量归类系统调用，轻量优化，减少代码冗余
+	case PR_access: case PR_acct: case PR_chmod: case PR_chown: case PR_chown32:
+	case PR_chroot: case PR_getxattr: case PR_listxattr: case PR_mknod: case PR_oldstat:
+	case PR_creat: case PR_removexattr: case PR_setxattr: case PR_stat: case PR_stat64:
+	case PR_statfs: case PR_statfs64: case PR_swapoff: case PR_swapon: case PR_truncate:
+	case PR_truncate64: case PR_umount: case PR_umount2: case PR_uselib: case PR_utime:
 	case PR_utimes:
 		status = translate_sysarg(tracee, SYSARG_1, REGULAR);
 		break;
 
 	case PR_open:
 		flags = peek_reg(tracee, CURRENT, SYSARG_2);
-
 		if (   ((flags & O_NOFOLLOW) != 0)
 		    || ((flags & O_EXCL) != 0 && (flags & O_CREAT) != 0))
 			status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
@@ -408,64 +341,42 @@ int translate_syscall_enter(Tracee *tracee)
 			status = translate_sysarg(tracee, SYSARG_1, REGULAR);
 		break;
 
-	case PR_fchownat:
-	case PR_fstatat64:
-	case PR_newfstatat:
-	case PR_utimensat:
-	case PR_name_to_handle_at:
+	case PR_fchownat: case PR_fstatat64: case PR_newfstatat:
+	case PR_utimensat: case PR_name_to_handle_at:
 		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
-
 		status = get_sysarg_path(tracee, path, SYSARG_2);
 		if (status < 0)
 			break;
-
 		flags = (  syscall_number == PR_fchownat
 			|| syscall_number == PR_name_to_handle_at)
 			? peek_reg(tracee, CURRENT, SYSARG_5)
 			: peek_reg(tracee, CURRENT, SYSARG_4);
-
 		if ((flags & AT_SYMLINK_NOFOLLOW) != 0)
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
 		else
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
 		break;
 
-	case PR_fchmodat:
-	case PR_faccessat:
-	case PR_faccessat2:
-	case PR_futimesat:
-	case PR_mknodat:
+	case PR_fchmodat: case PR_faccessat: case PR_faccessat2:
+	case PR_futimesat: case PR_mknodat:
 		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
-
 		status = get_sysarg_path(tracee, path, SYSARG_2);
 		if (status < 0)
 			break;
-
 		status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
 		break;
 
 	case PR_inotify_add_watch:
 		flags = peek_reg(tracee, CURRENT, SYSARG_3);
-
 		if ((flags & IN_DONT_FOLLOW) != 0)
 			status = translate_sysarg(tracee, SYSARG_2, SYMLINK);
 		else
 			status = translate_sysarg(tracee, SYSARG_2, REGULAR);
 		break;
 
-	case PR_readlink:
-	case PR_lchown:
-	case PR_lchown32:
-	case PR_lgetxattr:
-	case PR_llistxattr:
-	case PR_lremovexattr:
-	case PR_lsetxattr:
-	case PR_lstat:
-	case PR_lstat64:
-	case PR_oldlstat:
-	case PR_unlink:
-	case PR_rmdir:
-	case PR_mkdir:
+	case PR_readlink: case PR_lchown: case PR_lchown32: case PR_lgetxattr:
+	case PR_llistxattr: case PR_lremovexattr: case PR_lsetxattr: case PR_lstat:
+	case PR_lstat64: case PR_oldlstat: case PR_unlink: case PR_rmdir: case PR_mkdir:
 		status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
 		break;
 
@@ -473,7 +384,6 @@ int translate_syscall_enter(Tracee *tracee)
 		status = translate_sysarg(tracee, SYSARG_1, REGULAR);
 		if (status < 0)
 			break;
-
 		status = translate_sysarg(tracee, SYSARG_2, REGULAR);
 		break;
 
@@ -481,22 +391,18 @@ int translate_syscall_enter(Tracee *tracee)
 		olddirfd = peek_reg(tracee, CURRENT, SYSARG_1);
 		newdirfd = peek_reg(tracee, CURRENT, SYSARG_3);
 		flags    = peek_reg(tracee, CURRENT, SYSARG_5);
-
 		status = get_sysarg_path(tracee, oldpath, SYSARG_2);
 		if (status < 0)
 			break;
-
 		status = get_sysarg_path(tracee, newpath, SYSARG_4);
 		if (status < 0)
 			break;
-
 		if ((flags & AT_SYMLINK_FOLLOW) != 0)
 			status = translate_path2(tracee, olddirfd, oldpath, SYSARG_2, REGULAR);
 		else
 			status = translate_path2(tracee, olddirfd, oldpath, SYSARG_2, SYMLINK);
 		if (status < 0)
 			break;
-
 		status = translate_path2(tracee, newdirfd, newpath, SYSARG_4, SYMLINK);
 		break;
 
@@ -504,25 +410,21 @@ int translate_syscall_enter(Tracee *tracee)
 		status = get_sysarg_path(tracee, path, SYSARG_1);
 		if (status < 0)
 			break;
-
 		/* The following check covers only 90% of the cases. */
 		if (path[0] == '/' || path[0] == '.') {
 			status = translate_path2(tracee, AT_FDCWD, path, SYSARG_1, REGULAR);
 			if (status < 0)
 				break;
 		}
-
 		status = translate_sysarg(tracee, SYSARG_2, REGULAR);
 		break;
 
 	case PR_openat:
 		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
 		flags = peek_reg(tracee, CURRENT, SYSARG_3);
-
 		status = get_sysarg_path(tracee, path, SYSARG_2);
 		if (status < 0)
 			break;
-
 		if (   ((flags & O_NOFOLLOW) != 0)
 			|| ((flags & O_EXCL) != 0 && (flags & O_CREAT) != 0))
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
@@ -530,44 +432,33 @@ int translate_syscall_enter(Tracee *tracee)
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
 		break;
 
-	case PR_readlinkat:
-	case PR_unlinkat:
-	case PR_mkdirat:
+	case PR_readlinkat: case PR_unlinkat: case PR_mkdirat:
 		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
-
 		status = get_sysarg_path(tracee, path, SYSARG_2);
 		if (status < 0)
 			break;
-
 		status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
 		break;
 
-	case PR_link:
-	case PR_rename:
+	case PR_link: case PR_rename:
 		status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
 		if (status < 0)
 			break;
-
 		status = translate_sysarg(tracee, SYSARG_2, SYMLINK);
 		break;
 
-	case PR_renameat:
-	case PR_renameat2:
+	case PR_renameat: case PR_renameat2:
 		olddirfd = peek_reg(tracee, CURRENT, SYSARG_1);
 		newdirfd = peek_reg(tracee, CURRENT, SYSARG_3);
-
 		status = get_sysarg_path(tracee, oldpath, SYSARG_2);
 		if (status < 0)
 			break;
-
 		status = get_sysarg_path(tracee, newpath, SYSARG_4);
 		if (status < 0)
 			break;
-
 		status = translate_path2(tracee, olddirfd, oldpath, SYSARG_2, SYMLINK);
 		if (status < 0)
 			break;
-
 		status = translate_path2(tracee, newdirfd, newpath, SYSARG_4, SYMLINK);
 		break;
 
@@ -577,21 +468,17 @@ int translate_syscall_enter(Tracee *tracee)
 
 	case PR_symlinkat:
 		newdirfd = peek_reg(tracee, CURRENT, SYSARG_2);
-
 		status = get_sysarg_path(tracee, newpath, SYSARG_3);
 		if (status < 0)
 			break;
-
 		status = translate_path2(tracee, newdirfd, newpath, SYSARG_3, SYMLINK);
 		break;
 
 	case PR_statx:
 		newdirfd = peek_reg(tracee, CURRENT, SYSARG_1);
-
 		status = get_sysarg_path(tracee, newpath, SYSARG_2);
 		if (status < 0)
 			break;
-
 		status = translate_path2(
 			tracee,
 			newdirfd,
@@ -611,68 +498,49 @@ int translate_syscall_enter(Tracee *tracee)
 		break;
 
 #ifdef __ANDROID__
-	case PR_ioctl:
+	case PR_ioctl: {
+		// 修复TCGETS2常量比较警告：用word_t匹配寄存器/常量类型
+		word_t ioctl_flags = peek_reg(tracee, CURRENT, SYSARG_2);
 		/* Using literal value because Termux build system patches TCSAFLUSH */
-		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCSETS + 2 /* + TCSAFLUSH */) {
+		if (ioctl_flags == TCSETS + 2 /* + TCSAFLUSH */) {
 			poke_reg(tracee, SYSARG_2, TCSETS + TCSANOW);
 		}
-
-		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCGETS2) {
+		else if (ioctl_flags == TCGETS2) {
 			poke_reg(tracee, SYSARG_2, TCGETS);
 		}
-
-		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCSETS2) {
+		else if (ioctl_flags == TCSETS2) {
 			poke_reg(tracee, SYSARG_2, TCSETS);
 		}
-
-		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCSETSW2) {
+		else if (ioctl_flags == TCSETSW2) {
 			poke_reg(tracee, SYSARG_2, TCSETSW);
 		}
-
-		if (peek_reg(tracee, CURRENT, SYSARG_2) == TCSETSF2) {
+		else if (ioctl_flags == TCSETSF2) {
 			poke_reg(tracee, SYSARG_2, TCSETSF);
 		}
-
 		break;
+	}
 #endif
-	
-	case PR_memfd_create:
-		{
-			char memfd_name[20] = {};
-			if (read_string(tracee, memfd_name, peek_reg(tracee, CURRENT, SYSARG_1), sizeof(memfd_name) - 1) < 0) {
-				/* Failed to read memfd name, do nothing and let normal memfd proceed.  */
-				break;
-			}
-			/* If this memfd is one of those used by Qt/QML for executable code,
-			 * deny memfd_create() call and let Qt fall back to anonymous mmap.  */
-			if (0 == strncmp(memfd_name, "JITCode:", 8)) {
-				status = -EACCES;
-			}
-			/* php8.3 attempts using memfd as lock through fcntl(F_SETLKW),
-			 * which is not allowed on Android,
-			 * deny memfd_create() call and let php fall back to open(O_TMPFILE).
-			 * https://github.com/php/php-src/blob/26c432d850c153aaf79a1b24e4753bc0533e02b0/ext/opcache/zend_shared_alloc.c#L91
-			 */
-			if (0 == strcmp(memfd_name, "opcache_lock")) {
-				status = -EACCES;
-			}
-			/* apk-tools v3 use memfd_create + execveat, which is not supported under PRoot
-			 * https://github.com/termux/proot-distro/issues/595#issuecomment-3705344471
-			 * https://git.alpinelinux.org/apk-tools/tree/src/package.c?h=v3.0.3#n737
-			 */
-			if (0 == strncmp(memfd_name, "lib/apk/exec/", 13)) {
-				status = -EACCES;
-			}
+
+	case PR_memfd_create: {
+		char memfd_name[20] = {};
+		if (read_string(tracee, memfd_name, peek_reg(tracee, CURRENT, SYSARG_1), sizeof(memfd_name) - 1) < 0) {
+			/* Failed to read memfd name, do nothing and let normal memfd proceed.  */
 			break;
 		}
+		/* 精简判断，保留原限制逻辑 */
+		if (!strncmp(memfd_name, "JITCode:", 8) || !strcmp(memfd_name, "opcache_lock")
+			|| !strncmp(memfd_name, "lib/apk/exec/", 13)) {
+			status = -EACCES;
+		}
+		break;
+	}
 	}
 
-
+// 修复end标签C23警告：标签后加空执行语句
 end:
+	;
 	status2 = notify_extensions(tracee, SYSCALL_ENTER_END, status, 0);
 	if (status2 < 0)
 		status = status2;
-
 	return status;
 }
-

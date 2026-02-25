@@ -28,8 +28,10 @@
 #include "extension/extension.h"
 #include "cli/note.h"
 #include "build.h"
-
 #include "compat.h"
+
+// 引入JIT缓存头文件
+#include "extension/jit_support/jit_cache.h"
 
 /**
  * Remove an @extension from its tracee's list, then send it the
@@ -138,8 +140,7 @@ void inherit_extensions(Tracee *child, Tracee *parent, word_t clone_flags)
 	assert(child->extensions == NULL || clone_flags == CLONE_RECONF);
 
 	LIST_FOREACH(parent_extension, parent->extensions, link) {
-		/* Ask the parent how this extension is
-		 * inheritable.  */
+		/* Ask the parent how this extension is inheritable.  */
 		status = parent_extension->callback(parent_extension, INHERIT_PARENT,
 						(intptr_t)child, clone_flags);
 
@@ -166,4 +167,13 @@ void inherit_extensions(Tracee *child, Tracee *parent, word_t clone_flags)
 						(intptr_t)parent_extension, clone_flags);
 		}
 	}
+}
+
+// 全局扩展初始化：仅初始化JIT缓存，无扩展框架依赖
+void extension_init_all(Tracee *tracee)
+{
+    // 初始化JIT机器码缓存
+    jit_cache_init();
+    // 输出日志，确认JIT功能已加载
+    note(tracee, INFO, INTERNAL, "JIT cache initialized");
 }

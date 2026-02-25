@@ -19,12 +19,9 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301 USA.
  */
-
 #include "build.h"
 #include "arch.h"
-
 #if defined(HAVE_SECCOMP_FILTER)
-
 #include <sys/prctl.h>     /* prctl(2), PR_* */
 #include <linux/filter.h>  /* struct sock_*, */
 #include <linux/seccomp.h> /* SECCOMP_MODE_FILTER, */
@@ -38,19 +35,18 @@
 #include <stddef.h>        /* offsetof(3), */
 #include <stdint.h>        /* uint*_t, UINT*_MAX, */
 #include <assert.h>        /* assert(3), */
-
 #include "syscall/seccomp.h"
 #include "tracee/tracee.h"
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "extension/extension.h"
 #include "cli/note.h"
-
 #include "compat.h"
 #include "attribute.h"
+// 👇 引入JIT支持检测头文件
+#include "extension/jit_support/jit_support.h"
 
 #define DEBUG_FILTER(...) /* fprintf(stderr, __VA_ARGS__) */
-
 /**
  * Allocate an empty @program->filter.  This function returns -errno
  * if an error occurred, otherwise 0.
@@ -60,11 +56,9 @@ static int new_program_filter(struct sock_fprog *program)
 	program->filter = talloc_array(NULL, struct sock_filter, 0);
 	if (program->filter == NULL)
 		return -ENOMEM;
-
 	program->len = 0;
 	return 0;
 }
-
 /**
  * Append to @program->filter the given @statements (@nb_statements
  * items).  This function returns -errno if an error occurred,
@@ -76,19 +70,15 @@ static int add_statements(struct sock_fprog *program, size_t nb_statements,
 	size_t length;
 	void *tmp;
 	size_t i;
-
 	length = talloc_array_length(program->filter);
 	tmp  = talloc_realloc(NULL, program->filter, struct sock_filter, length + nb_statements);
 	if (tmp == NULL)
 		return -ENOMEM;
 	program->filter = tmp;
-
 	for (i = 0; i < nb_statements; i++, length++)
 		memcpy(&program->filter[length], &statements[i], sizeof(struct sock_filter));
-
 	return 0;
 }
-
 /**
  * Append to @program->filter the statements required to notify PRoot
  * about the given @syscall made by a tracee, with the given @flag.
@@ -97,30 +87,23 @@ static int add_statements(struct sock_fprog *program, size_t nb_statements,
 static int add_trace_syscall(struct sock_fprog *program, word_t syscall, int flag)
 {
 	int status;
-
 	/* Sanity check.  */
 	if (syscall > UINT32_MAX)
 		return -ERANGE;
-
 	#define LENGTH_TRACE_SYSCALL 2
 	struct sock_filter statements[LENGTH_TRACE_SYSCALL] = {
 		/* Compare the accumulator with the expected syscall:
 		 * skip the next statement if not equal.  */
 		BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, syscall, 0, 1),
-
 		/* Notify the tracer.  */
 		BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_TRACE + flag)
 	};
-
 	DEBUG_FILTER("FILTER:     trace if syscall == %ld\n", syscall);
-
 	status = add_statements(program, LENGTH_TRACE_SYSCALL, statements);
 	if (status < 0)
 		return status;
-
 	return 0;
 }
-
 /**
  * Append to @program->filter the statements that allow anything (if
  * unfiltered).  Note that @nb_traced_syscalls is used to make a
@@ -130,26 +113,20 @@ static int add_trace_syscall(struct sock_fprog *program, word_t syscall, int fla
 static int end_arch_section(struct sock_fprog *program, size_t nb_traced_syscalls)
 {
 	int status;
-
 	#define LENGTH_END_SECTION 1
 	struct sock_filter statements[LENGTH_END_SECTION] = {
 		BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW)
 	};
-
 	DEBUG_FILTER("FILTER:     allow\n");
-
 	status = add_statements(program, LENGTH_END_SECTION, statements);
 	if (status < 0)
 		return status;
-
 	/* Sanity check, see start_arch_section().  */
 	if (   talloc_array_length(program->filter) - program->len
 	    != LENGTH_END_SECTION + nb_traced_syscalls * LENGTH_TRACE_SYSCALL)
 		return -ERANGE;
-
 	return 0;
 }
-
 /**
  * Append to @program->filter the statements that check the current
  * @architecture.  Note that @nb_traced_syscalls is used to make a
@@ -163,46 +140,36 @@ static int start_arch_section(struct sock_fprog *program, uint32_t arch, size_t 
 	const size_t section_length = LENGTH_END_SECTION +
 					nb_traced_syscalls * LENGTH_TRACE_SYSCALL;
 	int status;
-
 	/* Sanity checks.  */
 	if (   arch_offset    > UINT32_MAX
 	    || syscall_offset > UINT32_MAX
 	    || section_length > UINT32_MAX - 1)
 		return -ERANGE;
-
 	#define LENGTH_START_SECTION 4
 	struct sock_filter statements[LENGTH_START_SECTION] = {
 		/* Load the current architecture into the
 		 * accumulator.  */
 		BPF_STMT(BPF_LD + BPF_W + BPF_ABS, arch_offset),
-
 		/* Compare the accumulator with the expected
 		 * architecture: skip the following statement if
 		 * equal.  */
 		BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, arch, 1, 0),
-
 		/* This is not the expected architecture, so jump
 		 * unconditionally to the end of this section.  */
 		BPF_STMT(BPF_JMP + BPF_JA + BPF_K, section_length + 1),
-
 		/* This is the expected architecture, so load the
 		 * current syscall into the accumulator.  */
 		BPF_STMT(BPF_LD + BPF_W + BPF_ABS, syscall_offset)
 	};
-
 	DEBUG_FILTER("FILTER: if arch == %ld, up to %zdth statement\n",
 		arch, nb_traced_syscalls);
-
 	status = add_statements(program, LENGTH_START_SECTION, statements);
 	if (status < 0)
 		return status;
-
 	/* See the sanity check in end_arch_section().  */
 	program->len = talloc_array_length(program->filter);
-
 	return 0;
 }
-
 /**
  * Append to @program->filter the statements that forbid anything (if
  * unfiltered) and update @program->len.  This function returns -errno
@@ -211,23 +178,17 @@ static int start_arch_section(struct sock_fprog *program, uint32_t arch, size_t 
 static int finalize_program_filter(struct sock_fprog *program)
 {
 	int status;
-
 	#define LENGTH_FINALIZE 1
 	struct sock_filter statements[LENGTH_FINALIZE] = {
 		BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_KILL)
 	};
-
 	DEBUG_FILTER("FILTER: kill\n");
-
 	status = add_statements(program, LENGTH_FINALIZE, statements);
 	if (status < 0)
 		return status;
-
 	program->len = talloc_array_length(program->filter);
-
 	return 0;
 }
-
 /**
  * Free @program->filter and set @program->len to 0.
  */
@@ -236,7 +197,35 @@ static void free_program_filter(struct sock_fprog *program)
 	TALLOC_FREE(program->filter);
 	program->len = 0;
 }
+/**
+ * 过滤JIT核心系统调用，使其不被PRoot追踪（直接放行）
+ */
+static void filter_jit_syscalls(FilteredSysnum **sysnums)
+{
+    if (!is_jit_supported() || sysnums == NULL || *sysnums == NULL)
+        return;
 
+    size_t i, j;
+    // 需要放行的JIT核心系统调用
+    const word_t jit_syscalls[] = {
+        PR_mmap, PR_mprotect, PR_mremap, PR_munmap,
+        PR_personality, PR_process_vm_readv, PR_process_vm_writev,
+        PR_void // 结束符
+    };
+
+    // 遍历JIT系统调用，从过滤列表中移除
+    for (i = 0; jit_syscalls[i] != PR_void; i++) {
+        for (j = 0; (*sysnums)[j].value != PR_void; j++) {
+            if ((*sysnums)[j].value == jit_syscalls[i]) {
+                // 移除该系统调用：后续元素前移，末尾补结束符
+                memmove(&(*sysnums)[j], &(*sysnums)[j+1], 
+                        sizeof(FilteredSysnum) * (talloc_array_length(*sysnums) - j - 1));
+                (*sysnums)[talloc_array_length(*sysnums)-1].value = PR_void;
+                break;
+            }
+        }
+    }
+}
 /**
  * Convert the given @sysnums into BPF filters according to the
  * following pseudo-code, then enabled them for the given @tracee and
@@ -254,22 +243,17 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 {
 	SeccompArch seccomp_archs[] = SECCOMP_ARCHS;
 	size_t nb_archs = sizeof(seccomp_archs) / sizeof(SeccompArch);
-
 	struct sock_fprog program = { .len = 0, .filter = NULL };
 	size_t nb_traced_syscalls;
 	size_t i, j, k;
 	int status;
-
 	status = new_program_filter(&program);
 	if (status < 0)
 		goto end;
-
 	/* For each handled architectures */
 	for (i = 0; i < nb_archs; i++) {
 		word_t syscall;
-
 		nb_traced_syscalls = 0;
-
 		/* Pre-compute the number of traced syscalls for this architecture.  */
 		for (j = 0; j < seccomp_archs[i].nb_abis; j++) {
 			for (k = 0; sysnums[k].value != PR_void; k++) {
@@ -278,55 +262,45 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 					nb_traced_syscalls++;
 			}
 		}
-
 		/* Filter: if handled architecture */
 		status = start_arch_section(&program, seccomp_archs[i].value, nb_traced_syscalls);
 		if (status < 0)
 			goto end;
-
 		for (j = 0; j < seccomp_archs[i].nb_abis; j++) {
 			for (k = 0; sysnums[k].value != PR_void; k++) {
 				/* Get the architecture specific syscall number.  */
 				syscall = detranslate_sysnum(seccomp_archs[i].abis[j], sysnums[k].value);
 				if (syscall == SYSCALL_AVOIDER)
 					continue;
-
 				/* Filter: trace if handled syscall */
 				status = add_trace_syscall(&program, syscall, sysnums[k].flags);
 				if (status < 0)
 					goto end;
 			}
 		}
-
 		/* Filter: allow untraced syscalls for this architecture */
 		status = end_arch_section(&program, nb_traced_syscalls);
 		if (status < 0)
 			goto end;
 	}
-
 	status = finalize_program_filter(&program);
 	if (status < 0)
 		goto end;
-
 	status = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
 	if (status < 0)
 		goto end;
-
 	/* To output this BPF program for debug purpose:
 	 *
 	 *     write(2, program.filter, program.len * sizeof(struct sock_filter));
 	 */
-
 	status = prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program);
 	if (status < 0)
 		goto end;
-
 	status = 0;
 end:
 	free_program_filter(&program);
 	return status;
 }
-
 /* List of sysnums handled by PRoot.  */
 static FilteredSysnum proot_sysnums[] = {
 	{ PR_accept,		FILTER_SYSEXIT },
@@ -422,7 +396,6 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_waitpid,		FILTER_SYSEXIT },
 	FILTERED_SYSNUM_END,
 };
-
 /**
  * Add the @new_sysnums to the list of filtered @sysnums, using the
  * given Talloc @context.  This function returns -errno if an error
@@ -432,32 +405,25 @@ static int merge_filtered_sysnums(TALLOC_CTX *context, FilteredSysnum **sysnums,
 				const FilteredSysnum *new_sysnums)
 {
 	size_t i, j;
-
 	assert(sysnums != NULL);
-
 	if (*sysnums == NULL) {
 		/* Start with no sysnums but the terminator.  */
 		*sysnums = talloc_array(context, FilteredSysnum, 1);
 		if (*sysnums == NULL)
 			return -ENOMEM;
-
 		(*sysnums)[0].value = PR_void;
 	}
-
 	for (i = 0; new_sysnums[i].value != PR_void; i++) {
 		/* Search for the given sysnum.  */
 		for (j = 0; (*sysnums)[j].value != PR_void
 			 && (*sysnums)[j].value != new_sysnums[i].value; j++)
 			;
-
 		if ((*sysnums)[j].value == PR_void) {
 			/* No such sysnum, allocate a new entry.  */
 			(*sysnums) = talloc_realloc(context, (*sysnums), FilteredSysnum, j + 2);
 			if ((*sysnums) == NULL)
 				return -ENOMEM;
-
 			(*sysnums)[j] = new_sysnums[i];
-
 			/* The last item is the terminator.  */
 			(*sysnums)[j + 1].value = PR_void;
 		}
@@ -466,10 +432,8 @@ static int merge_filtered_sysnums(TALLOC_CTX *context, FilteredSysnum **sysnums,
 			 * flags.  */
 			(*sysnums)[j].flags |= new_sysnums[i].flags;
 	}
-
 	return 0;
 }
-
 /**
  * Tell the kernel to trace only syscalls handled by PRoot and its
  * extensions.  This filter will be enabled for the given @tracee and
@@ -481,22 +445,18 @@ int enable_syscall_filtering(const Tracee *tracee)
 	FilteredSysnum *filtered_sysnums = NULL;
 	Extension *extension;
 	int status;
-
 	assert(tracee != NULL && tracee->ctx != NULL);
-
 	/* Add the sysnums required by PRoot to the list of filtered
 	 * sysnums.  TODO: only if path translation is required.  */
 	status = merge_filtered_sysnums(tracee->ctx, &filtered_sysnums, proot_sysnums);
 	if (status < 0)
 		return status;
-
 	/* Merge the sysnums required by the extensions to the list
 	 * of filtered sysnums.  */
 	if (tracee->extensions != NULL) {
 		LIST_FOREACH(extension, tracee->extensions, link) {
 			if (extension->filtered_sysnums == NULL)
 				continue;
-
 			status = merge_filtered_sysnums(tracee->ctx, &filtered_sysnums,
 							extension->filtered_sysnums);
 			if (status < 0)
@@ -504,21 +464,21 @@ int enable_syscall_filtering(const Tracee *tracee)
 		}
 	}
 
+	// 👇 核心修改：自动检测JIT，过滤并放行JIT相关系统调用
+	filter_jit_syscalls(&filtered_sysnums);
+
 	status = set_seccomp_filters(filtered_sysnums);
 	if (status < 0)
 		return status;
-
 	return 0;
 }
-
 #else
-
 #include "tracee/tracee.h"
 #include "attribute.h"
-
+// 👇 引入JIT头文件（兼容无SECCCOMP_FILTER的情况）
+#include "extension/jit_support/jit_support.h"
 int enable_syscall_filtering(const Tracee *tracee UNUSED)
 {
 	return 0;
 }
-
 #endif /* defined(HAVE_SECCOMP_FILTER) */
