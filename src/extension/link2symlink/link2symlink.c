@@ -1,12 +1,37 @@
-#include <stdio.h>     /* rename(2), */
-#include <stdlib.h>    /* atoi */
-#include <unistd.h>    /* symlink(2), symlinkat(2), readlink(2), lstat(2), unlink(2), unlinkat(2)*/
-#include <string.h>    /* str*, strrchr, strcat, strcpy, strncpy, strncmp */
-#include <sys/types.h> /* lstat(2), */
-#include <sys/stat.h>  /* lstat(2), */
-#include <errno.h>     /* E*, */
-#include <limits.h>    /* PATH_MAX, */
-#include <ctype.h>     /* isdigit, */
+/*
+ * This file is part of proot-scicat.
+ *
+ * Copyright (C) 2026 Scicat
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301 USA.
+ *
+ * Description: Hard link to symbolic link emulation extension
+ * Emulate hard links on filesystems that don't support them, using symlinks + reference counting
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <limits.h>
+#include <ctype.h>
+#include <fcntl.h>
 
 #include "cli/note.h"
 #include "extension/extension.h"
@@ -20,797 +45,749 @@
 #include "arch.h"
 #include "attribute.h"
 
+/* 链接文件前缀，区分USERLAND/非USERLAND环境 */
 #ifdef USERLAND
 #define PREFIX ".proot.l2s."
-#endif 
-#ifndef USERLAND
+#else
 #define PREFIX ".l2s."
-#endif 
-#define DELETED_SUFFIX " (deleted)"
+#endif
 
+#define DELETED_SUFFIX " (deleted)"
+#define MAX_LINK_SUFFIX 1000
+#define SIZEOF_RELEVANT_STRUCT_STAT 72
+
+/* 前置函数声明 */
 static int decrement_link_count(Tracee *tracee, Reg sysarg);
 
 /**
- * Copy the contents of the @symlink into @value (nul terminated).
- * This function returns -errno if an error occured, otherwise 0.
+ * 安全读取符号链接内容，自动补全终止符
+ * @param link_path 符号链接路径
+ * @param buf 输出缓冲区，至少PATH_MAX大小
+ * @return 0-成功，非0-负的错误码
  */
-static int my_readlink(const char symlink[PATH_MAX], char value[PATH_MAX])
+static int my_readlink(const char link_path[PATH_MAX], char buf[PATH_MAX])
 {
-	ssize_t size;
+    if (link_path == NULL || buf == NULL)
+        return -EINVAL;
 
-	size = readlink(symlink, value, PATH_MAX);
-	if (size < 0)
-		return size;
-	if (size >= PATH_MAX)
-		return -ENAMETOOLONG;
-	value[size] = '\0';
+    ssize_t size = readlink(link_path, buf, PATH_MAX);
+    if (size < 0)
+        return -errno;
+    if (size >= PATH_MAX)
+        return -ENAMETOOLONG;
 
-	return 0;
+    buf[size] = '\0';
+    return 0;
 }
 
 /**
- * Move the path pointed to by @tracee's @sysarg to a new location,
- * symlink the original path to this new one, make @tracee's @sysarg
- * point to the new location.  This function returns -errno if an
- * error occured, otherwise 0.
+ * 移动原文件到中间路径，创建符号链接模拟硬链接
+ * @param tracee 进程追踪句柄
+ * @param src_sysarg 源路径参数寄存器
+ * @param dest_sysarg 目标路径参数寄存器
+ * @return 0-成功，非0-负的错误码
  */
-static int move_and_symlink_path(Tracee *tracee, Reg sysarg, Reg link_target_sysarg)
+static int move_and_symlink_path(Tracee *tracee, Reg src_sysarg, Reg dest_sysarg)
 {
-	char original[PATH_MAX];
-	char intermediate[PATH_MAX];
-	char new_intermediate[PATH_MAX];
-	char final[PATH_MAX];
-	char new_final[PATH_MAX];
-	char * name;
-	const char * l2s_directory;
-	struct stat statl;
-	ssize_t size;
-	int status;
-	int link_count;
-	int first_link = 1;
-	int intermediate_suffix = 1;
+    if (tracee == NULL)
+        return -EINVAL;
 
-	/* Note: this path was already canonicalized.  */
-	size = read_string(tracee, original, peek_reg(tracee, CURRENT, sysarg), PATH_MAX);
-	if (size < 0)
-		return size;
-	if (size >= PATH_MAX)
-		return -ENAMETOOLONG;
+    char original[PATH_MAX] = {0};
+    char intermediate[PATH_MAX] = {0};
+    char new_intermediate[PATH_MAX] = {0};
+    char final[PATH_MAX] = {0};
+    char new_final[PATH_MAX] = {0};
+    char *filename = NULL;
+    const char *l2s_directory = NULL;
+    struct stat statl = {0};
+    ssize_t size;
+    int status;
+    int link_count;
+    int first_link = 1;
+    int suffix_counter = 1;
 
-	/* Sanity check: directories can't be linked.  */
-	status = lstat(original, &statl);
-	if (status < 0)
-		return errno > 0 ? -errno : -ENOENT;
-	if (S_ISDIR(statl.st_mode))
-		return -EPERM;
+    /* 读取已规范化的源路径 */
+    size = read_string(tracee, original, peek_reg(tracee, CURRENT, src_sysarg), PATH_MAX);
+    if (size < 0)
+        return size;
+    if (size >= PATH_MAX)
+        return -ENAMETOOLONG;
 
-	/* Check if it is a symbolic link.  */
-	if (S_ISLNK(statl.st_mode)) {
-		/* get name */
-		size = my_readlink(original, intermediate);
-		if (size < 0)
-			return size;
+    /* 目录不支持硬链接模拟 */
+    status = lstat(original, &statl);
+    if (status < 0)
+        return (errno > 0) ? -errno : -ENOENT;
+    if (S_ISDIR(statl.st_mode))
+        return -EPERM;
 
-		name = strrchr(intermediate, '/');
-		if (name == NULL)
-			name = intermediate;
-		else
-			name++;
+    /* 检查是否已经是l2s转换过的符号链接 */
+    if (S_ISLNK(statl.st_mode)) {
+        status = my_readlink(original, intermediate);
+        if (status < 0)
+            return status;
 
-		if (strncmp(name, PREFIX, strlen(PREFIX)) == 0)
-			first_link = 0;
-	} else {
-		/* compute new name */
-		name = strrchr(original,'/');
-		if (name == NULL)
-			name = original;
-		else
-			name++;
+        filename = strrchr(intermediate, '/');
+        filename = (filename == NULL) ? intermediate : (filename + 1);
 
-		l2s_directory = getenv("PROOT_L2S_DIR");
-		if (l2s_directory != NULL && l2s_directory[0]) {
-			if (strlen(PREFIX) + strlen(l2s_directory) + (strlen(original) - strlen(name)) + 6 >= PATH_MAX)
-				return -ENAMETOOLONG;
+        if (strncmp(filename, PREFIX, strlen(PREFIX)) == 0)
+            first_link = 0;
+    } else {
+        /* 提取文件名，生成中间路径 */
+        filename = strrchr(original, '/');
+        filename = (filename == NULL) ? original : (filename + 1);
 
-			strcpy(intermediate, l2s_directory);
-			if (l2s_directory[strlen(l2s_directory) - 1] != '/') {
-				strcat(intermediate, "/");
-			}
-		} else {
-			if (strlen(PREFIX) + strlen(original) + 5 >= PATH_MAX)
-				return -ENAMETOOLONG;
+        l2s_directory = getenv("PROOT_L2S_DIR");
+        if (l2s_directory != NULL && l2s_directory[0] != '\0') {
+            size_t dir_len = strlen(l2s_directory);
+            if (dir_len + 1 + strlen(PREFIX) + strlen(filename) + 5 >= PATH_MAX)
+                return -ENAMETOOLONG;
 
-			strncpy(intermediate, original, strlen(original) - strlen(name));
-			intermediate[strlen(original) - strlen(name)] = '\0';
-		}
-		strcat(intermediate, PREFIX);
-		strcat(intermediate, name);
-	}
+            strcpy(intermediate, l2s_directory);
+            if (l2s_directory[dir_len - 1] != '/') {
+                strcat(intermediate, "/");
+            }
+        } else {
+            size_t prefix_len = strlen(original) - strlen(filename);
+            if (prefix_len + strlen(PREFIX) + strlen(filename) + 5 >= PATH_MAX)
+                return -ENAMETOOLONG;
 
-	if (first_link) {
-		/*Move the original content to the new path. */
-		do {
-			sprintf(new_intermediate, "%s%04d", intermediate, intermediate_suffix);
-			intermediate_suffix++;
-		} while ((access(new_intermediate,F_OK) != -1) && (intermediate_suffix < 1000));
-		strcpy(intermediate, new_intermediate);
+            strncpy(intermediate, original, prefix_len);
+            intermediate[prefix_len] = '\0';
+        }
+        strcat(intermediate, PREFIX);
+        strcat(intermediate, filename);
+    }
 
-		strcpy(final, intermediate);
-		strcat(final, ".0002");
-		status = rename(original, final);
-		if (status < 0)
-			return status;
-		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) original, (intptr_t) final);
-		if (status < 0)
-			return status;
+    /* 首次创建硬链接：移动原文件，创建两级符号链接 */
+    if (first_link) {
+        /* 生成唯一的中间文件名，避免冲突 */
+        do {
+            snprintf(new_intermediate, PATH_MAX, "%s%04d", intermediate, suffix_counter);
+            suffix_counter++;
+        } while (access(new_intermediate, F_OK) != -1 && suffix_counter < MAX_LINK_SUFFIX);
+        strcpy(intermediate, new_intermediate);
 
-		/* Symlink the intermediate to the final file.  */
-		status = symlink(final, intermediate);
-		if (status < 0)
-			return status;
+        /* 生成最终的带引用计数的文件路径 */
+        snprintf(final, PATH_MAX, "%s.0002", intermediate);
 
-		/* Symlink the original path to the intermediate one.  */
-		status = symlink(intermediate, original);
-		if (status < 0)
-			return status;
-	} else {
-		/*Move the original content to new location, by incrementing count at end of path. */
-		size = my_readlink(intermediate, final);
-		if (size < 0)
-			return size;
+        /* 移动原文件到最终路径 */
+        status = rename(original, final);
+        if (status < 0)
+            return -errno;
 
-		link_count = atoi(final + strlen(final) - 4);
-		link_count++;
+        /* 通知其他扩展文件重命名事件 */
+        status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t)original, (intptr_t)final);
+        if (status < 0)
+            return status;
 
-		strncpy(new_final, final, strlen(final) - 4);
-		sprintf(new_final + strlen(final) - 4, "%04d", link_count);
+        /* 中间链接 -> 最终文件 */
+        status = symlink(final, intermediate);
+        if (status < 0)
+            return -errno;
 
-		status = rename(final, new_final);
-		if (status < 0)
-			return status;
-		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) final, (intptr_t) new_final);
-		if (status < 0)
-			return status;
-		strcpy(final, new_final);
-		/* Symlink the intermediate to the final file.  */
-		status = unlink(intermediate);
-		if (status < 0)
-			return status;
-		status = symlink(final, intermediate);
-		if (status < 0)
-			return status;
-	}
+        /* 原路径 -> 中间链接 */
+        status = symlink(intermediate, original);
+        if (status < 0)
+            return -errno;
+    }
+    /* 已有硬链接，仅增加引用计数 */
+    else {
+        /* 读取最终文件路径，更新引用计数 */
+        status = my_readlink(intermediate, final);
+        if (status < 0)
+            return status;
 
-	/* Perform symlink() operation within PRoot.  */
-	status = read_path(tracee, final, peek_reg(tracee, CURRENT, link_target_sysarg));
-	if (status >= 0) {
-		status = symlink(intermediate, final);
-		if (status < 0) status = -errno;
-	}
-	if (status < 0) {
-		status = -errno;
-		decrement_link_count(tracee, sysarg);
-		return status;
-	}
-	poke_reg(tracee, SYSARG_RESULT, 0);
-	set_sysnum(tracee, PR_void);
+        link_count = atoi(final + strlen(final) - 4);
+        link_count++;
 
-	return 0;
-}
+        /* 生成新的带计数的文件名 */
+        strncpy(new_final, final, strlen(final) - 4);
+        snprintf(new_final + strlen(final) - 4, 5, "%04d", link_count);
 
+        /* 重命名最终文件，更新计数 */
+        status = rename(final, new_final);
+        if (status < 0)
+            return -errno;
 
-/* If path points a file that is a symlink to a file that begins
- *   with PREFIX, let the file be deleted, but also delete the
- *   symlink that was created and decremnt the count that is tacked
- *   to end of original file.
- */
-static int decrement_link_count(Tracee *tracee, Reg sysarg)
-{
-	char original[PATH_MAX];
-	char intermediate[PATH_MAX];
-	char final[PATH_MAX];
-	char new_final[PATH_MAX];
-	char * name;
-	struct stat statl;
-	ssize_t size;
-	int status;
-	int link_count;
+        status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t)final, (intptr_t)new_final);
+        if (status < 0)
+            return status;
 
-	/* Note: this path was already canonicalized.  */
-	size = read_string(tracee, original, peek_reg(tracee, CURRENT, sysarg), PATH_MAX);
-	if (size < 0)
-		return size;
-	if (size >= PATH_MAX)
-		return -ENAMETOOLONG;
+        strcpy(final, new_final);
 
-	/* Check if it is a converted link already.  */
-	status = lstat(original, &statl);
-	if (status < 0)
-		return 0;
+        /* 更新中间链接指向新的最终文件 */
+        status = unlink(intermediate);
+        if (status < 0)
+            return -errno;
 
-	if (!S_ISLNK(statl.st_mode))
-		return 0;
+        status = symlink(final, intermediate);
+        if (status < 0)
+            return -errno;
+    }
 
-	size = my_readlink(original, intermediate);
-	if (size < 0)
-		return size;
+    /* 处理目标路径的符号链接创建 */
+    char dest_path[PATH_MAX] = {0};
+    status = read_path(tracee, dest_path, peek_reg(tracee, CURRENT, dest_sysarg));
+    if (status >= 0) {
+        status = symlink(intermediate, dest_path);
+        if (status < 0)
+            status = -errno;
+    }
 
-	name = strrchr(intermediate, '/');
-	if (name == NULL)
-		name = intermediate;
-	else
-		name++;
+    /* 创建目标链接失败，回滚引用计数 */
+    if (status < 0) {
+        decrement_link_count(tracee, src_sysarg);
+        return status;
+    }
 
-	/* Check if an l2s file is pointed to */
-	if (strncmp(name, PREFIX, strlen(PREFIX)) != 0)
-		return 0;
+    /* 标记系统调用已处理，无需内核执行 */
+    poke_reg(tracee, SYSARG_RESULT, 0);
+    set_sysnum(tracee, PR_void);
 
-	/* Read intermediate link - if this fails then
-	 * this link2symlink is broken and we silently
-	 * skip as we were removing it anyway.  */
-	size = my_readlink(intermediate, final);
-	if (size < 0) {
-		VERBOSE(tracee, 1, "Skiping deref of broken link2symlink \"%s\" -> \"%s\"", original, intermediate);
-		return 0;
-	}
-
-	link_count = atoi(final + strlen(final) - 4);
-	link_count--;
-
-	/* Check if it is or is not the last link to delete */
-	if (link_count > 0) {
-		strncpy(new_final, final, strlen(final) - 4);
-		sprintf(new_final + strlen(final) - 4, "%04d", link_count);
-
-		status = rename(final, new_final);
-		if (status < 0)
-			return status;
-		status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t) final, (intptr_t) new_final);
-		if (status < 0)
-			return status;
-
-		strcpy(final, new_final);
-
-		/* Symlink the intermediate to the final file.  */
-		status = unlink(intermediate);
-		if (status < 0)
-			return status;
-
-		status = symlink(final, intermediate);
-		if (status < 0)
-			return status;
-	} else {
-		/* If it is the last, delete the intermediate and final */
-		status = unlink(intermediate);
-		if (status < 0)
-			return status;
-		status = unlink(final);
-		if (status < 0)
-			return status;
-		status = notify_extensions(tracee, LINK2SYMLINK_UNLINK, (intptr_t) final, 0);
-		if (status < 0)
-			return status;
-		}
-
-	return 0;
+    return 0;
 }
 
 /**
- * sizeof(struct stat) cut to contain only fields that are at same addresses
- * regardless of whenever tracee is 32-bit or 64-bit.
- *
- * This allows modification of following fields:
- * - st_dev
- * - st_mode
- * - st_nlink
- * - st_uid
- * - st_gid
- * - st_rdev
- * - st_size
- * - st_blksize
- * - st_blocks
+ * 处理链接删除，递减引用计数，无引用时清理文件
+ * @param tracee 进程追踪句柄
+ * @param path_sysarg 待删除路径的参数寄存器
+ * @return 0-成功，非0-负的错误码
  */
-#define SIZEOF_RELEVANT_STRUCT_STAT 72
+static int decrement_link_count(Tracee *tracee, Reg path_sysarg)
+{
+    if (tracee == NULL)
+        return -EINVAL;
+
+    char original[PATH_MAX] = {0};
+    char intermediate[PATH_MAX] = {0};
+    char final[PATH_MAX] = {0};
+    char new_final[PATH_MAX] = {0};
+    char *filename = NULL;
+    struct stat statl = {0};
+    ssize_t size;
+    int status;
+    int link_count;
+
+    /* 读取已规范化的路径 */
+    size = read_string(tracee, original, peek_reg(tracee, CURRENT, path_sysarg), PATH_MAX);
+    if (size < 0)
+        return size;
+    if (size >= PATH_MAX)
+        return -ENAMETOOLONG;
+
+    /* 仅处理符号链接 */
+    status = lstat(original, &statl);
+    if (status < 0 || !S_ISLNK(statl.st_mode))
+        return 0;
+
+    /* 读取链接目标，检查是否是l2s生成的链接 */
+    status = my_readlink(original, intermediate);
+    if (status < 0)
+        return status;
+
+    filename = strrchr(intermediate, '/');
+    filename = (filename == NULL) ? intermediate : (filename + 1);
+    if (strncmp(filename, PREFIX, strlen(PREFIX)) != 0)
+        return 0;
+
+    /* 读取中间链接的最终目标 */
+    status = my_readlink(intermediate, final);
+    if (status < 0) {
+        VERBOSE(tracee, 1, "Skipping broken link2symlink \"%s\" -> \"%s\"", original, intermediate);
+        return 0;
+    }
+
+    /* 解析并递减引用计数 */
+    link_count = atoi(final + strlen(final) - 4);
+    link_count--;
+
+    /* 仍有引用，仅更新计数 */
+    if (link_count > 0) {
+        strncpy(new_final, final, strlen(final) - 4);
+        snprintf(new_final + strlen(final) - 4, 5, "%04d", link_count);
+
+        status = rename(final, new_final);
+        if (status < 0)
+            return -errno;
+
+        status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t)final, (intptr_t)new_final);
+        if (status < 0)
+            return status;
+
+        strcpy(final, new_final);
+
+        /* 更新中间链接 */
+        status = unlink(intermediate);
+        if (status < 0)
+            return -errno;
+
+        status = symlink(final, intermediate);
+        if (status < 0)
+            return -errno;
+    }
+    /* 无剩余引用，清理所有相关文件 */
+    else {
+        status = unlink(intermediate);
+        if (status < 0)
+            return -errno;
+
+        status = unlink(final);
+        if (status < 0)
+            return -errno;
+
+        status = notify_extensions(tracee, LINK2SYMLINK_UNLINK, (intptr_t)final, 0);
+        if (status < 0)
+            return status;
+    }
+
+    return 0;
+}
 
 /**
- * Make it so fake hard links look like real hard link with respect to number of links and inode
- * This function returns -errno if an error occured, otherwise 0.
+ * 处理stat系列系统调用退出，修改stat结构，让软链接模拟出硬链接的链接数和inode表现
+ * @param tracee 进程追踪句柄
+ * @return 0-成功，非0-负的错误码
  */
 static int handle_sysexit_end(Tracee *tracee)
 {
-	word_t sysnum;
+    if (tracee == NULL)
+        return 0;
 
-	sysnum = get_sysnum(tracee, ORIGINAL);
+    word_t sysnum = get_sysnum(tracee, ORIGINAL);
 
-	#ifdef USERLAND
-		if ((get_sysnum(tracee, CURRENT) == PR_fstat) || (get_sysnum(tracee, CURRENT) == PR_fstat64))
-			return 0;
+#ifdef USERLAND
+    /* USERLAND下fstat已由fake_id0处理，跳过 */
+    if ((get_sysnum(tracee, CURRENT) == PR_fstat) || (get_sysnum(tracee, CURRENT) == PR_fstat64))
+        return 0;
+    if (((sysnum == PR_fstat) || (sysnum == PR_fstat64)) && (get_sysnum(tracee, CURRENT) == PR_readlinkat))
+        return 0;
+#endif
 
-		if (((sysnum == PR_fstat) || (sysnum == PR_fstat64)) && (get_sysnum(tracee, CURRENT) == PR_readlinkat))
-			return 0;
-	#endif
+    switch (sysnum) {
+    case PR_fstatat64:
+    case PR_newfstatat:
+    case PR_stat64:
+    case PR_lstat64:
+    case PR_fstat64:
+    case PR_stat:
+    case PR_lstat:
+    case PR_fstat: {
+        word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+        Reg stat_sysarg, path_sysarg;
+        int status;
+        struct stat statl = {0};
+        struct stat final_stat = {0};
+        ssize_t size;
+        char original[PATH_MAX] = {0};
+        char intermediate[PATH_MAX] = {0};
+        char final[PATH_MAX] = {0};
+        char *filename = NULL;
 
-	switch (sysnum) {
+        /* 仅处理系统调用成功的情况 */
+        if (result != 0)
+            return 0;
 
-	case PR_fstatat64:                 //int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags);
-	case PR_newfstatat:                //int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags);
-	case PR_stat64:                    //int stat(const char *path, struct stat *buf);
-	case PR_lstat64:                   //int lstat(const char *path, struct stat *buf);
-	case PR_fstat64:                   //int fstat(int fd, struct stat *buf);
-	case PR_stat:                      //int stat(const char *path, struct stat *buf);
-	case PR_lstat:                     //int lstat(const char *path, struct stat *buf);
-	case PR_fstat: {                   //int fstat(int fd, struct stat *buf);
-		word_t result;
-		Reg sysarg_stat;
-		Reg sysarg_path;
-		int status;
-		struct stat statl = {};
-		ssize_t size;
-		char original[PATH_MAX];
-		char intermediate[PATH_MAX];
-		char final[PATH_MAX];
-		char * name;
-		struct stat finalStat;
+        /* 读取目标文件路径 */
+        if (sysnum == PR_fstat64 || sysnum == PR_fstat) {
+#ifndef USERLAND
+            /* 非USERLAND环境，从fd读取路径 */
+            status = readlink_proc_pid_fd(tracee->pid, peek_reg(tracee, MODIFIED, SYSARG_1), original);
+            if (status < 0) {
+                VERBOSE(tracee, 3, "link2symlink: readlink_proc_pid_fd failed, status=%d", status);
+                return 0;
+            }
+            /* 处理已删除文件的路径后缀 */
+            size_t path_len = strlen(original);
+            if (path_len > strlen(DELETED_SUFFIX) &&
+                strcmp(original + path_len - strlen(DELETED_SUFFIX), DELETED_SUFFIX) == 0) {
+                original[path_len - strlen(DELETED_SUFFIX)] = '\0';
+            }
+#endif
+#ifdef USERLAND
+            size = read_string(tracee, original, peek_reg(tracee, CURRENT, SYSARG_2), PATH_MAX);
+            if (size < 0)
+                return size;
+            if (size >= PATH_MAX)
+                return -ENAMETOOLONG;
+#endif
+        } else {
+            path_sysarg = (sysnum == PR_fstatat64 || sysnum == PR_newfstatat) ? SYSARG_2 : SYSARG_1;
+            size = read_string(tracee, original, peek_reg(tracee, MODIFIED, path_sysarg), PATH_MAX);
+            if (size < 0)
+                return size;
+            if (size >= PATH_MAX)
+                return -ENAMETOOLONG;
+        }
 
-		/* Override only if it succeed.  */
-		result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-		if (result != 0)
-			return 0;
+        /* 提取文件名，检查是否是l2s相关文件 */
+        filename = strrchr(original, '/');
+        filename = (filename == NULL) ? original : (filename + 1);
 
-		if (sysnum == PR_fstat64 || sysnum == PR_fstat) {
-			#ifndef USERLAND
-				status = readlink_proc_pid_fd(tracee->pid, peek_reg(tracee, MODIFIED, SYSARG_1), original);
-				if (status < 0) {
-					VERBOSE(tracee, 3, "link2symlink: readlink_proc_pid_fd failed, status=%d", status);
-					return 0; // Don't alter syscall result
-				}
-				if (strlen(original) > strlen(DELETED_SUFFIX) &&
-						strcmp(original + strlen(original) - strlen(DELETED_SUFFIX), DELETED_SUFFIX) == 0)
-					original[strlen(original) - strlen(DELETED_SUFFIX)] = '\0';
-			#endif
-			#ifdef USERLAND
-				size = read_string(tracee, original, peek_reg(tracee, CURRENT, SYSARG_2), PATH_MAX);
-				if (size < 0)
-					return size;
-				if (size >= PATH_MAX)
-					return -ENAMETOOLONG;
-			#endif
-		} else {
-			if (sysnum == PR_fstatat64 || sysnum == PR_newfstatat)
-				sysarg_path = SYSARG_2;
-			else
-				sysarg_path = SYSARG_1;
-			size = read_string(tracee, original, peek_reg(tracee, MODIFIED, sysarg_path), PATH_MAX);
-			if (size < 0)
-				return size;
-			if (size >= PATH_MAX)
-				return -ENAMETOOLONG;
-		}
+        status = lstat(original, &statl);
+        /* 路径本身就是l2s前缀的中间/最终文件 */
+        if (strncmp(filename, PREFIX, strlen(PREFIX)) == 0) {
+            if (S_ISLNK(statl.st_mode)) {
+                strcpy(intermediate, original);
+                goto intermediate_proc;
+            } else {
+                strcpy(final, original);
+                goto final_proc;
+            }
+        }
 
-		name = strrchr(original, '/');
-		if (name == NULL)
-			name = original;
-		else
-			name++;
+        /* 非符号链接，无需处理 */
+        if (!S_ISLNK(statl.st_mode))
+            return 0;
 
-		/* Check if it is a link */
-		status = lstat(original, &statl);
+        /* 读取链接目标，检查是否是l2s链接 */
+        size = my_readlink(original, intermediate);
+        if (size < 0)
+            return size;
 
-		if (strncmp(name, PREFIX, strlen(PREFIX)) == 0) {
-			if (S_ISLNK(statl.st_mode)) {
-				strcpy(intermediate,original);
-				goto intermediate_proc;
-			} else {
-				strcpy(final,original);
-				goto final_proc;
-			}
-		}
+        filename = strrchr(intermediate, '/');
+        filename = (filename == NULL) ? intermediate : (filename + 1);
+        if (strncmp(filename, PREFIX, strlen(PREFIX)) != 0)
+            return 0;
 
-		if (!S_ISLNK(statl.st_mode))
-			return 0;
+        /* 读取最终文件路径 */
+intermediate_proc:
+        size = my_readlink(intermediate, final);
+        if (size < 0)
+            return size;
 
-		size = my_readlink(original, intermediate);
-		if (size < 0)
-			return size;
+        /* 读取最终文件的stat信息，更新链接计数 */
+final_proc:
+        status = lstat(final, &final_stat);
+        if (status < 0)
+            return -errno;
 
-		name = strrchr(intermediate, '/');
-		if (name == NULL)
-			name = intermediate;
-		else
-			name++;
+        /* 用文件名中的计数覆盖st_nlink，模拟硬链接数 */
+        final_stat.st_nlink = atoi(final + strlen(final) - 4);
 
-		if (strncmp(name, PREFIX, strlen(PREFIX)) != 0)
-			return 0;
+        /* 获取stat结构的目标地址 */
+        if (sysnum == PR_fstatat64 || sysnum == PR_newfstatat)
+            stat_sysarg = SYSARG_3;
+        else
+            stat_sysarg = SYSARG_2;
 
-		intermediate_proc: size = my_readlink(intermediate, final);
-		if (size < 0)
-			return size;
+#ifdef USERLAND
+        /* USERLAND环境保留原有的uid/gid/mode，仅覆盖链接数 */
+        (void)read_data(tracee, &statl, peek_reg(tracee, ORIGINAL, stat_sysarg), sizeof(statl));
+        final_stat.st_mode = statl.st_mode;
+        final_stat.st_uid = statl.st_uid;
+        final_stat.st_gid = statl.st_gid;
+#endif
 
-		final_proc: status = lstat(final,&finalStat);
-		if (status < 0)
-			return status;
+        /* 写回修改后的stat结构，兼容32on64模式 */
+        size_t write_size = is_32on64_mode(tracee) ? SIZEOF_RELEVANT_STRUCT_STAT : sizeof(final_stat);
+        status = write_data(tracee, peek_reg(tracee, ORIGINAL, stat_sysarg), &final_stat, write_size);
+        if (status < 0)
+            return status;
 
-		finalStat.st_nlink = atoi(final + strlen(final) - 4);
+        return 0;
+    }
 
-		/* Get the address of the 'stat' structure.  */
-		if (sysnum == PR_fstatat64 || sysnum == PR_newfstatat)
-			sysarg_stat = SYSARG_3;
-		else
-			sysarg_stat = SYSARG_2;
-
-		#ifdef USERLAND
-			/* Overwrite the stat struct with the correct number of "links". */
-			(void)read_data(tracee, &statl, peek_reg(tracee, ORIGINAL, sysarg_stat), sizeof(statl));
-			finalStat.st_mode = statl.st_mode;
-			finalStat.st_uid = statl.st_uid;
-			finalStat.st_gid = statl.st_gid;
-		#endif
-		status = write_data(tracee, peek_reg(tracee, ORIGINAL,  sysarg_stat), &finalStat,
-			is_32on64_mode(tracee) ? SIZEOF_RELEVANT_STRUCT_STAT : sizeof(finalStat));
-		if (status < 0)
-			return status;
-
-		return 0;
-	}
-
-	default:
-		return 0;
-	}
-}
-
-static void link2symlink_handle_statx(struct statx_syscall_state *state)
-{
-	if (!(state->statx_buf.stx_mask & STATX_NLINK))
-		return;
-
-	const char *path_ending = strrchr(state->host_path, '/');
-	if (NULL == path_ending)
-		return;
-
-	size_t ending_len = strlen(path_ending);
-	if (ending_len < strlen(PREFIX) + 6) /* 6 = strlen("/") + strlen(".0002") */
-		return;
-
-	if (0 != strncmp(path_ending + 1, PREFIX, strlen(PREFIX)))
-		return;
-
-	if (path_ending[ending_len - 5] != '.')
-		return;
-
-	for (size_t i = 1; i <= 4; i++) {
-		if (!isdigit(path_ending[ending_len - i]))
-			return;
-	}
-
-	state->statx_buf.stx_nlink = atoi(&path_ending[ending_len - 4]);
+    default:
+        return 0;
+    }
 }
 
 /**
- * When @translated_path is a faked hard-link, replace it with the
- * point it (internally) points to.
+ * 处理statx系统调用，更新链接计数字段
+ * @param state statx系统调用状态结构体
+ */
+static void link2symlink_handle_statx(struct statx_syscall_state *state)
+ {
+     if (state == NULL)  // 仅保留对state本身的空指针校验
+         return;
+
+    /* 仅当请求了链接数字段时处理 */
+    if (!(state->statx_buf.stx_mask & STATX_NLINK))
+        return;
+
+    const char *path_ending = strrchr(state->host_path, '/');
+    if (path_ending == NULL)
+        return;
+
+    size_t ending_len = strlen(path_ending);
+    /* 最短路径要求：/ + 前缀 + .0000 */
+    if (ending_len < strlen(PREFIX) + 6)
+        return;
+
+    /* 检查前缀和计数后缀格式 */
+    if (strncmp(path_ending + 1, PREFIX, strlen(PREFIX)) != 0)
+        return;
+    if (path_ending[ending_len - 5] != '.')
+        return;
+
+    /* 检查后缀是否为4位数字 */
+    for (size_t i = 1; i <= 4; i++) {
+        if (!isdigit(path_ending[ending_len - i]))
+            return;
+    }
+
+    /* 用文件名中的计数覆盖stx_nlink */
+    state->statx_buf.stx_nlink = atoi(&path_ending[ending_len - 4]);
+}
+
+/**
+ * 路径翻译回调，将l2s符号链接路径替换为真实文件路径
+ * @param tracee 进程追踪句柄
+ * @param translated_path 已翻译的路径，会被原地修改
  */
 static void translated_path(Tracee *tracee, char translated_path[PATH_MAX])
 {
-	char path2[PATH_MAX];
-	char path[PATH_MAX];
-	char *component;
-	int status;
+    if (tracee == NULL || translated_path == NULL)
+        return;
 
-	/* Don't translate l2s symlinks if call is (un)link */
-	Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
-	if (   sysnum == PR_unlink
-	    || sysnum == PR_unlinkat
-	    || sysnum == PR_link
-	    || sysnum == PR_linkat
-	    || sysnum == PR_rename
-	    || sysnum == PR_renameat
-	    || sysnum == PR_renameat2) {
-		return;
-	}
+    char link_target[PATH_MAX] = {0};
+    char final_target[PATH_MAX] = {0};
+    char *filename = NULL;
+    int status;
 
-	if (should_skip_file_access_due_to_f2fs_bug(tracee, translated_path))
-		return;
+    /* 链接/删除/重命名相关系统调用，不翻译路径，避免破坏计数逻辑 */
+    Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
+    switch (sysnum) {
+    case PR_unlink:
+    case PR_unlinkat:
+    case PR_link:
+    case PR_linkat:
+    case PR_rename:
+    case PR_renameat:
+    case PR_renameat2:
+        return;
+    default:
+        break;
+    }
 
-	status = my_readlink(translated_path, path);
-	if (status < 0)
-		return;
+    /* 跳过f2fs bug相关的路径 */
+    if (should_skip_file_access_due_to_f2fs_bug(tracee, translated_path))
+        return;
 
-	component = strrchr(path, '/');
-	if (component == NULL)
-		return;
-	component++;
+    /* 读取符号链接目标 */
+    status = my_readlink(translated_path, link_target);
+    if (status < 0)
+        return;
 
-	if (strncmp(component, PREFIX, strlen(PREFIX)) != 0)
-		return;
+    /* 检查是否是l2s中间链接 */
+    filename = strrchr(link_target, '/');
+    filename = (filename == NULL) ? link_target : (filename + 1);
+    if (strncmp(filename, PREFIX, strlen(PREFIX)) != 0)
+        return;
 
-	status = my_readlink(path, path2);
-	if (status < 0)
-		return;
+    /* 读取最终的真实文件路径 */
+    status = my_readlink(link_target, final_target);
+    if (status < 0)
+        return;
 
-#if 0 /* Sanity check. */
-	component = strrchr(path, '/');
-	if (component == NULL)
-		return;
-	component++;
-
-	if (strncmp(component, PREFIX, strlen(PREFIX)) != 0)
-		return;
-#endif
-
-	strcpy(translated_path, path2);
-	return;
+    /* 替换为真实文件路径 */
+    strcpy(translated_path, final_target);
 }
 
 /**
- * Handler for linkat(..., "/proc/X/fd/Y", ..., AT_SYMLINK_FOLLOW)
- *
- * Returns:
- *    1 if operation was handled successfully
- *      (Syscall should be marked as successful without further actions)
- *    0 if this wasn't linkat from /proc//fd
- *      (Caller should proceed with usual link2symlink)
- *   <0 if operation failed
- *      (Syscall should be marked as failed without further actions)
+ * 处理特殊场景：linkat从/proc/pid/fd/创建硬链接（已删除的文件）
+ * @param tracee 进程追踪句柄
+ * @return 1-已处理完成，0-非目标场景，<0-错误码
  */
-static int handle_linkat_from_proc_fd(Tracee *tracee) {
-	/* Read source path, return if it doesn't belong to /proc  */
-	char proc_path[128];
-	ssize_t size = read_string(tracee, proc_path, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(proc_path));
-	if (size <= 0 || size >= (ssize_t) sizeof(proc_path)) {
-		return 0;
-	}
-	if (compare_paths(proc_path, "/proc") != PATH2_IS_PREFIX) {
-		return 0;
-	}
+static int handle_linkat_from_proc_fd(Tracee *tracee)
+{
+    if (tracee == NULL)
+        return 0;
 
-	/* Ensure provided path is symlink to " (deleted)" file  */
-	char target_path[PATH_MAX] = {};
-	int status = readlink(proc_path, target_path, sizeof(target_path));
-	if (status < 10 || status >= (ssize_t) sizeof(target_path)) {
-		return 0;
-	}
-	if (0 != memcmp(&target_path[status - 10], DELETED_SUFFIX, 10)) {
-		return 0;
-	}
+    char proc_path[128] = {0};
+    ssize_t size = read_string(tracee, proc_path, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(proc_path));
+    if (size <= 0 || size >= (ssize_t)sizeof(proc_path))
+        return 0;
 
-	/* Read stats of source file, ensure it is regular file  */
-	struct stat stats = {};
-	if (0 != stat(proc_path, &stats)) {
-		return 0;
-	}
-	if (!S_ISREG(stats.st_mode)) {
-		return 0;
-	}
+    /* 仅处理/proc开头的路径 */
+    if (compare_paths(proc_path, "/proc") != PATH2_IS_PREFIX)
+        return 0;
 
-	/* Read path of target file (already translated by proot)  */
-	size = read_string(tracee, target_path, peek_reg(tracee, CURRENT, SYSARG_4), PATH_MAX);
-	if (size < 0 || size >= (ssize_t) sizeof(target_path)) {
-		return 0;
-	}
+    /* 检查是否指向已删除的文件 */
+    char target_path[PATH_MAX] = {0};
+    int status = readlink(proc_path, target_path, sizeof(target_path));
+    if (status < 10 || status >= (ssize_t)sizeof(target_path))
+        return 0;
+    if (memcmp(&target_path[status - 10], DELETED_SUFFIX, 10) != 0)
+        return 0;
 
-	/* Open source file for reading  */
-	int source_fd = open(proc_path, O_RDONLY);
-	if (source_fd < 0) {
-		return 0;
-	}
+    /* 检查是否是常规文件 */
+    struct stat statl = {0};
+    if (stat(proc_path, &statl) != 0 || !S_ISREG(statl.st_mode))
+        return 0;
 
-	/* Point of no return, below we no longer are allowed to "return 0",
-	 * any errors will be propagated to caller
-	 *
-	 * Delete target file (we'll be replacing it).
-	 * Ignore result of unlink, file could or could not exist,
-	 * we'll report failure of open though  */
-	unlink(target_path);
+    /* 读取目标路径 */
+    char dest_path[PATH_MAX] = {0};
+    size = read_string(tracee, dest_path, peek_reg(tracee, CURRENT, SYSARG_4), PATH_MAX);
+    if (size < 0 || size >= PATH_MAX)
+        return 0;
 
-	/* Open target file for writing  */
-	int target_fd = open(target_path, O_WRONLY|O_CREAT|O_EXCL, stats.st_mode & 0777);
-	if (target_fd < 0) {
-		status = -errno;
-		if (status >= 0)
-			status = -EPERM;
-		close(source_fd);
-		return status;
-	}
+    /* 打开源文件 */
+    int source_fd = open(proc_path, O_RDONLY);
+    if (source_fd < 0)
+        return 0;
 
-	/* Copy contents of file  */
-	char buf[4096];
-	int nread;
-	while (0 != (nread = read(source_fd, buf, sizeof(buf)))) {
-		if (nread < 0) {
-			status = -errno;
-			if (status >= 0)
-				status = -EPERM;
-			close(source_fd);
-			close(target_fd);
-			return status;
-		}
-		int pos = 0;
-		while (pos < nread) {
-			int nwrite = write(target_fd, buf + pos, nread - pos);
-			if (nwrite <= 0) {
-				status = -errno;
-				if (status >= 0)
-					status = -EPERM;
-				close(source_fd);
-				close(target_fd);
-				return status;
-			}
-			pos += nwrite;
-		}
-	}
+    /* 点无返回：后续任何错误都必须返回错误码，不能回退到原逻辑 */
+    unlink(dest_path);
 
-	/* Copy successful, nothing more to be done for this syscall  */
-	close(source_fd);
-	close(target_fd);
-	return 1;
+    /* 创建目标文件 */
+    int dest_fd = open(dest_path, O_WRONLY | O_CREAT | O_EXCL, statl.st_mode & 0777);
+    if (dest_fd < 0) {
+        status = -errno;
+        close(source_fd);
+        return (status < 0) ? status : -EPERM;
+    }
+
+    /* 复制文件内容 */
+    char buf[4096];
+    ssize_t nread, nwrite, pos;
+    while ((nread = read(source_fd, buf, sizeof(buf))) != 0) {
+        if (nread < 0) {
+            status = -errno;
+            close(source_fd);
+            close(dest_fd);
+            return (status < 0) ? status : -EPERM;
+        }
+
+        pos = 0;
+        while (pos < nread) {
+            nwrite = write(dest_fd, buf + pos, nread - pos);
+            if (nwrite <= 0) {
+                status = -errno;
+                close(source_fd);
+                close(dest_fd);
+                return (status < 0) ? status : -EPERM;
+            }
+            pos += nwrite;
+        }
+    }
+
+    /* 处理完成 */
+    close(source_fd);
+    close(dest_fd);
+    return 1;
 }
 
 /**
- * Handler for this @extension.  It is triggered each time an @event
- * occurred.  See ExtensionEvent for the meaning of @data1 and @data2.
+ * link2symlink扩展核心回调函数，处理各类生命周期与系统调用事件
+ * @param extension 扩展句柄
+ * @param event 触发的事件类型
+ * @param data1 事件附加数据1
+ * @param data2 事件附加数据2
+ * @return 0-成功，非0-错误码
  */
 int link2symlink_callback(Extension *extension, ExtensionEvent event,
-			intptr_t data1, intptr_t data2 UNUSED)
+                          intptr_t data1, intptr_t data2 UNUSED)
 {
-	int status;
+    if (extension == NULL)
+        return -EINVAL;
 
-	switch (event) {
-	case INITIALIZATION: {
-		/* List of syscalls handled by this extensions.  */
-		static FilteredSysnum filtered_sysnums[] = {
-			{ PR_link,		FILTER_SYSEXIT },
-			{ PR_linkat,		FILTER_SYSEXIT },
-			{ PR_unlink,		FILTER_SYSEXIT },
-			{ PR_unlinkat,		FILTER_SYSEXIT },
-			{ PR_fstat,		FILTER_SYSEXIT },
-			{ PR_fstat64,		FILTER_SYSEXIT },
-			{ PR_fstatat64,		FILTER_SYSEXIT },
-			{ PR_lstat,		FILTER_SYSEXIT },
-			{ PR_lstat64,		FILTER_SYSEXIT },
-			{ PR_newfstatat,	FILTER_SYSEXIT },
-			{ PR_stat,		FILTER_SYSEXIT },
-			{ PR_stat64,		FILTER_SYSEXIT },
-			{ PR_rename,		FILTER_SYSEXIT },
-			{ PR_renameat,		FILTER_SYSEXIT },
-			{ PR_renameat2,		FILTER_SYSEXIT },
-			FILTERED_SYSNUM_END,
-		};
-		extension->filtered_sysnums = filtered_sysnums;
-		return 0;
-	}
+    int status;
+    switch (event) {
+    case INITIALIZATION: {
+        /* 注册需要处理的系统调用列表 */
+        static const FilteredSysnum filtered_sysnums[] = {
+            { PR_link,        FILTER_SYSEXIT },
+            { PR_linkat,      FILTER_SYSEXIT },
+            { PR_unlink,      FILTER_SYSEXIT },
+            { PR_unlinkat,    FILTER_SYSEXIT },
+            { PR_fstat,       FILTER_SYSEXIT },
+            { PR_fstat64,     FILTER_SYSEXIT },
+            { PR_fstatat64,   FILTER_SYSEXIT },
+            { PR_lstat,       FILTER_SYSEXIT },
+            { PR_lstat64,     FILTER_SYSEXIT },
+            { PR_newfstatat,  FILTER_SYSEXIT },
+            { PR_stat,        FILTER_SYSEXIT },
+            { PR_stat64,      FILTER_SYSEXIT },
+            { PR_rename,      FILTER_SYSEXIT },
+            { PR_renameat,    FILTER_SYSEXIT },
+            { PR_renameat2,   FILTER_SYSEXIT },
+            FILTERED_SYSNUM_END,
+        };
+        extension->filtered_sysnums = (FilteredSysnum *)filtered_sysnums;
+        return 0;
+    }
 
-	case SYSCALL_ENTER_END: {
-		Tracee *tracee = TRACEE(extension);
+    case SYSCALL_ENTER_END: {
+        Tracee *tracee = TRACEE(extension);
+        Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
 
-		switch (get_sysnum(tracee, ORIGINAL)) {
-		case PR_rename:
-			/*int rename(const char *oldpath, const char *newpath);
-			 *If newpath is a psuedo hard link decrement the link count.
-			 */
+        switch (sysnum) {
+        case PR_rename:
+            /* 重命名目标路径，处理链接计数 */
+            status = decrement_link_count(tracee, SYSARG_2);
+            if (status < 0)
+                return status;
+            break;
 
-			status = decrement_link_count(tracee, SYSARG_2);
-			if (status < 0)
-				return status;
+        case PR_renameat:
+        case PR_renameat2:
+            /* 重命名目标路径，处理链接计数 */
+            status = decrement_link_count(tracee, SYSARG_4);
+            if (status < 0)
+                return status;
+            break;
 
-			break;
+        case PR_unlink:
+            /* 删除文件，处理链接计数递减 */
+            status = decrement_link_count(tracee, SYSARG_1);
+            if (status < 0)
+                return status;
+            break;
 
-		case PR_renameat:
-		case PR_renameat2:
-			/*int renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath);
-			 *If newpath is a psuedo hard link decrement the link count.
-			 */
+        case PR_unlinkat:
+            /* 跳过目录删除，仅处理文件 */
+            if ((peek_reg(tracee, CURRENT, SYSARG_3) & AT_REMOVEDIR) != 0)
+                return 0;
+            /* 删除文件，处理链接计数递减 */
+            status = decrement_link_count(tracee, SYSARG_2);
+            if (status < 0)
+                return status;
+            break;
 
-			status = decrement_link_count(tracee, SYSARG_4);
-			if (status < 0)
-				return status;
+        case PR_link:
+            /* 硬链接转符号链接 */
+            status = move_and_symlink_path(tracee, SYSARG_1, SYSARG_2);
+            if (status < 0)
+                return status;
+            break;
 
-			break;
+        case PR_linkat:
+            /* 处理/proc/fd的特殊硬链接场景 */
+            if (peek_reg(tracee, CURRENT, SYSARG_5) & AT_SYMLINK_FOLLOW) {
+                status = handle_linkat_from_proc_fd(tracee);
+                if (status < 0)
+                    return status;
+                if (status == 1) {
+                    set_sysnum(tracee, PR_void);
+                    poke_reg(tracee, SYSARG_RESULT, 0);
+                    return 0;
+                }
+            }
+            /* 常规硬链接转符号链接 */
+            status = move_and_symlink_path(tracee, SYSARG_2, SYSARG_4);
+            if (status < 0)
+                return status;
+            break;
 
-		case PR_unlink:
-			/* If path points a file that is an symlink to a file that begins
-			 *   with PREFIX, let the file be deleted, but also decrement the
-			 *   hard link count, if it is greater than 1, otherwise delete
-			 *   the original file and intermediate file too.
-			 */
+        default:
+            break;
+        }
+        return 0;
+    }
 
-			status = decrement_link_count(tracee, SYSARG_1);
-			if (status < 0)
-				return status;
+    case SYSCALL_EXIT_END:
+        return handle_sysexit_end(TRACEE(extension));
 
-			break;
+    case TRANSLATED_PATH:
+        translated_path(TRACEE(extension), (char *)data1);
+        return 0;
 
-		case PR_unlinkat:
-			/* If this is request to delete directory, don't handle it here.
-			 * directories cannot be hard links.  */
-			if ((peek_reg(tracee, CURRENT, SYSARG_3) & AT_REMOVEDIR) != 0)
-			{
-				return 0;
-			}
+    case STATX_SYSCALL:
+        link2symlink_handle_statx((struct statx_syscall_state *)data1);
+        return 0;
 
-			/* If path points a file that is a symlink to a file that begins
-			 *   with PREFIX, let the file be deleted, but also delete the
-			 *   symlink that was created and decremnt the count that is tacked
-			 *   to end of original file.
-			 */
-
-			status = decrement_link_count(tracee, SYSARG_2);
-			if (status < 0)
-				return status;
-
-			break;
-
-		case PR_link:
-			/* Convert:
-			 *
-			 *     int link(const char *oldpath, const char *newpath);
-			 *
-			 * into:
-			 *
-			 *     int symlink(const char *oldpath, const char *newpath);
-			 */
-
-			status = move_and_symlink_path(tracee, SYSARG_1, SYSARG_2);
-			if (status < 0)
-				return status;
-
-			break;
-
-		case PR_linkat:
-			/*
-			 * Handle linkat(..., "/proc/X/fd/Y", ..., AT_SYMLINK_FOLLOW)
-			 */
-			if (peek_reg(tracee, CURRENT, SYSARG_5) & AT_SYMLINK_FOLLOW) {
-				status = handle_linkat_from_proc_fd(tracee);
-				if (status < 0)
-					return status;
-				if (status == 1) {
-					set_sysnum(tracee, PR_void);
-					poke_reg(tracee, SYSARG_RESULT, 0);
-					return 0;
-				}
-			}
-
-			/* Convert:
-			 *
-			 *     int linkat(int olddirfd, const char *oldpath,
-			 *                int newdirfd, const char *newpath, int flags);
-			 *
-			 * into:
-			 *
-			 *     int symlink(const char *oldpath, const char *newpath);
-			 *
-			 * Note: PRoot has already canonicalized
-			 * linkat() paths this way:
-			 *
-			 *   olddirfd + oldpath -> oldpath
-			 *   newdirfd + newpath -> newpath
-			 */
-
-			status = move_and_symlink_path(tracee, SYSARG_2, SYSARG_4);
-			if (status < 0)
-				return status;
-
-			break;
-
-		default:
-			break;
-		}
-		return 0;
-	}
-
-	case SYSCALL_EXIT_END: {
-		return handle_sysexit_end(TRACEE(extension));
-	}
-
-	case TRANSLATED_PATH:
-		translated_path(TRACEE(extension), (char *) data1);
-		return 0;
-
-	case STATX_SYSCALL:
-		link2symlink_handle_statx((struct statx_syscall_state *) data1);
-		return 0;
-
-	default:
-		return 0;
-	}
+    default:
+        return 0;
+    }
 }

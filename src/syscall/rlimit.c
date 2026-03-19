@@ -2,7 +2,7 @@
  *
  * This file is part of PRoot.
  *
- * Copyright (C) 2015 STMicroelectronics
+ * Copyright (C) 2026 scicat
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -20,9 +20,9 @@
  * 02110-1301 USA.
  */
 
-#include <stdbool.h>		/* bool, */
-#include <sys/time.h>		/* prlimit(2), */
-#include <sys/resource.h>	/* prlimit(2), */
+#include <stdbool.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
@@ -30,38 +30,12 @@
 #include "tracee/abi.h"
 #include "cli/note.h"
 
-/**
- * Set PRoot's stack soft limit to @tracee's one if this latter is
- * greater.  This allows to workaround a Linux kernel bug that
- * prevents a tracer to access a tracee's stack beyond its last mapped
- * page, as it might by the case under PRoot.  This function returns
- * -errno if an error occurred, otherwise 0.
- *
- * Details: when a tracer tries to access a tracee's stack beyond its
- * last mapped page, the Linux kernel should be able to increase
- * tracee's stack up to its soft limit.  Unfortunately the Linux
- * kernel checks the limit of the tracer instead the limit of the
- * tracee.  This bug was exposed using UMEQ under PRoot.
- *
- * Ref.: https://bugzilla.kernel.org/show_bug.cgi?id=91791
- *
- * Three strategies were possible:
- *
- * - set PRoot's stack soft limit to the hard limit; this might make
- *   the system collapse if PRoot starts to recurses indefinitely.
- *
- * - as it's done here; this appears to be a good compromise between
- *   the strategy above and the one below.
- *
- * - as it's done here + reduce PRoot's stack soft limit as soon as
- *   it's possible; this would be overly complicated.
- */
 int translate_setrlimit_exit(const Tracee *tracee, bool is_prlimit)
 {
 	struct rlimit64 proot_stack;
 	word_t resource;
 	word_t address;
-	word_t tracee_stack_limit;
+	rlim_t tracee_stack_limit;
 	Reg sysarg;
 	int status;
 
@@ -83,11 +57,11 @@ int translate_setrlimit_exit(const Tracee *tracee, bool is_prlimit)
 		tracee_stack_limit = peek_uint64(tracee, address);
 	}
 	else {
-		tracee_stack_limit = peek_word(tracee, address);
+		tracee_stack_limit = (rlim_t)peek_word(tracee, address);
 
 		/* Convert this special value from 32-bit to 64-bit,
 		 * if needed.  */
-		if (is_32on64_mode(tracee) && tracee_stack_limit == (uint32_t) -1)
+		if (is_32on64_mode(tracee) && tracee_stack_limit == (rlim_t)0xFFFFFFFF)
 			tracee_stack_limit = RLIM_INFINITY;
 	}
 	if (errno != 0)
@@ -108,10 +82,13 @@ int translate_setrlimit_exit(const Tracee *tracee, bool is_prlimit)
 
 	/* Increase current PRoot's stack limit.  */
 	status = prlimit64(0, RLIMIT_STACK, &proot_stack, NULL);
-	if (status < 0)
+	if (status < 0) {
 		VERBOSE(tracee, 1, "can't set stack limit.");
-	return 0; /* Not fatal.  */
+		return 0;
+	}
 
-	VERBOSE(tracee, 1, "stack soft limit increased to %llu bytes", proot_stack.rlim_cur);
+	VERBOSE(tracee, 1, "stack soft limit increased to %llu bytes",
+		(unsigned long long)proot_stack.rlim_cur);
+
 	return 0;
 }

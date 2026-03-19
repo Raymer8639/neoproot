@@ -3,62 +3,65 @@
 #include <sys/stat.h>
 
 #include "extension/fake_id0/exec.h"
-
 #include "extension/fake_id0/helper_functions.h"
 
-/** Handles execve system calls. Checks permissions in a meta file if it exists
- *  and returns errors matching those in execve(2).
+/**
+ * 处理 execve 系统调用
+ * 根据 meta 文件做权限检查，遵循 execve(2) 错误码
  */
 int handle_exec_enter_end(Tracee *tracee, Reg filename_sysarg, Config *config)
 {
-	int status, perms;
-	char path[PATH_MAX];
-	char meta_path[PATH_MAX];
-	uid_t uid;
-	gid_t gid;
-	mode_t mode;
+    char path[PATH_MAX];
+    char meta_path[PATH_MAX];
+    mode_t mode;
+    uid_t uid;
+    gid_t gid;
+    int perms;
+    int status;
 
-	status = read_sysarg_path(tracee, path, filename_sysarg, ORIGINAL);
-	if(status < 0) 
-		return status;
-	if(status == 1) 
-		return 0;
+    // 读取要执行的文件路径
+    status = read_sysarg_path(tracee, path, filename_sysarg, ORIGINAL);
+    if (status < 0)
+        return status;
+    if (status == 1)
+        return 0;
 
-	status = get_meta_path(path, meta_path);
-	if(status < 0) 
-		return status;
+    // 获取 meta 文件路径
+    status = get_meta_path(path, meta_path);
+    if (status < 0)
+        return status;
 
-	/* If metafile doesn't exist, get out, but don't error. */
-	if(path_exists(meta_path) != 0)
-		return 0;
-	
-	/* Check perms relative to / since there is no dirfd argument to execve */
-	status = check_dir_perms(tracee, 'r', meta_path, "/", config);
-	if(status < 0) 
-		return status;
-	
-	/* Check whether the file has execute permission. */
-	perms = get_permissions(meta_path, config, 0);
-	if((perms & 1) != 1) 
-		return -EACCES;
+    // 无 meta 文件 → 不处理
+    if (path_exists(meta_path) != 0)
+        return 0;
 
-	/* If the setuid or setgid bits are on, change config accordingly. */
-	read_meta_file(meta_path, &mode, &uid, &gid, config);
-	if ((mode & S_ISUID) != 0) {
-		config->ruid = 0;
-		config->euid = 0;
-		config->suid = 0;
-	}
+    // 检查父目录权限（execve 无 dirfd，相对 / 检查）
+    status = check_dir_perms(tracee, 'r', meta_path, "/", config);
+    if (status < 0)
+        return status;
 
-	if ((mode & S_ISGID) != 0) {
-		config->rgid = 0;
-		config->egid = 0;
-		config->sgid = 0;
-	}
+    // 检查是否有执行权限
+    perms = get_permissions(meta_path, config, 0);
+    if ((perms & 1) == 0)
+        return -EACCES;
 
-	/** TODO Add logic to determine interpreter being used, and check
-	 *  permissions for it.
-	 */
+    // 读取 meta 信息，处理 suid/sgid
+    read_meta_file(meta_path, &mode, &uid, &gid, config);
 
-	return 0;
+    // 设置 suid 模拟
+    if (mode & S_ISUID) {
+        config->ruid = 0;
+        config->euid = 0;
+        config->suid = 0;
+    }
+
+    // 设置 sgid 模拟
+    if (mode & S_ISGID) {
+        config->rgid = 0;
+        config->egid = 0;
+        config->sgid = 0;
+    }
+
+    // 注释：解释器检查逻辑待实现
+    return 0;
 }

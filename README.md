@@ -1,5 +1,20 @@
-proot
-=====
-[![Travis build status](https://travis-ci.org/termux/proot.svg?branch=master)](https://travis-ci.org/termux/proot)
-
-This is a copy of [the PRoot project](https://github.com/proot-me/PRoot/) with patches applied to work better under [Termux](https://termux.com).
+proot-scicat
+ 
+这是在原始 PRoot 项目基础上，由社区爱好者重新维护的版本。
+ 
+原始 PRoot 官方于 2015 年停止更新，长期存在编译警告、兼容性问题与用户体验瑕疵。
+我们于 2026 年 2 月 23 日开始研究轻量级容器实现，在尝试编译原版 proot 源码时，发现大量编译警告与兼容性问题，因此决定接手并继续维护。
+ 
+本版本主要目标：
+ 
+- 修复原版多年遗留的编译警告
+- 修复 Termux 等环境下的实际使用 BUG
+- 优化内存输出、权限、进程管理等体验
+- 保持兼容原有用法，不破坏原有习惯
+ 
+版本命名格式：
+ 
+- 以 5.1.1-scicat 这类风格持续迭代更新
+- 保留核心功能，专注稳定与兼容
+ 
+适用场景：Termux、Android 环境、嵌入式 Linux 等无 root 权限下需要 chroot / mount 绑定的场景。

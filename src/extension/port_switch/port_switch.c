@@ -1,256 +1,267 @@
+/*
+ * This file is part of proot-scicat.
+ *
+ * Copyright (C) 2026 Scicat
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301 USA.
+ *
+ * Description: Redirect privileged ports (<1024) to offset ports (+2000)
+ * Support: bind/connect/sendto + socketcall wrapper, IPv4/IPv6
+ */
+
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <asm/types.h>
-#include <linux/net.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
+#include <linux/net.h>
 
 #include "extension/extension.h"
 #include "tracee/tracee.h"
 #include "tracee/mem.h"
+#include "syscall/sysnum.h"
 
+/* 端口配置：特权端口阈值 + 偏移量 */
 #define PORT_THRESHOLD  1024
 #define PORT_ADDITION   2000
+#define MAX_SOCKET_ARGS 6
 
-/** A function to modify the port number of the socket address sent to system calls by 1024. 
- *  Uses tracee to modify the system call.
- *  Uses is_socketcall to determine if the system call is the socketcall wrapper.
- *  Uses is_bind during bind calls, so that a modification message can be printed.
- *  Uses is_udp to determine if the call is *likely* a UDP communication, in which case the location of
- *  the system call arguments are different.
- *  Uses my_sockaddr to hold the structure that contains the port number to modify.
- *  Uses socketcall_arg2 in the socketcall case, as socketcall's second argument is a long pointer.
+/**
+ * 计算偏移后的端口，仅处理特权端口（1~1023）
+ * @param original_port 原始端口（网络字节序）
+ * @return 偏移后的端口（网络字节序），无偏移则返回原端口
  */
-void    mod_port(Tracee *tracee, bool is_socketcall, bool is_bind, bool is_udp, struct sockaddr_storage *my_sockaddr, long socketcall_arg2[]);
- 
-/** A function to determine whether the IP address of a system call is localhost.
- *  Uses my_sockaddr to hold the structure that contains the IP address. 
- */
-bool    is_localhost(struct sockaddr_storage *my_sockaddr);
-
-int port_switch_callback(Extension *extension, ExtensionEvent event, intptr_t data1 UNUSED, intptr_t data2 UNUSED) {
-    switch (event) {
-    case INITIALIZATION: {
-        static FilteredSysnum filtered_sysnums[] = {
-            { PR_bind, FILTER_SYSEXIT },
-            { PR_connect, FILTER_SYSEXIT },
-            { PR_socketcall, FILTER_SYSEXIT },
-            { PR_sendto, FILTER_SYSEXIT },
-            { PR_recvfrom, FILTER_SYSEXIT },
-            FILTERED_SYSNUM_END     
-        };
-        extension->filtered_sysnums = filtered_sysnums;
-        return 0;
+static in_port_t calc_offset_port(in_port_t original_port)
+{
+    uint16_t port = ntohs(original_port);
+    if (port > 0 && port < PORT_THRESHOLD) {
+        return htons(port + PORT_ADDITION);
     }
-    
-    case SYSCALL_ENTER_END: {
-        Tracee *tracee = TRACEE(extension);
-        
-        /** The 4 system calls that will be changed are bind, connect, sendto, and socketcall. 
-         *  Socketcall is a wrapper function for the i386 architecture that wraps the first 3 system calls.
-         *  In every bind case the port is modified, as there is a high likelihood that it will be binding a socket locally.
-         *  For connect and sendto, the port is only modified if the calls are attempting to reach localhost. This is
-         *  to save users hassle when connecting to localhost while allowing them to reach servers outside their system
-         *  without a difference from their regular usability.
-         */
-        switch(get_sysnum(tracee, ORIGINAL)) {
+    return original_port;
+}
 
-            case PR_bind: {
-                struct sockaddr_storage my_sockaddr;    
-                read_data(tracee, &my_sockaddr, peek_reg(tracee, ORIGINAL, SYSARG_2), sizeof(struct sockaddr_storage));
-                mod_port(tracee, false, true, false, &my_sockaddr, NULL);
-                
-                return 0;
-            }
+/**
+ * 修改 IPv4 地址的端口并写回内存
+ * @param tracee 进程追踪句柄
+ * @param addr_ptr 地址结构体在进程内存中的地址
+ * @return 0-成功，非0-错误码
+ */
+static int modify_ipv4_port(Tracee *tracee, word_t addr_ptr, bool is_bind)
+{
+    struct sockaddr_in in4 = {0};
+    int ret = read_data(tracee, &in4, addr_ptr, sizeof(in4));
+    if (ret < 0)
+        return ret;
 
-            case PR_connect: {
-                struct sockaddr_storage my_sockaddr;
-                read_data(tracee, &my_sockaddr, peek_reg(tracee, ORIGINAL, SYSARG_2), sizeof(struct sockaddr_storage));
-                if(is_localhost(&my_sockaddr)) 
-                    mod_port(tracee, false, false, false, &my_sockaddr, NULL);
-                
-                return 0;
-            }
+    in_port_t old_port = in4.sin_port;
+    in4.sin_port = calc_offset_port(old_port);
 
-            case PR_sendto: {
-                struct sockaddr_storage my_sockaddr;
-                /** There are some cases where sendto() is called during a TCP communication, even though
-                 *  send() is the norm. The port doesn't need to be modified in these cases. If sendto()
-                 *  is used while in a connected case (non-UDP), its sockaddr argument is null. To avoid
-                 *  modifying the port, these cases are ignored.
-                 */
-                if(peek_reg(tracee, ORIGINAL, SYSARG_5) != 0) {
-                    read_data(tracee, &my_sockaddr, peek_reg(tracee, ORIGINAL, SYSARG_5), sizeof(struct sockaddr_storage));
-                    if(is_localhost(&my_sockaddr)) 
-                        mod_port(tracee, false, false, true, &my_sockaddr, NULL);
-                }
-                return 0;
-            }
+    // bind 操作打印端口变更提示
+    if (is_bind && in4.sin_port != old_port) {
+        printf("\nATTENTION: Bind requested on port %d\n", ntohs(old_port));
+        printf("Port redirected to %d (use this for external connections)\n\n", ntohs(in4.sin_port));
+    }
 
-            case PR_socketcall: {
-                /** Socketcall's 1st argument is an int that signifies which actual socket system call it is being used to wrap.
-                 *  Socketcall's 2nd argument is a long* that leads to the location in memory where the arguments to that system
-                 *  call are. Those arguments are extracted first, and then the sockaddr can be extracted from those.
-                 */
-                int call;
-                long a[6];
-                call = peek_reg(tracee, ORIGINAL, SYSARG_1);
-                read_data(tracee, a, peek_reg(tracee, ORIGINAL, SYSARG_2), sizeof(a));
-                switch(call) {
+    return write_data(tracee, addr_ptr, &in4, sizeof(in4));
+}
 
-                    case SYS_BIND: {
-                        struct sockaddr_storage my_sockaddr;
-                        read_data(tracee, &my_sockaddr, a[1], sizeof(struct sockaddr_storage));
-                        mod_port(tracee, true, true, false, &my_sockaddr, a);
+/**
+ * 修改 IPv6 地址的端口并写回内存
+ * @param tracee 进程追踪句柄
+ * @param addr_ptr 地址结构体在进程内存中的地址
+ * @return 0-成功，非0-错误码
+ */
+static int modify_ipv6_port(Tracee *tracee, word_t addr_ptr, bool is_bind)
+{
+    struct sockaddr_in6 in6 = {0};
+    int ret = read_data(tracee, &in6, addr_ptr, sizeof(in6));
+    if (ret < 0)
+        return ret;
 
-                        break;
-                    }
+    in_port_t old_port = in6.sin6_port;
+    in6.sin6_port = calc_offset_port(old_port);
 
-                    case SYS_CONNECT: {
-                        struct sockaddr_storage my_sockaddr;
-                        read_data(tracee, &my_sockaddr, a[1], sizeof(struct sockaddr_storage));
-                        if(is_localhost(&my_sockaddr)) 
-                            mod_port(tracee, true, false, false, &my_sockaddr, a);
+    // bind 操作打印端口变更提示
+    if (is_bind && in6.sin6_port != old_port) {
+        printf("\nATTENTION: Bind requested on port %d\n", ntohs(old_port));
+        printf("Port redirected to %d (use this for external connections)\n\n", ntohs(in6.sin6_port));
+    }
 
-                        break;
-                    }
+    return write_data(tracee, addr_ptr, &in6, sizeof(in6));
+}
 
-                    case SYS_SENDTO: {
-                        struct sockaddr_storage my_sockaddr;
-                        if(a[4] != 0) {
-                            read_data(tracee, &my_sockaddr, a[4], sizeof(struct sockaddr_storage));
-                            if(is_localhost(&my_sockaddr)) 
-                                mod_port(tracee, true, false, true, &my_sockaddr, a);
-                        }
+/**
+ * 处理标准 socket 系统调用（bind/connect/sendto）的端口修改
+ * @param tracee 进程追踪句柄
+ * @param sysnum 系统调用号
+ * @return 0-成功，非0-错误码
+ */
+static int handle_standard_socketcall(Tracee *tracee, Sysnum sysnum)
+{
+    bool is_bind = (sysnum == PR_bind);
+    bool is_udp = (sysnum == PR_sendto);
+    word_t addr_ptr = 0;
 
-                        break;
-                    }
-                    default:
-                        break;
-                }
+    // 确定地址参数的寄存器位置
+    if (is_udp) {
+        // sendto: 地址参数在 SYSARG_5
+        addr_ptr = peek_reg(tracee, ORIGINAL, SYSARG_5);
+        if (addr_ptr == 0)
+            return 0; // 已连接的 TCP 调用，无需修改
+    } else {
+        // bind/connect: 地址参数在 SYSARG_2
+        addr_ptr = peek_reg(tracee, ORIGINAL, SYSARG_2);
+    }
 
-                return 0;
-            }
+    // 读取地址族，选择对应处理逻辑
+    struct sockaddr_storage addr = {0};
+    int ret = read_data(tracee, &addr, addr_ptr, sizeof(addr.ss_family));
+    if (ret < 0)
+        return ret;
 
-            default:
-                return 0;
-        }
-    }   
-    default: 
+    switch (addr.ss_family) {
+    case AF_INET:
+        return modify_ipv4_port(tracee, addr_ptr, is_bind);
+    case AF_INET6:
+        return modify_ipv6_port(tracee, addr_ptr, is_bind);
+    default:
         return 0;
     }
 }
 
-void mod_port(Tracee *tracee, bool is_socketcall, bool is_bind, bool is_udp, struct sockaddr_storage *my_sockaddr, long *socketcall_arg2) {   
-    /** IPv4 and IPv6 addresses are stored in different structures. Because of this, the port must be changed
-     *  in different ways depending on the address family. 
-     *
-     *  Socketcall stores the arguments to the system call it wraps in a pointer, the modified sockaddr must be written 
-     *  separately to an array and then to the tracee.
-     *  
-     *  Modifying the port is avoided if the port is not within the section of ports that Android reserves. This is to
-     *  avoid problems in UDP server/client communications, in cases where the server sends a message back to the client.
-     *  Since the client normally doesn't specifically call bind(), a port >1024 is usually assigned for it to recvfrom.
-     *
-     *  UDP communications are also treated differently, as the sendto() function has the sockaddr in its 5th location
-     *  instead of the 2nd as every other call does.
-     */
-    switch(my_sockaddr->ss_family) {
-        case AF_INET: {
-            struct sockaddr_in *in = (struct sockaddr_in *)my_sockaddr;
-            if(ntohs(in->sin_port) > 0 && ntohs(in->sin_port) < PORT_THRESHOLD) {
+/**
+ * 处理 socketcall 封装调用（i386 架构）的端口修改
+ * @param tracee 进程追踪句柄
+ * @param call socketcall 子调用类型（SYS_BIND/SYS_CONNECT/SYS_SENDTO）
+ * @param args_ptr 子调用参数数组的地址
+ * @return 0-成功，非0-错误码
+ */
+static int handle_socketcall_wrapper(Tracee *tracee, int call, word_t args_ptr)
+{
+    bool is_bind = (call == SYS_BIND);
+    bool is_udp = (call == SYS_SENDTO);
+    long args[MAX_SOCKET_ARGS] = {0};
+    word_t addr_ptr = 0;
 
-                if(is_bind) {
-                    printf("\nATTENTION: A bind system call was requested on port: %d\n", ntohs(in->sin_port));
-                    in->sin_port = htons(ntohs(in->sin_port) + PORT_ADDITION);
-                    printf("The port has been changed. If connecting from outside Termux, use: %d\n\n", ntohs(in->sin_port));
-                }
-                else
-                   in->sin_port = htons(ntohs(in->sin_port) + PORT_ADDITION); 
+    // 读取 socketcall 子调用参数
+    int ret = read_data(tracee, args, args_ptr, sizeof(args));
+    if (ret < 0)
+        return ret;
 
-                if(is_socketcall && is_udp) {
-                    write_data(tracee, socketcall_arg2[4], in, sizeof(in));
-                    write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), socketcall_arg2, 5 * sizeof(long));
-                }
+    // 确定地址参数在 args 数组中的索引
+    if (is_udp) {
+        addr_ptr = args[4];
+        if (addr_ptr == 0)
+            return 0; // 已连接的 TCP 调用，无需修改
+    } else {
+        addr_ptr = args[1]; // SYS_BIND/SYS_CONNECT: 地址参数在 args[1]
+    }
 
-                else if(!is_socketcall && is_udp)
-                    write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_5), in, sizeof(in));
-                
-                else if(is_socketcall && !is_udp) {
-                    write_data(tracee, socketcall_arg2[1], in, sizeof(in));
-                    write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), socketcall_arg2, 2 * sizeof(long));
-                }
+    // 读取地址族，选择对应处理逻辑
+    struct sockaddr_storage addr = {0};
+    ret = read_data(tracee, &addr, addr_ptr, sizeof(addr.ss_family));
+    if (ret < 0)
+        return ret;
 
-                else if(!is_socketcall && !is_udp)
-                    write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), in, sizeof(in));
-            }
+    switch (addr.ss_family) {
+    case AF_INET:
+        ret = modify_ipv4_port(tracee, addr_ptr, is_bind);
+        break;
+    case AF_INET6:
+        ret = modify_ipv6_port(tracee, addr_ptr, is_bind);
+        break;
+    default:
+        return 0;
+    }
+
+    // 修改后写回参数数组（仅需写回被修改的地址参数）
+    if (ret == 0) {
+        size_t write_len = is_udp ? 5 * sizeof(long) : 2 * sizeof(long);
+        ret = write_data(tracee, args_ptr, args, write_len);
+    }
+
+    return ret;
+}
+
+/**
+ * 端口转发扩展核心回调函数
+ */
+int port_switch_callback(Extension *extension, ExtensionEvent event,
+                         intptr_t data1 UNUSED, intptr_t data2 UNUSED)
+{
+    if (extension == NULL)
+        return -EINVAL;
+
+    switch (event) {
+    case INITIALIZATION: {
+        // 注册需要处理的系统调用
+        static const FilteredSysnum filtered_sysnums[] = {
+            { PR_bind,        FILTER_SYSEXIT },
+            { PR_connect,     FILTER_SYSEXIT },
+            { PR_socketcall,  FILTER_SYSEXIT },
+            { PR_sendto,      FILTER_SYSEXIT },
+            { PR_recvfrom,    FILTER_SYSEXIT },
+            FILTERED_SYSNUM_END
+        };
+        extension->filtered_sysnums = (FilteredSysnum *)filtered_sysnums;
+        return 0;
+    }
+
+    case SYSCALL_ENTER_END: {
+        Tracee *tracee = TRACEE(extension);
+        if (tracee == NULL)
+            return 0;
+
+        Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
+        int ret = 0;
+
+        switch (sysnum) {
+        case PR_bind:
+        case PR_connect:
+        case PR_sendto:
+            // 处理标准 socket 系统调用
+            ret = handle_standard_socketcall(tracee, sysnum);
             break;
-        }
 
-        case AF_INET6: {
-            struct sockaddr_in6 *in6 = (struct sockaddr_in6 *)my_sockaddr;
-            if(ntohs(in6->sin6_port) > 0 && ntohs(in6->sin6_port) < PORT_THRESHOLD) {
-                if(is_bind) {
-                    printf("\nATTENTION: A bind system call was requested on port: %d\n", ntohs(in6->sin6_port));
-                    in6->sin6_port = htons(ntohs(in6->sin6_port) + PORT_ADDITION);
-                    printf("The port has been changed. If connecting from outside Termux, use: %d\n\n", ntohs(in6->sin6_port));
-                }
-                else
-                    in6->sin6_port = htons(ntohs(in6->sin6_port) + PORT_ADDITION);
-    
-                if(is_socketcall && is_udp) { 
-                    write_data(tracee, socketcall_arg2[4], in6, sizeof(in6));
-                    write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), socketcall_arg2, sizeof(socketcall_arg2));
-                }
+        case PR_socketcall: {
+            // 处理 socketcall 封装调用
+            int call = (int)peek_reg(tracee, ORIGINAL, SYSARG_1);
+            word_t args_ptr = peek_reg(tracee, ORIGINAL, SYSARG_2);
 
-                else if(is_socketcall && is_udp)
-                    write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_5), in6, sizeof(in6));
-
-                else if(is_socketcall && !is_udp) { 
-                    write_data(tracee, socketcall_arg2[1], in6, sizeof(in6));
-                    write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), socketcall_arg2, sizeof(socketcall_arg2));
-                }
-
-                else if(!is_socketcall && !is_udp)
-                    write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), in6, sizeof(in6));
+            switch (call) {
+            case SYS_BIND:
+            case SYS_CONNECT:
+            case SYS_SENDTO:
+                ret = handle_socketcall_wrapper(tracee, call, args_ptr);
+                break;
+            default:
+                break;
             }
             break;
         }
 
         default:
-            break; 
+            break;
+        }
+
+        return ret;
     }
-}
 
-bool is_localhost(struct sockaddr_storage *my_sockaddr) {
-    /** Localhost is represented differently in the two IPv families, so determining if an address's destination is localhost
-     *  must be done differently for each family. Both must also be compared to 0, which is the enumeration for INADDR_ANY
-     *  which is often used bind() calls.
-     */
-    switch(my_sockaddr->ss_family) {
-
-        case AF_INET: {
-            struct sockaddr_in *in = (struct sockaddr_in *)my_sockaddr;
-            char ipAddress[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &(in->sin_addr), ipAddress, INET_ADDRSTRLEN);
-            if(strcmp(ipAddress, "127.0.0.1") == 0)
-                return true;
-            else
-                return false;
-        }
-    
-        case AF_INET6: {
-            struct sockaddr_in6 *in6 = (struct sockaddr_in6 *)my_sockaddr;
-            char ipAddress[INET6_ADDRSTRLEN];
-            inet_ntop(AF_INET6, &(in6->sin6_addr), ipAddress, INET6_ADDRSTRLEN);
-            if(strcmp(ipAddress, "::1") == 0)
-                return true;
-            else
-                return false;
-        }
-
-        default: 
-            return false;
+    default:
+        return 0;
     }
 }

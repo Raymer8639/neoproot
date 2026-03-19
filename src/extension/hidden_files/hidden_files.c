@@ -1,183 +1,189 @@
 /*
- * Author: Dieter Mueller
- * Date:   6/12/2015
+ * Copyright (C) 2026 Scicat
  *
- * Description: An extension to allow getdents to hide files
- * with a given prefix. Useful for keeping files from being
- * deleted by wildcard expressions.
+ * This file is part of proot-scicat.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301 USA.
  */
 
 #include "extension/extension.h"
 #include "tracee/mem.h"
 #include "syscall/chain.h"
 #include "path/path.h"
+#include <string.h>
+#include <limits.h>
 
-/* Change the HIDDEN_PREFIX to change which files are hidden */
+/* 需隐藏的文件前缀，可按需修改 */
 #define HIDDEN_PREFIX ".proot"
 
+/* 32位目录项结构 */
 struct linux_dirent {
-    unsigned long d_ino;
-    unsigned long d_off;
+    unsigned long  d_ino;
+    unsigned long  d_off;
     unsigned short d_reclen;
-    char d_name[];
+    char           d_name[];
 };
 
+/* 64位目录项结构 */
 struct linux_dirent64 {
     unsigned long long d_ino;
-    long long d_off;
-    unsigned short d_reclen;
-    unsigned char d_type;
-    char d_name[];
+    long long          d_off;
+    unsigned short     d_reclen;
+    unsigned char      d_type;
+    char               d_name[];
 };
 
-/*
- * Blind copies the given num of bytes from src to dst
+/**
+ * 内存字节拷贝，替代原生bcopy
+ * @param src 源地址
+ * @param dst 目标地址
+ * @param num 拷贝字节数
  */
-static void mybcopy(char *src, char *dst, unsigned int num) {
-    while(num--) { *(dst++) = *(src++); }
+static void mem_copy(char *src, char *dst, unsigned int num)
+{
+    if (src == NULL || dst == NULL || num == 0)
+        return;
+    while (num--) {
+        *(dst++) = *(src++);
+    }
 }
 
-/*
- * Compares the given prefix with the given string.
- * If str has the given prefix, return 1. Otherwise
- * return 0
+/**
+ * 检查字符串是否以指定前缀开头
+ * @param prefix 前缀字符串
+ * @param str    待检查字符串
+ * @return 1-是，0-否
  */
-
-static int hasprefix(char *prefix, char *str) {
-    while (*prefix && *str && (*(prefix) == *(str))) {
+static int str_has_prefix(const char *prefix, const char *str)
+{
+    if (prefix == NULL || str == NULL)
+        return 0;
+    while (*prefix && *str && (*prefix == *str)) {
         prefix++;
         str++;
     }
-  
-    /* If there is not any prefix left after stepping
-     * through the strings, then it matches */
-    if (!(*prefix)) { return 1; }
+    return (*prefix == '\0') ? 1 : 0;
+}
+
+/**
+ * 处理getdents/getdents64系统调用，过滤指定前缀的隐藏文件
+ * @param tracee 进程追踪句柄
+ * @return 0-成功，非0-错误码
+ */
+static int handle_getdents(Tracee *tracee)
+{
+    if (tracee == NULL)
+        return -1;
+
+    word_t sysnum = get_sysnum(tracee, ORIGINAL);
+    if (sysnum != PR_getdents && sysnum != PR_getdents64)
+        return 0;
+
+    /* 获取系统调用返回值（实际读取的字节数） */
+    unsigned int res = (unsigned int)peek_reg(tracee, CURRENT, SYSARG_RESULT);
+    if (res <= 0)
+        return (int)res;
+
+    /* 获取系统调用参数：fd=SYSARG_1, buf=SYSARG_2, count=SYSARG_3 */
+    word_t fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
+    word_t buf_addr = peek_reg(tracee, CURRENT, SYSARG_2);
+    unsigned int count = (unsigned int)peek_reg(tracee, CURRENT, SYSARG_3);
+
+    /* 校验缓冲区大小，避免内存越界 */
+    if (count == 0 || count > PATH_MAX * 1024)
+        return 0;
+
+    /* 验证路径是否属于guestfs，非guestfs路径不做过滤 */
+    char path[PATH_MAX] = {0};
+    int status = readlink_proc_pid_fd(tracee->pid, fd, path);
+    if (status < 0 || !belongs_to_guestfs(tracee, path))
+        return 0;
+
+    /* 读取getdents返回的原始目录项数据 */
+    char orig_data[count];
+    status = read_data(tracee, orig_data, buf_addr, res);
+    if (status < 0)
+        return status;
+
+    /* 分配过滤后的数据缓冲区 */
+    char filtered_data[count];
+    char *orig_ptr = orig_data;    // 原始数据指针
+    char *filter_ptr = filtered_data; // 过滤后数据指针
+    unsigned int filtered_len = 0; // 过滤后数据总长度
+
+    /* 分64/32位处理目录项 */
+    if (sysnum == PR_getdents64) {
+        struct linux_dirent64 *dir64;
+        while (orig_ptr < orig_data + res) {
+            dir64 = (struct linux_dirent64 *)orig_ptr;
+            /* 过滤掉指定前缀的文件，保留其他文件 */
+            if (!str_has_prefix(HIDDEN_PREFIX, dir64->d_name)) {
+                mem_copy(orig_ptr, filter_ptr, dir64->d_reclen);
+                filter_ptr += dir64->d_reclen;
+                filtered_len += dir64->d_reclen;
+            }
+            orig_ptr += dir64->d_reclen;
+        }
+    } else {
+        struct linux_dirent *dir32;
+        while (orig_ptr < orig_data + res) {
+            dir32 = (struct linux_dirent *)orig_ptr;
+            /* 过滤掉指定前缀的文件，保留其他文件 */
+            if (!str_has_prefix(HIDDEN_PREFIX, dir32->d_name)) {
+                mem_copy(orig_ptr, filter_ptr, dir32->d_reclen);
+                filter_ptr += dir32->d_reclen;
+                filtered_len += dir32->d_reclen;
+            }
+            orig_ptr += dir32->d_reclen;
+        }
+    }
+
+    /* 无有效数据时，链式调用重新执行getdents */
+    if (filtered_len == 0) {
+        register_chained_syscall(tracee, sysnum,
+            peek_reg(tracee, ORIGINAL, SYSARG_1),
+            buf_addr, count, 0, 0, 0);
+    } else {
+        /* 将过滤后的数据写回进程内存，并更新返回值 */
+        status = write_data(tracee, buf_addr, filtered_data, filtered_len);
+        if (status < 0)
+            return status;
+        poke_reg(tracee, SYSARG_RESULT, (word_t)filtered_len);
+    }
+
     return 0;
 }
 
 /**
- * Hide all files with a given PREFIX so they don't exist to
- * the user
- */
-static int handle_getdents(Tracee *tracee)
-{
-    switch (get_sysnum(tracee, ORIGINAL)) {
-    case PR_getdents64: 
-    case PR_getdents: {
-        /* get the result of the syscall, which is the number of bytes read by getdents */
-        unsigned int res = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-        if (res <= 0) {
-            return res;
-        }
-
-        /* get the system call arguments */
-        word_t orig_start = peek_reg(tracee, CURRENT, SYSARG_2);
-        unsigned int count = peek_reg(tracee, CURRENT, SYSARG_3);
-        char orig[count];
-
-        char path[PATH_MAX];
-        int status = readlink_proc_pid_fd(tracee->pid, peek_reg(tracee, ORIGINAL, SYSARG_1), path);
-        if (status < 0) {
-           return 0;
-        }
-        if(!belongs_to_guestfs(tracee, path))
-           return 0;
-
-        /* retrieve the data from getdents */
-        status = read_data(tracee, orig, orig_start, res);
-        if (status < 0) {
-            return status;
-        }
-
-        /* allocate a space for the copy of the data we want */
-        char copy[count];
-        /* curr will hold the current struct we're examining */
-        struct linux_dirent64 *curr64;
-        struct linux_dirent *curr32;
-        /* pos keeps track of where in memory the copy is */
-        char *pos = copy;
-        /* ptr keeps track of where in memory the original is */
-        char *ptr = orig;
-        /* nleft keeps track of how many bytes we've saved */
-        unsigned int nleft = 0;
-
-        /* while we're still within the memory allowed */
-        if (get_sysnum(tracee, ORIGINAL) == PR_getdents64) {
-            while (ptr < orig + res) {
-
-                /* get the current struct */
-                curr64 = (struct linux_dirent64 *)ptr;
-
-                /* if the name does not matche a given prefix */
-                if (!hasprefix(HIDDEN_PREFIX, curr64->d_name)) {
-
-                    /* copy the information */
-                    mybcopy(ptr, pos, curr64->d_reclen);
-
-                    /* move the pos and nleft */
-                    pos += curr64->d_reclen;
-                    nleft += curr64->d_reclen;
-                }
-                /* move to the next linux_dirent */
-                ptr += curr64->d_reclen;
-            }
-        } else {
-            while (ptr < orig + res) {
-
-                /* get the current struct */
-                curr32 = (struct linux_dirent *)ptr;
-
-                /* if the name does not matche a given prefix */
-                if (!hasprefix(HIDDEN_PREFIX, curr32->d_name)) {
-
-                    /* copy the information */
-                    mybcopy(ptr, pos, curr32->d_reclen);
-
-                    /* move the pos and nleft */
-                    pos += curr32->d_reclen;
-                    nleft += curr32->d_reclen;
-                }
-                /* move to the next linux_dirent */
-                ptr += curr32->d_reclen;
-            }
-        }
-        /* If there is nothing left */
-        if (!nleft) {
-            /* call getdents again */
-            if (get_sysnum(tracee, ORIGINAL) == PR_getdents64)
-                register_chained_syscall(tracee, PR_getdents64, peek_reg(tracee, ORIGINAL, SYSARG_1), orig_start, count, 0, 0, 0);
-            else
-                register_chained_syscall(tracee, PR_getdents, peek_reg(tracee, ORIGINAL, SYSARG_1), orig_start, count, 0, 0, 0);
-        }
-        else {
-            /* copy the data back into the register */
-            status = write_data(tracee, orig_start, copy, nleft);
-            if (status < 0) {
-                return status;
-            }
-            /* update the return value to match the data */
-            poke_reg(tracee, SYSARG_RESULT, nleft);
-        }
-
-        /* return successful */
-        return 0;
-    }
-
-    default:
-        return 0;
-    }
-}
-
-/**
- * Handler for this @extension.  It is triggered each time an @event
- * occured.  See ExtensionEvent for the meaning of @data1 and @data2.
+ * 扩展核心回调函数，处理各类事件触发
+ * @param extension 扩展句柄
+ * @param event     触发事件类型
+ * @param data1     事件附加数据1
+ * @param data2     事件附加数据2
+ * @return 0-成功，非0-错误码
  */
 int hidden_files_callback(Extension *extension, ExtensionEvent event,
         intptr_t data1 UNUSED, intptr_t data2 UNUSED)
 {
+    if (extension == NULL)
+        return -1;
+
     switch (event) {
     case INITIALIZATION: {
-        /* List of syscalls handled by this extension */
+        /* 注册需要处理的系统调用：getdents/getdents64（退出阶段过滤） */
         static FilteredSysnum filtered_sysnums[] = {
             { PR_getdents,    FILTER_SYSEXIT },
             { PR_getdents64,  FILTER_SYSEXIT },
@@ -188,9 +194,9 @@ int hidden_files_callback(Extension *extension, ExtensionEvent event,
     }
 
     case SYSCALL_CHAINED_EXIT:
-    case SYSCALL_EXIT_END: {
+    case SYSCALL_EXIT_END:
+        /* 系统调用退出时执行文件过滤逻辑 */
         return handle_getdents(TRACEE(extension));
-    }
 
     default:
         return 0;

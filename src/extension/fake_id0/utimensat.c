@@ -3,61 +3,65 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "tracee/mem.h"
 #include "extension/fake_id0/utimensat.h"
 #include "extension/fake_id0/helper_functions.h"
 
-/** Handles the utimensat syscall. Checks permissions of the meta file if it
- *  exists and returns an error if the call would not pass according to the 
- *  errors found in utimensat(2).
+/**
+ * 处理 utimensat 系统调用
+ * 检查 meta 文件权限，按 utimensat(2) 规则返回错误
  */
-int handle_utimensat_enter_end(Tracee *tracee, Reg dirfd_sysarg, 
-	Reg path_sysarg, Reg times_sysarg, Config *config)
+int handle_utimensat_enter_end(Tracee *tracee, Reg dirfd_sysarg,
+                               Reg path_sysarg, Reg times_sysarg, Config *config)
 {
-	int status, perms, fd;
-	struct timespec times[2];
-	mode_t ignore_m;
-	uid_t owner;
-	gid_t ignore_g;
-	char path[PATH_MAX];
-	char meta_path[PATH_MAX];
+    struct timespec times[2];
+    char path[PATH_MAX];
+    char meta_path[PATH_MAX];
+    mode_t mode;
+    uid_t owner;
+    gid_t gid;
+    int ret;
+    int perms;
 
-	// Only care about calls that attempt to change something.
-	status = peek_reg(tracee, ORIGINAL, times_sysarg);
-	if(status != 0) {
-		status = read_data(tracee, times, peek_reg(tracee, ORIGINAL, times_sysarg), sizeof(times));
-		if(times[0].tv_nsec != UTIME_NOW && times[1].tv_nsec != UTIME_NOW) 
-			return 0;
-	}
+    // 只处理尝试修改时间的调用
+    word_t times_addr = peek_reg(tracee, ORIGINAL, times_sysarg);
+    if (times_addr != 0) {
+        ret = read_data(tracee, times, times_addr, sizeof(times));
+        if (ret < 0)
+            return ret;
 
-	fd = peek_reg(tracee, ORIGINAL, dirfd_sysarg);
-	if(fd == AT_FDCWD) {
-		status = read_sysarg_path(tracee, path, path_sysarg, CURRENT);
-		if(status < 0) 
-			return status;
-		if(status == 1)
-			return 0;
-	}
-	else {
-		status = get_fd_path(tracee, path, dirfd_sysarg, CURRENT);
-		if(status < 0)
-			return status;
-	}
+        // 都不是 UTIME_NOW 则不需要检查
+        if (times[0].tv_nsec != UTIME_NOW && times[1].tv_nsec != UTIME_NOW)
+            return 0;
+    }
 
-	status = get_meta_path(path, meta_path);
-	if(status < 0)
-		return status;
+    int dirfd = peek_reg(tracee, ORIGINAL, dirfd_sysarg);
+    if (dirfd == AT_FDCWD) {
+        ret = read_sysarg_path(tracee, path, path_sysarg, CURRENT);
+        if (ret != 0)
+            return ret;
+    } else {
+        ret = get_fd_path(tracee, path, dirfd_sysarg, CURRENT);
+        if (ret < 0)
+            return ret;
+    }
 
-	// Current user must be owner of file or root.
-	read_meta_file(meta_path, &ignore_m, &owner, &ignore_g, config);
-	if(config->euid != owner && config->euid != 0) 
-		return -EACCES;
+    ret = get_meta_path(path, meta_path);
+    if (ret < 0)
+        return ret;
 
-	// If write permissions are on the file, continue.
-	perms = get_permissions(meta_path, config, 0);
-	if((perms & 2) != 2)
-		return -EACCES;
+    // 必须是文件所有者或 root
+    if (read_meta_file(meta_path, &mode, &owner, &gid, config) == 0) {
+        if (config->euid != owner && config->euid != 0)
+            return -EACCES;
+    }
 
-	return 0;
+    // 必须有写权限
+    perms = get_permissions(meta_path, config, 0);
+    if (!(perms & 2))
+        return -EACCES;
+
+    return 0;
 }

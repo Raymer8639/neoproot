@@ -1,45 +1,46 @@
-How to make a release of PRoot?
-===============================
+SciCat PRoot 发布指南
+=======================
 
-This document summarizes checks that must be performed before
-releasing PRoot or CARE.
+本文档概述了发布 SciCat PRoot 之前必须执行的检查。
 
-Checks
-------
+发布前检查
+----------
 
-+ Sanity checks:
-  * on ARM and *all* OBS distros (x86 and x86_64): `make -C test`
-  * on x86_64, with *and* without seccomp:
-    - `make -C tests` on *all* OBS distros
-    - `make -C tests memcheck`
-    - `CFLAGS=-fsanitize=address LDFLAGS=-lasan`
-    - `make -C tests V=1 2>&1 | grep talloc`
++ 安全性检查:
+  * 代码中没有硬编码的敏感信息
+  * 依赖库版本已更新至最新稳定版
+  * 代码中没有已知的安全漏洞
 
-+ Fonctional checks: no regressions must appear with respect to
-  tests/validation.mk and to the configurations tested in the previous
-  release (`git show tags/...`).
++ 功能性检查:
+  * 所有测试用例通过: `make test`
+  * 代码风格符合项目规范
+  * 文档已更新以反映新功能
+  * 新增功能有适当的单元测试覆盖
 
-+ Performance checks: the following command must not suffer from
-  unexpected performance regression::
++ 构建检查:
+  * 在支持的平台上构建成功
+  * 构建过程无警告
+  * 交叉编译支持正常工作
 
-    time proot -R / perl -e 'system("/usr/bin/true") for (1..10000)'
+发布流程
+--------
 
-  where "/usr/bin/true" is a symlink to "/bin/true".
+1. 确保所有测试通过
+2. 更新版本号和发布说明
+3. 创建发布分支
+4. 生成文档
+5. 构建发布包
+6. 验证构建产物
+7. 创建 Git 标签
+8. 上传到代码仓库
 
-+ Static analysis: Coverity Scan and Clang Scan Build must not report
-  new issues.
+版本号管理
+------------
 
+SciCat PRoot 使用 SemVer 版本号方案:
+- 主版本号: 不兼容的 API 变更
+- 次版本号: 向后兼容的功能添加
+- 修订号: 向后兼容的问题修复
 
-Documentation Update
---------------------
-
-0. update "doc/changelog.txt"
-
-1. update the release number in "doc/proot/manual.txt"
-
-2. regenerate the documentation: `make -C doc`
-
-3. regenerate the command-line interface: `cp doc/*.h
-   src/cli/; $EDITOR src/cli/{proot,care}.h`
-
-4. upload the generated RPM .spec file to OBS
+发布标签格式应为: v{主}.{次}.{修订}
+例如: v1.0.0

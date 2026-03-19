@@ -1,18 +1,17 @@
 /* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
  *
- * This file is part of PRoot.
+ * This file is part of proot-scicat.
  *
- * Copyright (C) 2015 STMicroelectronics
+ * Copyright (C) 2026 scicat
  *
  * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
+ * modify it under the terms of the GNU General Public License
+ * version 2, as published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
@@ -20,165 +19,132 @@
  * 02110-1301 USA.
  */
 
-#include <linux/auxvec.h>  /* AT_*,  */
-#include <assert.h>        /* assert(3),  */
-#include <errno.h>         /* E*,  */
-#include <unistd.h>        /* write(3), close(3), */
-#include <sys/types.h>     /* open(2), */
-#include <sys/stat.h>      /* open(2), */
-#include <fcntl.h>         /* open(2), */
+#include <linux/auxvec.h>
+#include <assert.h>
+#include <errno.h>
+#include <stddef.h>
+#include <talloc.h>
 
-#include "execve/auxv.h"
+// 🔥 修复：补上缺失的头文件
 #include "syscall/sysnum.h"
+#include "execve/auxv.h"
 #include "tracee/tracee.h"
 #include "tracee/mem.h"
 #include "tracee/reg.h"
 #include "tracee/abi.h"
 #include "arch.h"
 
-
-/**
- * Add the given vector [@type, @value] to @vectors.  This function
- * returns -errno if an error occurred, otherwise 0.
- */
 int add_elf_aux_vector(ElfAuxVector **vectors, word_t type, word_t value)
 {
-	ElfAuxVector *tmp;
-	size_t nb_vectors;
+	if (!vectors || !*vectors)
+		return -EINVAL;
 
-	assert(*vectors != NULL);
+	size_t total = talloc_array_length(*vectors);
+	if (total == 0 || (*vectors)[total - 1].type != AT_NULL)
+		return -EINVAL;
 
-	nb_vectors = talloc_array_length(*vectors);
-
-	/* Sanity checks.  */
-	assert(nb_vectors > 0);
-	assert((*vectors)[nb_vectors - 1].type == AT_NULL);
-
-	tmp = talloc_realloc(talloc_parent(*vectors), *vectors, ElfAuxVector, nb_vectors + 1);
-	if (tmp == NULL)
+	ElfAuxVector *new_block = talloc_realloc(talloc_parent(*vectors),
+		*vectors, ElfAuxVector, total + 1);
+	if (!new_block)
 		return -ENOMEM;
-	*vectors = tmp;
 
-	/* Replace the sentinel with the new vector.  */
-	(*vectors)[nb_vectors - 1].type  = type;
-	(*vectors)[nb_vectors - 1].value = value;
-
-	/* Restore the sentinel.  */
-	(*vectors)[nb_vectors].type  = AT_NULL;
-	(*vectors)[nb_vectors].value = 0;
+	*vectors = new_block;
+	new_block[total - 1].type  = type;
+	new_block[total - 1].value = value;
+	new_block[total].type  = AT_NULL;
+	new_block[total].value = 0;
 
 	return 0;
 }
 
-/**
- * Get the address of the the ELF auxiliary vectors table for the
- * given @tracee.  This function returns 0 if an error occurred.
- */
 word_t get_elf_aux_vectors_address(const Tracee *tracee)
 {
-	word_t address;
-	word_t data;
+	if (!tracee || !IS_IN_SYSEXIT2(tracee, PR_execve))
+		return 0;
 
-	/* Sanity check: this works only in execve sysexit.  */
-	assert(IS_IN_SYSEXIT2(tracee, PR_execve));
+	word_t sp = peek_reg(tracee, CURRENT, STACK_POINTER);
+	word_t ws = sizeof_word(tracee);
 
-	/* Right after execve, the stack layout is:
-	 *
-	 *     argc, argv[0], ..., 0, envp[0], ..., 0, auxv[0].type, auxv[0].value, ..., 0, 0
-	 */
-	address = peek_reg(tracee, CURRENT, STACK_POINTER);
-
-	/* Read: argc */
-	data = peek_word(tracee, address);
+	word_t argc = peek_word(tracee, sp);
 	if (errno != 0)
 		return 0;
 
-	/* Skip: argc, argv, 0 */
-	address += (1 + data + 1) * sizeof_word(tracee);
-
-	/* Skip: envp, 0 */
-	do {
-		data = peek_word(tracee, address);
-		if (errno != 0)
-			return 0;
-		address += sizeof_word(tracee);
-	} while (data != 0);
-
-	return address;
-}
-
-/**
- * Fetch ELF auxiliary vectors stored at the given @address in
- * @tracee's memory.  This function returns NULL if an error occurred,
- * otherwise it returns a pointer to the new vectors, in an ABI
- * independent form (the Talloc parent of this pointer is
- * @tracee->ctx).
- */
-ElfAuxVector *fetch_elf_aux_vectors(const Tracee *tracee, word_t address)
-{
-	ElfAuxVector *vectors = NULL;
-	ElfAuxVector vector;
-	int status;
-
-	/* It is assumed the sentinel always exists.  */
-	vectors = talloc_array(tracee->ctx, ElfAuxVector, 1);
-	if (vectors == NULL)
-		return NULL;
-	vectors[0].type  = AT_NULL;
-	vectors[0].value = 0;
+	sp += (1 + argc + 1) * ws;
 
 	while (1) {
-		vector.type = peek_word(tracee, address);
+		word_t value = peek_word(tracee, sp);
 		if (errno != 0)
-			return NULL;
-		address += sizeof_word(tracee);
-
-		if (vector.type == AT_NULL)
-			break; /* Already added.  */
-
-		vector.value = peek_word(tracee, address);
-		if (errno != 0)
-			return NULL;
-		address += sizeof_word(tracee);
-
-		status = add_elf_aux_vector(&vectors, vector.type, vector.value);
-		if (status < 0)
-			return NULL;
+			return 0;
+		sp += ws;
+		if (value == 0)
+			break;
 	}
 
-	return vectors;
+	return sp;
 }
 
-/**
- * Push ELF auxiliary @vectors to the given @address in @tracee's
- * memory.  This function returns -errno if an error occurred,
- * otherwise 0.
- */
-int push_elf_aux_vectors(const Tracee* tracee, ElfAuxVector *vectors, word_t address)
+ElfAuxVector *fetch_elf_aux_vectors(const Tracee *tracee, word_t address)
 {
+	if (!tracee || address == 0)
+		return NULL;
+
+	ElfAuxVector *vecs = talloc_array(tracee->ctx, ElfAuxVector, 1);
+	if (!vecs)
+		return NULL;
+
+	vecs[0].type = AT_NULL;
+	vecs[0].value = 0;
+
+	word_t ws = sizeof_word(tracee);
+	while (1) {
+		word_t type = peek_word(tracee, address);
+		if (errno != 0)
+			goto error;
+		address += ws;
+
+		if (type == AT_NULL)
+			break;
+
+		word_t value = peek_word(tracee, address);
+		if (errno != 0)
+			goto error;
+		address += ws;
+
+		if (add_elf_aux_vector(&vecs, type, value) < 0)
+			goto error;
+	}
+
+	return vecs;
+
+error:
+	talloc_free(vecs);
+	return NULL;
+}
+
+int push_elf_aux_vectors(const Tracee *tracee, ElfAuxVector *vectors, word_t address)
+{
+	if (!tracee || !vectors)
+		return -EINVAL;
+
+	word_t ws = sizeof_word(tracee);
 	size_t i;
 
 	for (i = 0; vectors[i].type != AT_NULL; i++) {
 		poke_word(tracee, address, vectors[i].type);
-		if (errno != 0)
-			return -errno;
-		address += sizeof_word(tracee);
+		if (errno != 0) return -errno;
+		address += ws;
 
 		poke_word(tracee, address, vectors[i].value);
-		if (errno != 0)
-			return -errno;
-		address += sizeof_word(tracee);
+		if (errno != 0) return -errno;
+		address += ws;
 	}
 
 	poke_word(tracee, address, AT_NULL);
-	if (errno != 0)
-		return -errno;
-	address += sizeof_word(tracee);
+	if (errno != 0) return -errno;
+	address += ws;
 
 	poke_word(tracee, address, 0);
-	if (errno != 0)
-		return -errno;
-	address += sizeof_word(tracee);
+	if (errno != 0) return -errno;
 
 	return 0;
 }

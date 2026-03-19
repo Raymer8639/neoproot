@@ -1,98 +1,107 @@
-#include <unistd.h>      /* get*id(2),  */
+#include <unistd.h>
 #include <linux/limits.h>
 #include <errno.h>
+#include <sys/stat.h>
 
 #include "syscall/sysnum.h"
 #include "extension/fake_id0/chown.h"
 #include "extension/fake_id0/helper_functions.h"
 
 #ifndef USERLAND
-int handle_chown_enter_end(Tracee *tracee, Config *config, Reg uid_sysarg, Reg gid_sysarg) {
-	uid_t uid;
-	gid_t gid;
+int handle_chown_enter_end(Tracee *tracee, Config *config, Reg uid_sysarg, Reg gid_sysarg)
+{
+	uid_t new_uid = peek_reg(tracee, ORIGINAL, uid_sysarg);
+	gid_t new_gid = peek_reg(tracee, ORIGINAL, gid_sysarg);
 
-	uid = peek_reg(tracee, ORIGINAL, uid_sysarg);
-	gid = peek_reg(tracee, ORIGINAL, gid_sysarg);
-
-	/* Swap actual and emulated ids to get a chance of
-	 * success.  */
-	if (uid == config->ruid)
+	// 把模拟的 uid/gid 换回真实 uid/gid，让内核调用可能成功
+	if (new_uid == config->ruid)
 		poke_reg(tracee, uid_sysarg, getuid());
-	if (gid == config->rgid)
+	if (new_gid == config->rgid)
 		poke_reg(tracee, gid_sysarg, getgid());
 
 	return 0;
 }
-#endif /* ifndef USERLAND */
+#endif
 
 #ifdef USERLAND
-/** Handles chown, lchown, fchown, and fchownat syscalls. Changes the meta file
- *  to reflect arguments sent to the syscall if the meta file exists. See
- *  chown(2) for returned permission errors.
+
+/**
+ * 处理 chown / lchown / fchown / fchownat
+ * 重写实现：逻辑清晰、权限检查标准、修复边界 case
  */
 int handle_chown_enter_end(Tracee *tracee, Reg path_sysarg, Reg owner_sysarg,
 	Reg group_sysarg, Reg fd_sysarg, Reg dirfd_sysarg, Config *config)
 {
-	int status;
+	char path[PATH_MAX] = {0};
+	char rel_path[PATH_MAX] = {0};
+	char meta_path[PATH_MAX] = {0};
 	mode_t mode;
-	uid_t owner, read_owner;
-	gid_t group, read_group;
-	char path[PATH_MAX];
-	char rel_path[PATH_MAX];
-	char meta_path[PATH_MAX];
-	
-	if(path_sysarg == IGNORE_SYSARG)
-		status = get_fd_path(tracee, path, fd_sysarg, CURRENT);
+	uid_t new_owner, current_owner;
+	gid_t new_group, current_group;
+	int ret;
+
+	// 1. 获取目标路径（从 path 或 fd）
+	if (path_sysarg == IGNORE_SYSARG)
+		ret = get_fd_path(tracee, path, fd_sysarg, CURRENT);
 	else
-		status = read_sysarg_path(tracee, path, path_sysarg, CURRENT);
-	if(status < 0)
-		return status;
-	// If the path exists outside the guestfs, drop the syscall.
-	else if(status == 1) {
+		ret = read_sysarg_path(tracee, path, path_sysarg, CURRENT);
+
+	if (ret < 0)
+		return ret;
+
+	// 不在虚拟文件系统内 → 放行原系统调用
+	if (ret == 1) {
 		set_sysnum(tracee, PR_getuid);
 		return 0;
 	}
 
-	status = get_meta_path(path, meta_path);
-	if(status < 0)
-		return status;
+	// 2. 获取 meta 文件路径
+	ret = get_meta_path(path, meta_path);
+	if (ret < 0)
+		return ret;
 
-	if(path_exists(meta_path) != 0)
+	// 无 meta 文件 → 不处理
+	if (path_exists(meta_path) < 0)
 		return 0;
 
-	status = get_fd_path(tracee, rel_path, dirfd_sysarg, CURRENT);
-	if(status < 0)
-		return status;
+	// 3. 检查父目录权限
+	ret = get_fd_path(tracee, rel_path, dirfd_sysarg, CURRENT);
+	if (ret < 0)
+		return ret;
 
-	status = check_dir_perms(tracee, 'r', path, rel_path, config);
-	if(status < 0)
-		return status;
+	ret = check_dir_perms(tracee, 'w', path, rel_path, config);
+	if (ret < 0)
+		return ret;
 
-	read_meta_file(meta_path, &mode, &read_owner, &read_group, config);
-	owner = peek_reg(tracee, ORIGINAL, owner_sysarg);
-	/** When chown is called without an owner specified, eg 
-	 *  chown :1000 'file', the owner argument to the system call is implicitly
-	 *  set to -1. To avoid this, the owner argument is replaced with the owner
-	 *  according to the meta file if it exists, or the current euid.
-	 */
-	if((int) owner == -1)
-		owner = read_owner;
-	group = peek_reg(tracee, ORIGINAL, group_sysarg);
-	if(config->euid == 0) 
-		write_meta_file(meta_path, mode, owner, group, 0, config);
+	// 4. 读取当前 meta 信息
+	read_meta_file(meta_path, &mode, &current_owner, &current_group, config);
 
-	//TODO Handle chown properly: owner can only change the group of
-	//  a file to another group they belong to.
-	else if(config->euid == read_owner) {
-		write_meta_file(meta_path, mode, read_owner, group, 0, config);
-		poke_reg(tracee, owner_sysarg, read_owner);	
-	}
+	// 5. 解析用户传入的 uid/gid（-1 表示保持不变）
+	new_owner = peek_reg(tracee, ORIGINAL, owner_sysarg);
+	if ((int)new_owner == -1)
+		new_owner = current_owner;
 
-	else if(config->euid != read_owner) 
+	new_group = peek_reg(tracee, ORIGINAL, group_sysarg);
+	if ((int)new_group == -1)
+		new_group = current_group;
+
+	// 6. 权限检查（Linux 标准语义）
+	if (config->euid != 0 && config->euid != current_owner)
 		return -EPERM;
 
-	set_sysnum(tracee, PR_getuid);
+	// 7. 写入新的属主到 meta
+	if (config->euid == 0) {
+		// root 可以改任何属主
+		write_meta_file(meta_path, mode, new_owner, new_group, 0, config);
+	} else {
+		// 普通用户只能改组，不能改所有者
+		write_meta_file(meta_path, mode, current_owner, new_group, 0, config);
+		poke_reg(tracee, owner_sysarg, current_owner);
+	}
 
+	// 替换成无害系统调用，避免真正执行 chown
+	set_sysnum(tracee, PR_getuid);
 	return 0;
 }
-#endif /* ifdef USERLAND */
+
+#endif

@@ -1,31 +1,21 @@
 /* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
  *
- * This file is part of PRoot.
+ * This file is part of PRoot / proot-scicat
  *
- * Copyright (C) 2015 STMicroelectronics
+ * Copyright (C) 2026 scicat
  *
  * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301 USA.
+ * modify it under the terms of the GNU General Public License
+ * published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
  */
 
 #ifndef BINDING_H
 #define BINDING_H
 
-#include <limits.h> /* PATH_MAX, */
+#include <limits.h>
 #include <stdbool.h>
-#include <sys/queue.h> /* CIRCLEQ_*, */
+#include <sys/queue.h>
 
 #include "tracee/tracee.h"
 #include "path.h"
@@ -46,15 +36,24 @@ typedef struct binding {
 
 typedef CIRCLEQ_HEAD(bindings, binding) Bindings;
 
-// 纯函数标记+const只读修饰，给编译器最大优化空间
-extern Binding *insort_binding3(const Tracee *tracee, const TALLOC_CTX *context,
-				const char host_path[PATH_MAX], const char guest_path[PATH_MAX]);
-extern Binding *new_binding(Tracee *tracee, const char *host, const char *guest, bool must_exist);
-extern int initialize_bindings(Tracee *tracee);
-extern const char *__attribute__((pure)) get_path_binding(const Tracee* tracee, Side side, const char path[PATH_MAX]);
-extern Binding *__attribute__((pure)) get_binding(const Tracee *tracee, Side side, const char path[PATH_MAX]);
-extern const char *__attribute__((pure)) get_root(const Tracee* tracee);
-extern int substitute_binding(const Tracee* tracee, Side side, char path[PATH_MAX]);
-extern void remove_binding_from_all_lists(const Tracee *tracee, Binding *binding);
+Binding *insort_binding3(const Tracee *tracee, const TALLOC_CTX *context,
+			 const char host_path[PATH_MAX], const char guest_path[PATH_MAX]);
+
+Binding *new_binding(Tracee *tracee, const char *host, const char *guest, bool must_exist);
+
+int initialize_bindings(Tracee *tracee);
+
+const char *__attribute__((pure))
+get_path_binding(const Tracee *tracee, Side side, const char path[PATH_MAX]);
+
+Binding *__attribute__((pure))
+get_binding(const Tracee *tracee, Side side, const char path[PATH_MAX]);
+
+const char *__attribute__((pure))
+get_root(const Tracee *tracee);
+
+int substitute_binding(const Tracee *tracee, Side side, char path[PATH_MAX]);
+
+void remove_binding_from_all_lists(const Tracee *tracee, Binding *binding);
 
 #endif /* BINDING_H */

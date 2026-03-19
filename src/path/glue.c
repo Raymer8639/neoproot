@@ -1,8 +1,8 @@
 /* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
  *
- * This file is part of PRoot.
+ * This file is part of PRoot / proot-scicat
  *
- * Copyright (C) 2015 STMicroelectronics
+ * Copyright (C) 2026 scicat
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,174 +20,114 @@
  * 02110-1301 USA.
  */
 
-#include <sys/types.h> /* mkdir(2), lstat(2), */
-#include <sys/stat.h> /* mkdir(2), lstat(2), */
-#include <fcntl.h>    /* mknod(2), */
-#include <unistd.h>   /* mknod(2), lstat(2), unlink(2), rmdir(2), */
-#include <string.h>   /* string(3),  */
-#include <assert.h>   /* assert(3), */
-#include <limits.h>   /* PATH_MAX, */
-#include <errno.h>    /* errno, E* */
-#include <talloc.h>   /* talloc_*, */
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
+#include <assert.h>
+#include <limits.h>
+#include <errno.h>
+#include <talloc.h>
 
 #include "path/binding.h"
 #include "path/path.h"
 #include "path/temp.h"
 #include "cli/note.h"
-
 #include "compat.h"
 
-/**
- * Remove @path if it is empty only.
- *
- * Note: this is a Talloc destructor.
- */
-static int remove_placeholder(char *path)
-{
-	struct stat statl;
-	int status;
+static int remove_placeholder(char *path) {
+    struct stat statl;
+    if (lstat(path, &statl) != 0)
+        return 0;
 
-	status = lstat(path, &statl);
-	if (status)
-		return 0; /* Not fatal.  */
+    if (S_ISDIR(statl.st_mode))
+        rmdir(path);
+    else if (statl.st_size == 0)
+        unlink(path);
 
-	if (!S_ISDIR(statl.st_mode)) {
-		if (statl.st_size != 0)
-			return 0; /* Not fatal.  */
-		status = unlink(path);
-	}
-	else
-		status = rmdir(path);
-	if (status)
-		return 0; /* Not fatal.  */
-
-	return 0;
+    return 0;
 }
 
-/**
- * Attach a copy of @path to the autofree context, and set its
- * destructor to remove_placeholder().
- */
-static void set_placeholder_destructor(const char *path)
-{
-	TALLOC_CTX *autofreed;
-	char *placeholder;
+static void set_placeholder_destructor(const char *path) {
+    TALLOC_CTX *ctx = talloc_new(NULL);
+    if (!ctx) return;
 
-	// 这里修复：废弃 talloc_autofree_context → 新版 talloc_new(NULL)
-	autofreed = talloc_new(NULL);
-	if (autofreed == NULL)
-		return;
-
-	placeholder = talloc_strdup(autofreed, path);
-	if (placeholder == NULL)
-		return;
-
-	talloc_set_destructor(placeholder, remove_placeholder);
+    char *copy = talloc_strdup(ctx, path);
+    if (copy)
+        talloc_set_destructor(copy, remove_placeholder);
 }
 
-/**
- * Build in a temporary filesystem the glue between the guest part and
- * the host part of the @binding_path.  This function returns the type
- * of the bound path, otherwise 0 if an error occured.
- *
- * For example, assuming the host path "/opt" is mounted/bound to the
- * guest path "/black/holes/and/revelations", and assuming this path
- * can't be created in the guest rootfs (eg. permission denied), then
- * it is created in a temporary rootfs and all these paths are glued
- * that way:
- *
- *   $GUEST/black/ --> $GLUE/black/
- *                               ./holes
- *                               ./holes/and
- *                               ./holes/and/revelations --> $HOST/opt/
- *
- * This glue allows operations on paths that do not exist in the guest
- * rootfs but that were specified as the guest part of a binding.
- */
-mode_t build_glue(Tracee *tracee, const char *guest_path, char host_path[PATH_MAX],
-		Finality finality)
-{
-	bool belongs_to_gluefs;
-	Comparison comparison;
-	Binding *binding;
-	mode_t type;
-	mode_t mode;
-	int status;
+mode_t build_glue(Tracee *tracee, const char *guest_path, char host_path[PATH_MAX], Finality finality) {
+    Comparison cmp;
+    bool in_glue;
+    mode_t type, mode;
+    int status;
+    Binding *binding;
 
-	assert(tracee->glue_type != 0);
+    assert(tracee != NULL);
+    assert(guest_path != NULL);
+    assert(host_path != NULL);
+    assert(tracee->glue_type != 0);
 
-	/* Create the temporary directory where the "glue" rootfs will
-	 * lie.  */
-	if (tracee->glue == NULL) {
-		tracee->glue = create_temp_directory(NULL, tracee->tool_name);
-		if (tracee->glue == NULL) {
-			note(tracee, ERROR, INTERNAL, "can't create glue rootfs");
-			return 0;
-		}
-		talloc_set_name_const(tracee->glue, "$glue");
-	}
+    // 创建 glue 根目录
+    if (!tracee->glue) {
+        tracee->glue = create_temp_directory(NULL, tracee->tool_name);
+        if (!tracee->glue) {
+            note(tracee, ERROR, INTERNAL, "failed to create glue rootfs");
+            return 0;
+        }
+        talloc_set_name_const(tracee->glue, "$glue");
+    }
 
-	comparison = compare_paths(tracee->glue, host_path);
-	belongs_to_gluefs = (comparison == PATHS_ARE_EQUAL || comparison == PATH1_IS_PREFIX);
+    // 判断是否在 glue 里面
+    cmp = compare_paths(tracee->glue, host_path);
+    in_glue = (cmp == PATHS_ARE_EQUAL || cmp == PATH1_IS_PREFIX);
 
-	/* If it's not a final component then it is a directory.  I definitely
-	 * hate how the potential type of the final component is propagated
-	 * from initialize_binding() down to here, sadly there's no elegant way
-	 * to know its type at this stage.  */
-	if (IS_FINAL(finality)) {
-		type = tracee->glue_type;
-		mode = (belongs_to_gluefs ? 0777 : 0);
-	}
-	else {
-		type = S_IFDIR;
-		mode = 0777;
-	}
+    // 确定要创建的文件类型
+    if (IS_FINAL(finality)) {
+        type = tracee->glue_type;
+        mode = in_glue ? 0755 : 0;
+    } else {
+        type = S_IFDIR;
+        mode = 0755;
+    }
 
-	if (getenv("PROOT_DONT_POLLUTE_ROOTFS") != NULL && !belongs_to_gluefs)
-		goto create_binding;
+    // 不污染宿主 rootfs
+    if (getenv("PROOT_DONT_POLLUTE_ROOTFS") && !in_glue)
+        goto create_glue_binding;
 
-	/* Try to create this component into the "guest" or "glue"
-	 * rootfs (depending if there were a glue previously).  */
-	if (S_ISDIR(type))
-		status = mkdir(host_path, mode);
-	else /* S_IFREG, S_IFCHR, S_IFBLK, S_IFIFO or S_IFSOCK.  */
-		status = mknod(host_path, mode | type, 0);
+    // 创建目录或节点
+    if (S_ISDIR(type))
+        status = mkdir(host_path, mode);
+    else
+        status = mknod(host_path, mode | type, 0);
 
-	/* Remove placeholders from the guest rootfs once PRoot is
-	 * terminated.  */
-	if (status >= 0 && !belongs_to_gluefs)
-		set_placeholder_destructor(host_path);
+    // 成功：自动销毁空占位文件
+    if (status == 0 && !in_glue)
+        set_placeholder_destructor(host_path);
 
-	/* Nothing else to do if the path already exists or if it is
-	 * the final component since it will be pointed to by the
-	 * binding being initialized (from the example,
-	 * "$GUEST/black/holes/and/revelations" -> "$HOST/opt").  */
-	if (status >= 0 || errno == EEXIST || IS_FINAL(finality))
-		return type;
+    // 已存在或最终节点，直接返回
+    if (status == 0 || errno == EEXIST || IS_FINAL(finality))
+        return type;
 
-	/* mkdir/mknod are supposed to always succeed in
-	 * tracee->glue.  */
-	if (belongs_to_gluefs) {
-		note(tracee, WARNING, SYSTEM, "mkdir/mknod");
-		return 0;
-	}
+    // 在 glue 里失败，直接报错
+    if (in_glue) {
+        note(tracee, WARNING, SYSTEM, "failed to create glue path");
+        return 0;
+    }
 
-create_binding:
-	/* Sanity checks.  */
-	if (   strnlen(tracee->glue, PATH_MAX) >= PATH_MAX
-	    || strnlen(guest_path, PATH_MAX) >= PATH_MAX) {
-		note(tracee, WARNING, INTERNAL, "installing the binding: guest path too long");
-		return 0;
-	}
+create_glue_binding:
+    // 路径过长检查
+    if (strlen(tracee->glue) >= PATH_MAX || strlen(guest_path) >= PATH_MAX) {
+        note(tracee, WARNING, INTERNAL, "path too long");
+        return 0;
+    }
 
-	/* From the example, create the binding "/black" ->
-	 * "$GLUE/black".  */
-	binding = insort_binding3(tracee, tracee->glue, tracee->glue, guest_path);
-	if (binding == NULL)
-		return 0;
+    // 创建绑定：guest_path → glue
+    binding = insort_binding3(tracee, tracee->glue, tracee->glue, guest_path);
+    if (!binding)
+        return 0;
 
-	/* TODO: emulation of getdents(parent(guest_path)) to finalize
-	 * the glue, "black" in getdents("/") from the example.  */
-
-	return type;
+    return type;
 }

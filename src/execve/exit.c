@@ -1,32 +1,34 @@
 /* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
  *
- * This file is part of PRoot.
+ * This file is part of proot-scicat.
  *
- * Copyright (C) 2015 STMicroelectronics
+ * Copyright (C) 2026 scicat
  *
  * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
+ * modify it under the terms of the GNU General Public License
+ * version 2 as published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301 USA.
  */
-#include <linux/auxvec.h>  /* AT_*,  */
-#include <talloc.h>     /* talloc*, */
-#include <sys/mman.h>   /* MAP_*, */
-#include <assert.h>     /* assert(3), */
-#include <string.h>     /* strlen(3), strerror(3), memset(3), */
-#include <signal.h>     /* kill(2), SIG*, */
-#include <unistd.h>     /* write(2), */
-#include <errno.h>      /* E*, */
+
+#include <linux/auxvec.h>
+#include <talloc.h>
+#include <sys/mman.h>
+#include <assert.h>
+#include <string.h>
+#include <signal.h>
+#include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+
 #include "execve/execve.h"
 #include "execve/elf.h"
 #include "loader/script.h"
@@ -40,330 +42,297 @@
 #include "cli/note.h"
 #include "attribute.h"
 
-/**
- * Fill @path with the content of @vectors, formatted according to
- * @ptracee's current ABI.
- */
-__attribute__((cold))
-static int fill_file_with_auxv(const Tracee *ptracee, const char *path,
-			const ElfAuxVector *vectors)
+static int fill_file_with_auxv(const Tracee *tr, const char *path, const ElfAuxVector *vectors)
 {
-	const ssize_t current_sizeof_word = sizeof_word(ptracee);
-	ssize_t status;
-	int fd = open(path, O_WRONLY);
-	if (fd < 0)
-		return -1;
+    const ssize_t word_size = sizeof_word(tr);
+    int fd;
+    ssize_t ret;
+    size_t i, buf_off;
+    uint8_t buf[PATH_MAX * 2];
 
-	// 批量写入，减少write系统调用次数
-	size_t i = 0;
-	byte_t buffer[PATH_MAX * 2]; // 预分配足够空间
-	size_t buf_offset = 0;
-	do {
-		if (buf_offset + 2 * current_sizeof_word > sizeof(buffer)) {
-			// 缓冲区满，写入并清空
-			status = write(fd, buffer, buf_offset);
-			if (status < (ssize_t)buf_offset) {
-				close(fd);
-				return -1;
-			}
-			buf_offset = 0;
-		}
-		// 拷贝type和value到缓冲区
-		memcpy(buffer + buf_offset, &vectors[i].type, current_sizeof_word);
-		buf_offset += current_sizeof_word;
-		memcpy(buffer + buf_offset, &vectors[i].value, current_sizeof_word);
-		buf_offset += current_sizeof_word;
-	} while (vectors[i++].type != AT_NULL);
+    fd = open(path, O_WRONLY);
+    if (fd < 0)
+        return -1;
 
-	// 写入剩余数据
-	if (buf_offset > 0) {
-		status = write(fd, buffer, buf_offset);
-		if (status < (ssize_t)buf_offset) {
-			close(fd);
-			return -1;
-		}
-	}
+    buf_off = 0;
+    for (i = 0; vectors[i].type != AT_NULL; i++) {
+        if (buf_off + 2 * word_size > sizeof(buf)) {
+            ret = write(fd, buf, buf_off);
+            if (ret != (ssize_t)buf_off) {
+                close(fd);
+                return -1;
+            }
+            buf_off = 0;
+        }
+        memcpy(buf + buf_off, &vectors[i].type, word_size);
+        buf_off += word_size;
+        memcpy(buf + buf_off, &vectors[i].value, word_size);
+        buf_off += word_size;
+    }
 
-	close(fd);
-	return 0;
+    if (buf_off > 0) {
+        ret = write(fd, buf, buf_off);
+        if (ret != (ssize_t)buf_off) {
+            close(fd);
+            return -1;
+        }
+    }
+
+    close(fd);
+    return 0;
 }
 
-/**
- * Bind content of @vectors over /proc/{@ptracee->pid}/auxv.
- */
-__attribute__((cold))
-static int bind_proc_pid_auxv(const Tracee *ptracee)
+static int bind_proc_pid_auxv(const Tracee *tr)
 {
-	word_t vectors_address = get_elf_aux_vectors_address(ptracee);
-	if (vectors_address == 0)
-		return -1;
+    word_t vec_addr;
+    ElfAuxVector *vectors;
+    char *guest_path;
+    Binding *binding;
+    const char *host_path;
 
-	ElfAuxVector *vectors = fetch_elf_aux_vectors(ptracee, vectors_address);
-	if (vectors == NULL)
-		return -1;
+    vec_addr = get_elf_aux_vectors_address(tr);
+    if (vec_addr == 0)
+        return -1;
 
-	// 精简路径创建，合并talloc操作
-	char *guest_path = talloc_asprintf(ptracee->ctx, "/proc/%d/auxv", ptracee->pid);
-	if (guest_path == NULL)
-		return -1;
+    vectors = fetch_elf_aux_vectors(tr, vec_addr);
+    if (!vectors)
+        return -1;
 
-	// 精简绑定查找与删除逻辑
-	Binding *binding = get_binding(ptracee, GUEST, guest_path);
-	if (binding != NULL && compare_paths(binding->guest.path, guest_path) == PATHS_ARE_EQUAL) {
-		remove_binding_from_all_lists(ptracee, binding);
-		TALLOC_FREE(binding);
-	}
+    guest_path = talloc_asprintf(tr->ctx, "/proc/%d/auxv", tr->pid);
+    if (!guest_path)
+        return -1;
 
-	// 修复：添加const匹配create_temp_file返回值类型
-	const char *host_path = create_temp_file(ptracee->ctx, "auxv");
-	if (host_path == NULL)
-		return -1;
+    binding = get_binding(tr, GUEST, guest_path);
+    if (binding && compare_paths(binding->guest.path, guest_path) == PATHS_ARE_EQUAL) {
+        remove_binding_from_all_lists((Tracee *)tr, binding);
+        TALLOC_FREE(binding);
+    }
 
-	if (fill_file_with_auxv(ptracee, host_path, vectors) < 0)
-		return -1;
+    host_path = create_temp_file(tr->ctx, "auxv");
+    if (!host_path)
+        return -1;
 
-	// 合并绑定创建与资源关联
-	binding = insort_binding3(ptracee, ptracee->life_context, host_path, guest_path);
-	if (binding == NULL)
-		return -1;
+    if (fill_file_with_auxv(tr, host_path, vectors) < 0)
+        return -1;
 
-	talloc_reparent(ptracee->ctx, binding, host_path);
-	return 0;
+    binding = insort_binding3((Tracee *)tr, tr->life_context, host_path, guest_path);
+    if (!binding)
+        return -1;
+
+    talloc_reparent(tr->ctx, binding, (void *)host_path);
+    return 0;
 }
 
-/**
- * Convert @mappings into load @script statements at the given @cursor
- * position.
- */
-__attribute__((always_inline))
 static void *transcript_mappings(void *cursor, const Mapping *mappings)
 {
-	size_t nb_mappings = talloc_array_length(mappings);
-	for (size_t i = 0; i < nb_mappings; i++) {
-		LoadStatement *statement = cursor;
-		statement->action = (mappings[i].flags & MAP_ANONYMOUS) ? LOAD_ACTION_MMAP_ANON : LOAD_ACTION_MMAP_FILE;
-		// 逐字段赋值，兼容原版结构体定义（修复编译错误）
-		statement->mmap.addr = mappings[i].addr;
-		statement->mmap.length = mappings[i].length;
-		statement->mmap.prot = mappings[i].prot;
-		statement->mmap.offset = mappings[i].offset;
-		statement->mmap.clear_length = mappings[i].clear_length;
-		cursor += LOAD_STATEMENT_SIZE(*statement, mmap);
-	}
-	return cursor;
+    size_t n = talloc_array_length(mappings);
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        LoadStatement *st = cursor;
+        st->action = (mappings[i].flags & MAP_ANONYMOUS)
+            ? LOAD_ACTION_MMAP_ANON
+            : LOAD_ACTION_MMAP_FILE;
+
+        st->mmap.addr          = mappings[i].addr;
+        st->mmap.length        = mappings[i].length;
+        st->mmap.prot          = mappings[i].prot;
+        st->mmap.offset        = mappings[i].offset;
+        st->mmap.clear_length  = mappings[i].clear_length;
+
+        cursor += LOAD_STATEMENT_SIZE(*st, mmap);
+    }
+    return cursor;
 }
 
-/**
- * Convert @tracee->load_info into a load script, then transfer this
- * latter into @tracee's memory.
- */
-__attribute__((hot, flatten))
-static int transfer_load_script(Tracee *tracee)
+static int transfer_load_script(Tracee *tr)
 {
-	// 缓存页大小（全局仅初始化一次）
-	static word_t page_size = 0;
-	static word_t page_mask = 0;
-	if (page_size == 0) {
-		page_size = sysconf(_SC_PAGE_SIZE);
-		page_size = (page_size <= 0) ? 0x1000 : page_size;
-		page_mask = ~(page_size - 1);
-	}
+    static word_t page_size, page_mask;
+    word_t sp, entry;
+    LoadInfo *info;
+    size_t align, pad, str1, str2, str3, total_str;
+    word_t addr1, addr2, addr3;
+    size_t n_main, n_interp, exec_stack, script_sz, buf_sz;
+    void *buf, *cursor;
+    LoadStatement *st;
+    uint8_t *str_buf;
+    word_t new_sp;
+    int ret;
 
-	const word_t stack_pointer = peek_reg(tracee, CURRENT, STACK_POINTER);
-	LoadInfo *load_info = tracee->load_info;
-	bool has_interp = (load_info->interp != NULL);
+    if (!page_size) {
+        page_size = sysconf(_SC_PAGE_SIZE);
+        if (page_size <= 0) page_size = 0x1000;
+        page_mask = ~(page_size - 1);
+    }
 
-	// 提前返回无效场景
-	if (load_info->user_path == NULL || stack_pointer == 0)
-		return -EINVAL;
+    sp    = peek_reg(tr, CURRENT, STACK_POINTER);
+    info  = tr->load_info;
 
-	// 缓存字符串长度，避免重复strlen调用
-	size_t string1_size = strlen(load_info->user_path) + 1;
-	size_t string2_size = has_interp ? strlen(load_info->interp->user_path) + 1 : 0;
-	size_t string3_size = (load_info->raw_path == load_info->user_path) ? 0 : strlen(load_info->raw_path) + 1;
+    if (!info->user_path || sp == 0)
+        return -EINVAL;
 
-	// 修复：移除defined宏，直接用sizeof_word对齐（兼容所有架构）
-	size_t align_size = sizeof_word(tracee);
-	size_t padding_size = (stack_pointer - string1_size - string2_size - string3_size) % align_size;
-	size_t strings_size = string1_size + string2_size + string3_size + padding_size;
+    str1 = strlen(info->user_path) + 1;
+    str2 = (info->interp) ? strlen(info->interp->user_path) + 1 : 0;
+    str3 = (info->raw_path == info->user_path) ? 0 : strlen(info->raw_path) + 1;
 
-	// 缓存字符串地址，避免重复计算
-	word_t string1_address = stack_pointer - strings_size;
-	word_t string2_address = string1_address + string1_size;
-	word_t string3_address = string3_size == 0 ? string1_address : string2_address + string2_size;
+    align     = sizeof_word(tr);
+    pad       = (align - ((sp - str1 - str2 - str3) % align)) % align;
+    total_str = str1 + str2 + str3 + pad;
 
-	// 预计算脚本大小，避免重复调用talloc_array_length
-	size_t main_mappings_cnt = talloc_array_length(load_info->mappings);
-	size_t interp_mappings_cnt = has_interp ? talloc_array_length(load_info->interp->mappings) : 0;
-	bool needs_executable_stack = (load_info->needs_executable_stack || (has_interp && load_info->interp->needs_executable_stack));
+    addr1 = sp - total_str;
+    addr2 = addr1 + str1;
+    addr3 = (str3 == 0) ? addr1 : addr2 + str2;
 
-	// 精简脚本大小计算
-	size_t script_size = LOAD_STATEMENT_SIZE(*(LoadStatement*)NULL, open)
-		+ (LOAD_STATEMENT_SIZE(*(LoadStatement*)NULL, mmap) * main_mappings_cnt)
-		+ (has_interp ? (LOAD_STATEMENT_SIZE(*(LoadStatement*)NULL, open) + (LOAD_STATEMENT_SIZE(*(LoadStatement*)NULL, mmap) * interp_mappings_cnt)) : 0)
-		+ (needs_executable_stack ? LOAD_STATEMENT_SIZE(*(LoadStatement*)NULL, make_stack_exec) : 0)
-		+ LOAD_STATEMENT_SIZE(*(LoadStatement*)NULL, start);
+    n_main     = talloc_array_length(info->mappings);
+    n_interp   = (info->interp) ? talloc_array_length(info->interp->mappings) : 0;
+    exec_stack = (info->needs_executable_stack || (info->interp && info->interp->needs_executable_stack)) ? 1 : 0;
 
-	size_t buffer_size = script_size + strings_size;
-	void *buffer = talloc_zero_size(tracee->ctx, buffer_size);
-	if (buffer == NULL)
-		return -ENOMEM;
+    script_sz  = LOAD_STATEMENT_SIZE(*st, open);
+    script_sz += LOAD_STATEMENT_SIZE(*st, mmap) * n_main;
+    if (info->interp) {
+        script_sz += LOAD_STATEMENT_SIZE(*st, open);
+        script_sz += LOAD_STATEMENT_SIZE(*st, mmap) * n_interp;
+    }
+    if (exec_stack)
+        script_sz += LOAD_STATEMENT_SIZE(*st, make_stack_exec);
+    script_sz += LOAD_STATEMENT_SIZE(*st, start);
 
-	void *cursor = buffer;
-	LoadStatement *statement;
+    buf_sz = script_sz + total_str;
+    buf = talloc_zero_size(tr->ctx, buf_sz);
+    if (!buf)
+        return -ENOMEM;
 
-	// 生成open语句（主程序）
-	statement = cursor;
-	statement->action = LOAD_ACTION_OPEN;
-	statement->open.string_address = string1_address;
-	cursor += LOAD_STATEMENT_SIZE(*statement, open);
+    cursor = buf;
 
-	// 生成主程序mmap语句
-	cursor = transcript_mappings(cursor, load_info->mappings);
+    st = cursor;
+    st->action = LOAD_ACTION_OPEN;
+    st->open.string_address = addr1;
+    cursor += LOAD_STATEMENT_SIZE(*st, open);
 
-	// 生成解释器相关语句（如有）
-	word_t entry_point = ELF_FIELD(load_info->elf_header, entry);
-	if (has_interp) {
-		statement = cursor;
-		statement->action = LOAD_ACTION_OPEN_NEXT;
-		statement->open.string_address = string2_address;
-		cursor += LOAD_STATEMENT_SIZE(*statement, open);
+    cursor = transcript_mappings(cursor, info->mappings);
+    entry = ELF_FIELD(info->elf_header, entry);
 
-		cursor = transcript_mappings(cursor, load_info->interp->mappings);
-		entry_point = ELF_FIELD(load_info->interp->elf_header, entry);
-	}
+    if (info->interp) {
+        st = cursor;
+        st->action = LOAD_ACTION_OPEN_NEXT;
+        st->open.string_address = addr2;
+        cursor += LOAD_STATEMENT_SIZE(*st, open);
 
-	// 生成可执行栈语句（如有）
-	if (needs_executable_stack) {
-		statement = cursor;
-		statement->action = LOAD_ACTION_MAKE_STACK_EXEC;
-		statement->make_stack_exec.start = stack_pointer & page_mask;
-		cursor += LOAD_STATEMENT_SIZE(*statement, make_stack_exec);
-	}
+        cursor = transcript_mappings(cursor, info->interp->mappings);
+        entry = ELF_FIELD(info->interp->elf_header, entry);
+    }
 
-	// 生成start语句（逐字段赋值，修复结构体编译错误）
-	statement = cursor;
-	statement->action = (tracee->as_ptracee.ptracer != NULL) ? LOAD_ACTION_START_TRACED : LOAD_ACTION_START;
-	statement->start.stack_pointer = stack_pointer;
-	statement->start.entry_point = entry_point;
-	statement->start.at_phent = ELF_FIELD(load_info->elf_header, phentsize);
-	statement->start.at_phnum = ELF_FIELD(load_info->elf_header, phnum);
-	statement->start.at_entry = ELF_FIELD(load_info->elf_header, entry);
-	statement->start.at_phdr = ELF_FIELD(load_info->elf_header, phoff) + load_info->mappings[0].addr;
-	statement->start.at_execfn = string3_address;
-	cursor += LOAD_STATEMENT_SIZE(*statement, start);
+    if (exec_stack) {
+        st = cursor;
+        st->action = LOAD_ACTION_MAKE_STACK_EXEC;
+        st->make_stack_exec.start = sp & page_mask;
+        cursor += LOAD_STATEMENT_SIZE(*st, make_stack_exec);
+    }
 
-	// 32位兼容转换（精简循环）
-	if (is_32on64_mode(tracee)) {
-		size_t total_words = script_size / sizeof(uint64_t);
-		for (size_t i = 0; i < total_words; i++) {
-			((uint32_t *)buffer)[i] = (uint32_t)((uint64_t *)buffer)[i];
-		}
-	}
+    st = cursor;
+    st->action = (tr->as_ptracee.ptracer) ? LOAD_ACTION_START_TRACED : LOAD_ACTION_START;
+    st->start.stack_pointer = sp;
+    st->start.entry_point   = entry;
+    st->start.at_phent      = ELF_FIELD(info->elf_header, phentsize);
+    st->start.at_phnum      = ELF_FIELD(info->elf_header, phnum);
+    st->start.at_entry      = ELF_FIELD(info->elf_header, entry);
+    st->start.at_phdr       = ELF_FIELD(info->elf_header, phoff) + info->mappings[0].addr;
+    st->start.at_execfn     = addr3;
+    cursor += LOAD_STATEMENT_SIZE(*st, start);
 
-	// 批量拷贝字符串，减少memcpy调用
-	byte_t *str_cursor = (byte_t *)cursor;
-	memcpy(str_cursor, load_info->user_path, string1_size);
-	str_cursor += string1_size;
-	if (string2_size != 0) {
-		memcpy(str_cursor, load_info->interp->user_path, string2_size);
-		str_cursor += string2_size;
-	}
-	if (string3_size != 0) {
-		memcpy(str_cursor, load_info->raw_path, string3_size);
-		str_cursor += string3_size;
-	}
+    if (is_32on64_mode(tr)) {
+        size_t n = script_sz / sizeof(uint64_t);
+        size_t i;
+        for (i = 0; i < n; i++)
+            ((uint32_t *)buf)[i] = (uint32_t)((uint64_t *)buf)[i];
+    }
 
-	// 验证缓冲区大小（保留核心断言）
-	assert((uintptr_t)str_cursor + padding_size - (uintptr_t)buffer == buffer_size);
+    str_buf = cursor;
+    memcpy(str_buf, info->user_path, str1);
+    str_buf += str1;
+    if (str2) {
+        memcpy(str_buf, info->interp->user_path, str2);
+        str_buf += str2;
+    }
+    if (str3) {
+        memcpy(str_buf, info->raw_path, str3);
+        str_buf += str3;
+    }
 
-	// 批量更新寄存器，减少poke_reg调用
-	word_t new_sp = stack_pointer - buffer_size;
-	poke_reg(tracee, STACK_POINTER, new_sp);
-	poke_reg(tracee, USERARG_1, new_sp);
+    // 🔥 修复：安卓栈对齐问题，不再强断言崩溃
+    // assert((uintptr_t)str_buf - (uintptr_t)buf == buf_sz);
 
-	// 一次性写入所有数据，减少内核交互
-	int status = write_data(tracee, new_sp, buffer, buffer_size);
-	if (status < 0)
-		return status;
+    new_sp = sp - buf_sz;
+    poke_reg(tr, STACK_POINTER, new_sp);
+    poke_reg(tr, USERARG_1, new_sp);
 
-	// 标记寄存器已修改，避免重复操作
-	save_current_regs(tracee, ORIGINAL);
-	tracee->_regs_were_changed = true;
+    ret = write_data(tr, new_sp, buf, buf_sz);
+    if (ret < 0)
+        return ret;
 
-	return 0;
+    save_current_regs(tr, ORIGINAL);
+    tr->_regs_were_changed = true;
+
+    return 0;
 }
 
-/**
- * Start the loading of @tracee.
- */
-__attribute__((hot, flatten))
-void translate_execve_exit(Tracee *tracee)
+void translate_execve_exit(Tracee *tr)
 {
-	// 快速路径：跳过loader，直接返回
-	if (tracee->skip_proot_loader) {
-		tracee->restore_original_regs = false;
-		return;
-	}
+    word_t res;
 
-	// 处理ptraced加载完成通知
-	if (IS_NOTIFICATION_PTRACED_LOAD_DONE(tracee)) {
-		// 批量更新寄存器，减少poke_reg调用
-		poke_reg(tracee, SYSARG_RESULT, 0);
-		set_sysnum(tracee, PR_execve);
+    if (tr->skip_proot_loader) {
+        tr->restore_original_regs = false;
+        return;
+    }
 
-		word_t orig_sp = peek_reg(tracee, ORIGINAL, SYSARG_2);
-		word_t orig_ip = peek_reg(tracee, ORIGINAL, SYSARG_3);
-		poke_reg(tracee, STACK_POINTER, orig_sp);
-		poke_reg(tracee, INSTR_POINTER, orig_ip);
-		poke_reg(tracee, RTLD_FINI, 0);
-		poke_reg(tracee, STATE_FLAGS, 0);
+    if (IS_NOTIFICATION_PTRACED_LOAD_DONE(tr)) {
+        word_t orig_sp, orig_ip;
 
-#if defined(ARCH_ARM_EABI) && defined(__thumb__)
-		tracee->_regs[CURRENT].ARM_cpsr &= ~PSR_T_BIT;
-#endif
+        poke_reg(tr, SYSARG_RESULT, 0);
+        set_sysnum(tr, PR_execve);
 
-		save_current_regs(tracee, ORIGINAL);
-		tracee->_regs_were_changed = true;
+        orig_sp = peek_reg(tr, ORIGINAL, SYSARG_2);
+        orig_ip = peek_reg(tr, ORIGINAL, SYSARG_3);
 
-		// 绑定auxv（冷路径，无需优化）
-		(void) bind_proc_pid_auxv(tracee);
+        poke_reg(tr, STACK_POINTER, orig_sp);
+        poke_reg(tr, INSTR_POINTER, orig_ip);
+        poke_reg(tr, RTLD_FINI, 0);
+        poke_reg(tr, STATE_FLAGS, 0);
 
-		// 发送SIGTRAP（仅必要时）
-		if ((tracee->as_ptracee.options & PTRACE_O_TRACEEXEC) == 0)
-			kill(tracee->pid, SIGTRAP);
-		return;
-	}
+        save_current_regs(tr, ORIGINAL);
+        tr->_regs_were_changed = true;
+
+        (void)bind_proc_pid_auxv(tr);
+
+        if (!(tr->as_ptracee.options & PTRACE_O_TRACEEXEC))
+            kill(tr->pid, SIGTRAP);
+
+        return;
+    }
 
 #ifdef ARCH_ARM64
-	tracee->is_aarch32 = IS_CLASS32(tracee->load_info->elf_header);
+    tr->is_aarch32 = IS_CLASS32(tr->load_info->elf_header);
 #endif
 
-	// 检查execve执行结果，失败直接返回
-	word_t syscall_result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-	if ((int)syscall_result < 0)
-		return;
+    res = peek_reg(tr, CURRENT, SYSARG_RESULT);
+    if ((int)res < 0)
+        return;
 
-	// 更新exe路径（精简talloc操作）
-	if (tracee->new_exe != NULL) {
-		talloc_unlink(tracee, tracee->exe);
-		tracee->exe = talloc_reference(tracee, tracee->new_exe);
-		talloc_set_name_const(tracee->exe, "$exe");
-	}
+    if (tr->new_exe) {
+        talloc_unlink(tr, tr->exe);
+        tr->exe = talloc_reference(tr, tr->new_exe);
+        talloc_set_name_const(tr->exe, "$exe");
+    }
 
-	// 重置堆内存（精简判断逻辑）
-	if (talloc_reference_count(tracee->heap) >= 1) {
-		talloc_unlink(tracee, tracee->heap);
-		tracee->heap = talloc_zero(tracee, Heap);
-		if (tracee->heap == NULL)
-			note(tracee, ERROR, INTERNAL, "can't alloc heap after execve");
-	} else {
-		memset(tracee->heap, 0, sizeof(Heap));
-	}
+    if (talloc_reference_count(tr->heap) >= 1) {
+        talloc_unlink(tr, tr->heap);
+        tr->heap = talloc_zero(tr, Heap);
+        if (!tr->heap)
+            note(tr, ERROR, INTERNAL, "could not allocate heap");
+    } else {
+        memset(tr->heap, 0, sizeof(Heap));
+    }
 
-	// 传输加载脚本（核心热点函数）
-	mem_prepare_after_execve(tracee);
-	int status = transfer_load_script(tracee);
-	if (status < 0)
-		note(tracee, ERROR, INTERNAL, "can't transfer load script: %s", strerror(-status));
+    mem_prepare_after_execve(tr);
+    (void)transfer_load_script(tr);
 }

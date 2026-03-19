@@ -1,29 +1,7 @@
-/* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
- *
- * This file is part of PRoot.
- *
- * Copyright (C) 2015 STMicroelectronics
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301 USA.
- */
-
-#include <string.h>    /* str*(3), */
-#include <assert.h>    /* assert(3), */
-#include <stdio.h>     /* printf(3), fflush(3), */
-#include <unistd.h>    /* write(2), */
+#include <string.h>
+#include <assert.h>
+#include <stdio.h>
+#include <unistd.h>
 
 #include "cli/cli.h"
 #include "cli/note.h"
@@ -32,371 +10,272 @@
 #include "path/binding.h"
 #include "attribute.h"
 
-/* These should be included last.  */
 #include "build.h"
 #include "cli/proot.h"
 
-static int handle_option_r(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+/* ------------------------------------------------------------------------- */
+/*  Helper for creating multiple bindings                                    */
+/* ------------------------------------------------------------------------- */
+static void apply_bindings(Tracee *t, const char *list[], const char *base)
 {
-	Binding *binding;
-
-	/* ``chroot $PATH`` is semantically equivalent to ``mount
-	 * --bind $PATH /``.  */
-	binding = new_binding(tracee, value, "/", true);
-	if (binding == NULL)
-		return -1;
-
-	return 0;
+    for (int i = 0; list[i] != NULL; ++i) {
+        const char *src = list[i];
+        if (strcmp(src, "*path*") == 0)
+            src = base;
+        else
+            src = expand_front_variable(t->ctx, src);
+        new_binding(t, src, NULL, false);
+    }
 }
 
-static int handle_option_b(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+/* ------------------------------------------------------------------------- */
+/*  Option handlers (each implemented with different internal details)       */
+/* ------------------------------------------------------------------------- */
+
+static int handle_option_r(Tracee *t, const Cli *c UNUSED, const char *val)
 {
-	char *host;
-	char *guest;
-
-	host = talloc_strdup(tracee->ctx, value);
-	if (host == NULL) {
-		note(tracee, ERROR, INTERNAL, "can't allocate memory");
-		return -1;
-	}
-
-	guest = strchr(host, ':');
-	if (guest != NULL) {
-		*guest = '\0';
-		guest++;
-	}
-
-	new_binding(tracee, host, guest, true);
-	return 0;
+    Binding *b = new_binding(t, val, "/", true);
+    return b ? 0 : -1;
 }
 
-static int handle_option_q(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+static int handle_option_b(Tracee *t, const Cli *c UNUSED, const char *val)
 {
-	const char *ptr;
-	size_t nb_args;
-	bool last;
-	size_t i;
-
-	nb_args = 0;
-	ptr = value;
-	while (1) {
-		nb_args++;
-
-		/* Keep consecutive non-space characters.  */
-		while (*ptr != ' ' && *ptr != '\0')
-			ptr++;
-
-		/* End-of-string ?  */
-		if (*ptr == '\0')
-			break;
-
-		/* Skip consecutive space separators.  */
-		while (*ptr == ' ' && *ptr != '\0')
-			ptr++;
-
-		/* End-of-string ?  */
-		if (*ptr == '\0')
-			break;
-	}
-
-	tracee->qemu = talloc_zero_array(tracee, char *, nb_args + 1);
-	if (tracee->qemu == NULL)
-		return -1;
-	talloc_set_name_const(tracee->qemu, "@qemu");
-
-	i = 0;
-	ptr = value;
-	do {
-		const void *start;
-		const void *end;
-		last = true;
-
-		/* Keep consecutive non-space characters.  */
-		start = ptr;
-		while (*ptr != ' ' && *ptr != '\0')
-			ptr++;
-		end = ptr;
-
-		/* End-of-string ?  */
-		if (*ptr == '\0')
-			goto next;
-
-		/* Remove consecutive space separators.  */
-		while (*ptr == ' ' && *ptr != '\0')
-			ptr++;
-
-		/* End-of-string ?  */
-		if (*ptr == '\0')
-			goto next;
-
-		last = false;
-	next:
-		tracee->qemu[i] = talloc_strndup(tracee->qemu, start, end - start);
-		if (tracee->qemu[i] == NULL)
-			return -1;
-		i++;
-	} while (!last);
-	assert(i == nb_args);
-
-	new_binding(tracee, "/", HOST_ROOTFS, true);
-	new_binding(tracee, "/dev/null", "/etc/ld.so.preload", false);
-
-	return 0;
+    char *copy = talloc_strdup(t->ctx, val);
+    if (!copy) {
+        note(t, ERROR, INTERNAL, "out of memory");
+        return -1;
+    }
+    char *guest = strchr(copy, ':');
+    if (guest) {
+        *guest = '\0';
+        ++guest;
+    }
+    int ok = (new_binding(t, copy, guest, true) != NULL) ? 0 : -1;
+    talloc_free(copy);
+    return ok;
 }
 
-static int handle_option_w(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+static int handle_option_q(Tracee *t, const Cli *c UNUSED, const char *val)
 {
-	tracee->fs->cwd = talloc_strdup(tracee->fs, value);
-	if (tracee->fs->cwd == NULL)
-		return -1;
-	talloc_set_name_const(tracee->fs->cwd, "$cwd");
-	return 0;
+    /* Count tokens */
+    int cnt = 0;
+    const char *p = val;
+    while (*p) {
+        while (*p == ' ') ++p;
+        if (!*p) break;
+        ++cnt;
+        while (*p && *p != ' ') ++p;
+    }
+    if (cnt == 0) {
+        note(t, ERROR, USER, "QEMU command cannot be empty");
+        return -1;
+    }
+
+    t->qemu = talloc_zero_array(t, char *, cnt + 1);
+    if (!t->qemu) return -1;
+    talloc_set_name_const(t->qemu, "qemu");
+
+    int idx = 0;
+    p = val;
+    while (*p) {
+        while (*p == ' ') ++p;
+        if (!*p) break;
+        const char *start = p;
+        while (*p && *p != ' ') ++p;
+        size_t len = p - start;
+        t->qemu[idx] = talloc_strndup(t->qemu, start, len);
+        if (!t->qemu[idx]) return -1;
+        ++idx;
+    }
+    assert(idx == cnt);
+    t->qemu[idx] = NULL;
+
+    new_binding(t, "/", HOST_ROOTFS, true);
+    new_binding(t, "/dev/null", "/etc/ld.so.preload", false);
+    return 0;
 }
 
-static int handle_option_k(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+static int handle_option_w(Tracee *t, const Cli *c UNUSED, const char *val)
 {
-	void *extension;
-	int status;
-
-	extension = get_extension(tracee, kompat_callback);
-	if (extension != NULL) {
-		note(tracee, WARNING, USER, "option -k was already specified");
-		note(tracee, INFO, USER, "only the last -k option is enabled");
-		TALLOC_FREE(extension);
-	}
-
-	status = initialize_extension(tracee, kompat_callback, value);
-	if (status < 0)
-		note(tracee, WARNING, INTERNAL, "option \"-k %s\" discarded", value);
-
-	return 0;
+    t->fs->cwd = talloc_strdup(t->fs, val);
+    if (!t->fs->cwd) return -1;
+    talloc_set_name_const(t->fs->cwd, "cwd");
+    return 0;
 }
 
-static int handle_option_i(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+static int handle_option_k(Tracee *t, const Cli *c UNUSED, const char *val)
 {
-	void *extension;
-
-	extension = get_extension(tracee, fake_id0_callback);
-	if (extension != NULL) {
-		note(tracee, WARNING, USER, "option -i/-0/-S was already specified");
-		note(tracee, INFO, USER, "only the last -i/-0/-S option is enabled");
-		TALLOC_FREE(extension);
-	}
-
-	(void) initialize_extension(tracee, fake_id0_callback, value);
-	return 0;
+    void *ext = get_extension(t, kompat_callback);
+    if (ext) {
+        note(t, WARNING, USER, "multiple -k options; using last");
+        TALLOC_FREE(ext);
+    }
+    int rc = initialize_extension(t, kompat_callback, val);
+    if (rc < 0)
+        note(t, WARNING, INTERNAL, "kompat init failed for '%s'", val);
+    return 0;
 }
 
-static int handle_option_0(Tracee *tracee, const Cli *cli, const char *value UNUSED)
+static int handle_option_i(Tracee *t, const Cli *c UNUSED, const char *val)
 {
-	return handle_option_i(tracee, cli, "0:0");
+    void *ext = get_extension(t, fake_id0_callback);
+    if (ext) {
+        note(t, WARNING, USER, "multiple -i/-0/-S; using last");
+        TALLOC_FREE(ext);
+    }
+    (void)initialize_extension(t, fake_id0_callback, val);
+    return 0;
 }
 
-static int handle_option_kill_on_exit(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+static int handle_option_0(Tracee *t, const Cli *c, const char *v UNUSED)
 {
-	tracee->killall_on_exit = true;
-	return 0;
+    return handle_option_i(t, c, "0:0");
 }
 
-static int handle_option_v(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+static int handle_option_kill_on_exit(Tracee *t, const Cli *c UNUSED, const char *v UNUSED)
 {
-	int status;
-
-	status = parse_integer_option(tracee, &tracee->verbose, value, "-v");
-	if (status < 0)
-		return status;
-
-	global_verbose_level = tracee->verbose;
-	return 0;
+    t->killall_on_exit = true;
+    return 0;
 }
 
+static int handle_option_v(Tracee *t, const Cli *c UNUSED, const char *val)
+{
+    int lvl;
+    if (parse_integer_option(t, &lvl, val, "-v") < 0)
+        return -1;
+    t->verbose = lvl;
+    global_verbose_level = lvl;
+    return 0;
+}
+
+/* Embedded licenses */
 extern unsigned char WEAK _binary_licenses_start;
 extern unsigned char WEAK _binary_licenses_end;
 
-static int handle_option_V(Tracee *tracee UNUSED, const Cli *cli, const char *value UNUSED)
+static int handle_option_V(Tracee *t UNUSED, const Cli *c, const char *v UNUSED)
 {
-	size_t size;
-
-	print_version(cli);
-	printf("\n%s\n", cli->colophon);
-	fflush(stdout);
-
-	size = &_binary_licenses_end - &_binary_licenses_start;
-	if (size > 0)
-		write(1, &_binary_licenses_start, size);
-
-	exit_failure = false;
-	return -1;
+    print_version(c);
+    printf("\n%s\n", c->colophon);
+    fflush(stdout);
+    size_t len = &_binary_licenses_end - &_binary_licenses_start;
+    if (len > 0)
+        write(STDOUT_FILENO, &_binary_licenses_start, len);
+    exit_failure = false;
+    return -1;
 }
 
-static int handle_option_h(Tracee *tracee, const Cli *cli, const char *value UNUSED)
+static int handle_option_h(Tracee *t, const Cli *c, const char *v UNUSED)
 {
-	print_usage(tracee, cli, true);
-	exit_failure = false;
-	return -1;
+    print_usage(t, c, true);
+    exit_failure = false;
+    return -1;
 }
 
-static void new_bindings(Tracee *tracee, const char *bindings[], const char *value)
+static int handle_option_R(Tracee *t, const Cli *c, const char *val)
 {
-	int i;
-
-	for (i = 0; bindings[i] != NULL; i++) {
-		const char *path;
-
-		path = (strcmp(bindings[i], "*path*") != 0
-			? expand_front_variable(tracee->ctx, bindings[i])
-			: value);
-
-		new_binding(tracee, path, NULL, false);
-	}
+    int rc = handle_option_r(t, c, val);
+    if (rc < 0) return rc;
+    apply_bindings(t, recommended_bindings, val);
+    return 0;
 }
 
-static int handle_option_R(Tracee *tracee, const Cli *cli, const char *value)
+static int handle_option_S(Tracee *t, const Cli *c, const char *val)
 {
-	int status;
-
-	status = handle_option_r(tracee, cli, value);
-	if (status < 0)
-		return status;
-
-	new_bindings(tracee, recommended_bindings, value);
-
-	return 0;
+    int rc = handle_option_0(t, c, val);
+    if (rc < 0) return rc;
+    rc = handle_option_r(t, c, val);
+    if (rc < 0) return rc;
+    apply_bindings(t, recommended_su_bindings, val);
+    return 0;
 }
 
-static int handle_option_S(Tracee *tracee, const Cli *cli, const char *value)
+static int handle_option_link2symlink(Tracee *t, const Cli *c UNUSED, const char *v UNUSED)
 {
-	int status;
-
-	status = handle_option_0(tracee, cli, value);
-	if (status < 0)
-		return status;
-
-	status = handle_option_r(tracee, cli, value);
-	if (status < 0)
-		return status;
-
-	new_bindings(tracee, recommended_su_bindings, value);
-
-	return 0;
+    int rc = initialize_extension(t, link2symlink_callback, NULL);
+    if (rc < 0)
+        note(t, WARNING, INTERNAL, "link2symlink failed");
+    return 0;
 }
 
-static int handle_option_link2symlink(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+static int handle_option_ashmem_memfd(Tracee *t, const Cli *c UNUSED, const char *v UNUSED)
 {
-	int status;
-
-	/* Initialize the link2symlink extension.  */
-	status = initialize_extension(tracee, link2symlink_callback, NULL);
-	if (status < 0)
-		note(tracee, WARNING, INTERNAL, "link2symlink not initialized");
-
-	return 0;
+    int rc = initialize_extension(t, ashmem_memfd_callback, NULL);
+    if (rc < 0)
+        note(t, WARNING, INTERNAL, "ashmem-memfd failed");
+    return 0;
 }
 
-static int handle_option_ashmem_memfd(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+static int handle_option_sysvipc(Tracee *t, const Cli *c UNUSED, const char *v UNUSED)
 {
-	int status;
-
-	/* Initialize the ashmem-memfd extension.  */
-	status = initialize_extension(tracee, ashmem_memfd_callback, NULL);
-	if (status < 0)
-		note(tracee, WARNING, INTERNAL, "ashmem-memfd not initialized");
-
-	return 0;
+    int rc = initialize_extension(t, sysvipc_callback, NULL);
+    if (rc < 0)
+        note(t, WARNING, INTERNAL, "sysvipc failed");
+    return 0;
 }
 
-static int handle_option_sysvipc(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+static int handle_option_L(Tracee *t, const Cli *c UNUSED, const char *v UNUSED)
 {
-	int status;
-
-	/* Initialize the sysvipc extension.  */
-	status = initialize_extension(tracee, sysvipc_callback, NULL);
-	if (status < 0)
-		note(tracee, WARNING, INTERNAL, "sysvipc not initialized");
-
-	return 0;
+    (void)initialize_extension(t, fix_symlink_size_callback, NULL);
+    return 0;
 }
 
-static int handle_option_L(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+static int handle_option_H(Tracee *t, const Cli *c UNUSED, const char *v UNUSED)
 {
-        (void) initialize_extension(tracee, fix_symlink_size_callback, NULL);
+    (void)initialize_extension(t, hidden_files_callback, NULL);
+    return 0;
+}
+
+static int handle_option_p(Tracee *t, const Cli *c UNUSED, const char *v UNUSED)
+{
+    (void)initialize_extension(t, port_switch_callback, NULL);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Initialization hooks                                                     */
+/* ------------------------------------------------------------------------- */
+
+static int pre_initialize_bindings(Tracee *t, const Cli *c,
+                                    size_t ac UNUSED, char *const av[] UNUSED, size_t cur)
+{
+    if (!t->fs->cwd) {
+        if (handle_option_w(t, c, ".") < 0)
+            return -1;
+    }
+    if (!get_root(t)) {
+        if (handle_option_r(t, c, "/") < 0)
+            return -1;
+    }
+    return (int)cur;
+}
+
+static int post_initialize_exe(Tracee *t, const Cli *c UNUSED,
+                                size_t ac UNUSED, char *const av[] UNUSED, size_t cur UNUSED)
+{
+    if (!t->qemu)
         return 0;
+
+    char path[PATH_MAX];
+    int rc = which(t->reconf.tracee, t->reconf.paths, path, t->qemu[0]);
+    if (rc < 0)
+        return -1;
+
+    if (t->reconf.tracee) {
+        rc = detranslate_path(t->reconf.tracee, path, NULL);
+        if (rc < 0)
+            return -1;
+    }
+
+    t->qemu[0] = talloc_strdup(t->qemu, path);
+    return (t->qemu[0] != NULL) ? 0 : -1;
 }
 
-static int handle_option_H(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+/* ------------------------------------------------------------------------- */
+/*  Public API                                                               */
+/* ------------------------------------------------------------------------- */
+
+const Cli *get_proot_cli(TALLOC_CTX *ctx UNUSED)
 {
-        (void) initialize_extension(tracee, hidden_files_callback, NULL);
-        return 0;
-}
-
-static int handle_option_p(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
-{
-        (void) initialize_extension(tracee, port_switch_callback, NULL);
-        return 0;
-}
-
-/**
- * Initialize @tracee->qemu.
- */
-static int post_initialize_exe(Tracee *tracee, const Cli *cli UNUSED,
-			size_t argc UNUSED, char *const argv[] UNUSED, size_t cursor UNUSED)
-{
-	char path[PATH_MAX];
-	int status;
-
-	/* Nothing else to do ?  */
-	if (tracee->qemu == NULL)
-		return 0;
-
-	/* Resolve the full guest path to tracee->qemu[0].  */
-	status = which(tracee->reconf.tracee, tracee->reconf.paths, path, tracee->qemu[0]);
-	if (status < 0)
-		return -1;
-
-	/* Actually tracee->qemu[0] has to be a host path from the tracee's
-	 * point-of-view, not from the PRoot's point-of-view.  See
-	 * translate_execve() for details.  */
-	if (tracee->reconf.tracee != NULL) {
-		status = detranslate_path(tracee->reconf.tracee, path, NULL);
-		if (status < 0)
-			return -1;
-	}
-
-	tracee->qemu[0] = talloc_strdup(tracee->qemu, path);
-	if (tracee->qemu[0] == NULL)
-		return -1;
-
-	return 0;
-}
-
-/**
- * Initialize @tracee's fields that are mandatory for PRoot but that
- * are not required on the command line, i.e.  "-w" and "-r".
- */
-static int pre_initialize_bindings(Tracee *tracee, const Cli *cli,
-			size_t argc UNUSED, char *const argv[] UNUSED, size_t cursor)
-{
-	int status;
-
-	/* Default to "." if no CWD were specified.  */
-	if (tracee->fs->cwd == NULL) {
-		status = handle_option_w(tracee, cli, ".");
-		if (status < 0)
-			return -1;
-	}
-
-	 /* The default guest rootfs is "/" if none was specified.  */
-	if (get_root(tracee) == NULL) {
-		status = handle_option_r(tracee, cli, "/");
-		if (status < 0)
-			return -1;
-	}
-
-	return cursor;
-}
-
-const Cli *get_proot_cli(TALLOC_CTX *context UNUSED)
-{
-	global_tool_name = proot_cli.name;
-	return &proot_cli;
+    global_tool_name = proot_cli.name;
+    return &proot_cli;
 }

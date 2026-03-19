@@ -1,29 +1,34 @@
-OUTPUTS = proot/man.1 proot.h proot/rpm-spec proot/index.html care.h care/index.html
+# SciCat PRoot 文档生成 Makefile
+# 用于生成各种格式的文档
+
+# 输出文件定义
+OUTPUTS = proot.1 proot.html articles.html
+
+# 默认目标
 all: $(OUTPUTS)
 
-%/man.1: %/manual.txt
+# 生成 man 页面
+proot.1: proot/manual.txt
 	rst2man $< $@
 
-%.xml: %.txt
-	rst2xml --no-doctype $< $@
-
-%.html: %.txt
+# 生成 HTML 页面
+proot.html: proot/manual.txt
 	rst2html $< $@
 
-# Workaround to avoid unescaped C character.
-%/manual-quoted.txt: %/manual.txt
-	sed 's/"/\\\\"/g' $^ > $@
+articles.html: articles/advanced_usage.txt articles/howto_migrate.txt
+	rst2html $< $@
 
-%.h: %/stylesheets/cli.xsl %/manual-quoted.xml
-	xsltproc --output $@ $^
-
-%/rpm-spec:  %/stylesheets/rpm-spec.xsl %/manual.xml # %/changelog.txt
-	xsltproc --output $@ $^
-	echo "* $(shell date +'%a %b %d %Y') Cédric VINCENT <cedric.vincent@st.com>" >> $@
-	cat $*/changelog.txt >> $@
-
-%/index.html: stylesheets/website.xsl %/stylesheets/website.xsl %/manual.xml
-	xsltproc --output $@ $*/stylesheets/website.xsl $*/manual.xml
-
+# 清理生成的文件
 clean:
-	rm -f *.xml $(OUTPUTS) *-quoted.*
+	rm -f $(OUTPUTS)
+
+# 验证文档语法
+check:
+	for file in proot/manual.txt articles/*.txt; do \
+		if [ -f "$$file" ]; then \
+			rst2html --halt=info "$$file" > /dev/null || exit 1; \
+		fi \
+	done
+	echo "文档语法检查完成"
+
+.PHONY: all clean check

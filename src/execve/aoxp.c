@@ -1,33 +1,14 @@
 /* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
- *
- * This file is part of PRoot.
- *
- * Copyright (C) 2015 STMicroelectronics
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301 USA.
+ * 2026 scicat | Android/Termux 专用
  */
 
-#include <linux/limits.h> /* ARG_MAX, */
-#include <assert.h>   /* assert(3), */
-#include <string.h>   /* strlen(3), memcmp(3), memcpy(3), memset(3), */
-#include <stdbool.h>  /* bool, true, false, */
-#include <errno.h>    /* E*,  */
-#include <stdarg.h>   /* va_*, */
-#include <stdint.h>   /* uint32_t, */
-#include <talloc.h>   /* talloc_*, */
+#include <linux/limits.h>
+#include <string.h>
+#include <stdbool.h>
+#include <errno.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <talloc.h>
 
 #include "arch.h"
 #include "tracee/tracee.h"
@@ -36,34 +17,25 @@
 #include "build.h"
 
 struct mixed_pointer {
-	/* Pointer -- in tracee's address space -- to the current
-	 * object, if local == NULL.  */
 	word_t remote;
-
-	/* Pointer -- in tracer's address space -- to the current
-	 * object, if local != NULL.  */
-	void *local;
+	void  *local;
 };
 
 #include "execve/aoxp.h"
 
-/**
- * Read object pointed to by @array[@index] from tracee's memory, then
- * make @local_pointer points to the locally *cached* version.  This
- * function returns -errno when an error occured, otherwise 0.
- */
 int read_xpointee_as_object(ArrayOfXPointers *array, size_t index, void **local_pointer)
 {
 	int status;
 	int size;
 
-	assert(index < array->length);
+	if (index >= array->length) {
+		*local_pointer = NULL;
+		return -ERANGE;
+	}
 
-	/* Already cached locally?  */
 	if (array->_xpointers[index].local != NULL)
 		goto end;
 
-	/* Remote NULL is mapped to local NULL.  */
 	if (array->_xpointers[index].remote == 0) {
 		array->_xpointers[index].local = NULL;
 		goto end;
@@ -74,12 +46,13 @@ int read_xpointee_as_object(ArrayOfXPointers *array, size_t index, void **local_
 		return size;
 
 	array->_xpointers[index].local = talloc_size(array, size);
-	if (array->_xpointers[index].local == NULL)
+	if (!array->_xpointers[index].local)
 		return -ENOMEM;
 
-	/* Copy locally the remote object.  */
-	status = read_data(TRACEE(array), array->_xpointers[index].local,
-			   array->_xpointers[index].remote, size);
+	status = read_data(TRACEE(array),
+		array->_xpointers[index].local,
+		array->_xpointers[index].remote,
+		size);
 	if (status < 0) {
 		array->_xpointers[index].local = NULL;
 		return status;
@@ -90,38 +63,32 @@ end:
 	return 0;
 }
 
-/**
- * Read string pointed to by @array[@index] from tracee's memory, then
- * make @local_pointer points to the locally *cached* version.  This
- * function returns -errno when an error occured, otherwise 0.
- */
 int read_xpointee_as_string(ArrayOfXPointers *array, size_t index, char **local_pointer)
 {
 	char tmp[ARG_MAX];
 	int status;
 
-	assert(index < array->length);
+	if (index >= array->length) {
+		*local_pointer = NULL;
+		return -ERANGE;
+	}
 
-	/* Already cached locally?  */
 	if (array->_xpointers[index].local != NULL)
 		goto end;
 
-	/* Remote NULL is mapped to local NULL.  */
 	if (array->_xpointers[index].remote == 0) {
 		array->_xpointers[index].local = NULL;
 		goto end;
 	}
 
-	/* Copy locally the remote string into a temporary buffer.  */
 	status = read_string(TRACEE(array), tmp, array->_xpointers[index].remote, ARG_MAX);
 	if (status < 0)
 		return status;
 	if (status >= ARG_MAX)
-		return -ENOMEM;
+		return -ENAMETOOLONG;
 
-	/* Save the local string in a "persistent" buffer.  */
 	array->_xpointers[index].local = talloc_strdup(array, tmp);
-	if (array->_xpointers[index].local == NULL)
+	if (!array->_xpointers[index].local)
 		return -ENOMEM;
 
 end:
@@ -129,310 +96,214 @@ end:
 	return 0;
 }
 
-/**
- * This function returns the number of bytes of the string pointed to
- * by @array[@index], otherwise -errno if an error occured.
- */
 int sizeof_xpointee_as_string(ArrayOfXPointers *array, size_t index)
 {
-	char *string;
-	int status;
+	char *s;
+	int ret;
 
-	assert(index < array->length);
+	if (index >= array->length)
+		return -ERANGE;
 
-	status = read_xpointee_as_string(array, index, &string);
-	if (status < 0)
-		return status;
+	ret = read_xpointee_as_string(array, index, &s);
+	if (ret < 0)
+		return ret;
 
-	if (string == NULL)
-		return 0;
-
-	return strlen(string) + 1;
+	return s ? strlen(s) + 1 : 0;
 }
 
-/**
- * Compare object pointed to by @array[@index] with object pointed to
- * by @local_reference.  This function returns 1 if they are
- * equivalent, 0 otherwise.  On error, -errno is returned.
- */
-int compare_xpointee_generic(ArrayOfXPointers *array, size_t index, const void *local_reference)
+int compare_xpointee_generic(ArrayOfXPointers *array, size_t index, const void *ref)
 {
-	void *object;
-	int status;
+	void *obj;
+	int ret;
+	ssize_t sz;
 
-	assert(index < array->length);
+	if (index >= array->length)
+		return -ERANGE;
 
-	status = read_xpointee(array, index, &object);
-	if (status < 0)
-		return status;
+	ret = read_xpointee(array, index, &obj);
+	if (ret < 0)
+		return ret;
 
-	if (object == NULL && local_reference == NULL)
-		return 1;
+	if (obj == NULL && ref == NULL) return 1;
+	if (obj == NULL || ref == NULL) return 0;
 
-	if (object == NULL && local_reference != NULL)
-		return 0;
+	sz = sizeof_xpointee(array, index);
+	if (sz < 0) return sz;
 
-	if (object != NULL && local_reference == NULL)
-		return 0;
-
-	status = sizeof_xpointee(array, index);
-	if (status < 0)
-		return status;
-
-	return (int) (memcmp(object, local_reference, status) == 0);
+	return memcmp(obj, ref, sz) == 0 ? 1 : 0;
 }
 
-/**
- * This function returns the index in @array of the first pointee
- * equivalent to the @local_reference pointee, otherwise it returns
- * -errno if an error occured.
- */
-int find_xpointee(ArrayOfXPointers *array, const void *local_reference)
+int find_xpointee(ArrayOfXPointers *array, const void *ref)
 {
 	size_t i;
 
 	for (i = 0; i < array->length; i++) {
-		int status;
-
-		status = compare_xpointee(array, i, local_reference);
-		if (status < 0)
-			return status;
-		if (status != 0)
-			break;
+		int ret = compare_xpointee(array, i, ref);
+		if (ret < 0) return ret;
+		if (ret != 0) return i;
 	}
 
-	return i;
+	return -ENOENT;
 }
 
-/**
- * Make @array[@index] points to a copy of the string pointed to by
- * @string.  This function returns -errno when an error occured,
- * otherwise 0.
- */
-int write_xpointee_as_string(ArrayOfXPointers *array, size_t index, const char *string)
+int write_xpointee_as_string(ArrayOfXPointers *array, size_t index, const char *s)
 {
-	assert(index < array->length);
+	if (index >= array->length)
+		return -ERANGE;
 
-	array->_xpointers[index].local = talloc_strdup(array, string);
-	if (array->_xpointers[index].local == NULL)
-		return -ENOMEM;
-
-	return 0;
+	array->_xpointers[index].local = talloc_strdup(array, s);
+	return array->_xpointers[index].local ? 0 : -ENOMEM;
 }
 
-/**
- * Make @array[@index ... @index + @nb_xpointees] points to a copy of
- * the variadic arguments.  This function returns -errno when an error
- * occured, otherwise 0.
- */
-int write_xpointees(ArrayOfXPointers *array, size_t index, size_t nb_xpointees, ...)
+int write_xpointees(ArrayOfXPointers *array, size_t index, size_t n, ...)
 {
-	va_list va_xpointees;
-	int status;
+	va_list ap;
+	int ret = 0;
 	size_t i;
 
-	va_start(va_xpointees, nb_xpointees);
-
-	for (i = 0; i < nb_xpointees; i++) {
-		void *object = va_arg(va_xpointees, void *);
-
-		status = write_xpointee(array, index + i, object);
-		if (status < 0)
-			goto end;
+	va_start(ap, n);
+	for (i = 0; i < n; i++) {
+		const char *s = va_arg(ap, const char*);
+		ret = write_xpointee(array, index + i, s);
+		if (ret < 0) break;
 	}
-	status = 0;
+	va_end(ap);
 
-end:
-	va_end(va_xpointees);
-	return status;
+	return ret;
 }
 
-
-/**
- * Resize the @array at the given @index by the @delta_nb_entries.
- * This function returns -errno when an error occured, otherwise 0.
- */
-int resize_array_of_xpointers(ArrayOfXPointers *array, size_t index, ssize_t delta_nb_entries)
+int resize_array_of_xpointers(ArrayOfXPointers *array, size_t index, ssize_t delta)
 {
-	size_t nb_moved_entries;
-	size_t new_length;
+	size_t new_len;
+	size_t move;
 	void *tmp;
 
-	assert(index < array->length);
+	if (delta == 0) return 0;
+	if (index > array->length) index = array->length;
 
-	if (delta_nb_entries == 0)
-		return 0;
+	new_len = array->length + delta;
+	move    = array->length - index;
 
-	new_length = array->length + delta_nb_entries;
-	nb_moved_entries = array->length - index;
-
-	if (delta_nb_entries > 0) {
-		tmp = talloc_realloc(array, array->_xpointers, XPointer, new_length);
-		if (tmp == NULL)
-			return -ENOMEM;
+	if (delta > 0) {
+		tmp = talloc_realloc(array, array->_xpointers, XPointer, new_len);
+		if (!tmp) return -ENOMEM;
 		array->_xpointers = tmp;
 
-		memmove(array->_xpointers + index + delta_nb_entries, array->_xpointers + index,
-			nb_moved_entries * sizeof(XPointer));
+		memmove(array->_xpointers + index + delta,
+			array->_xpointers + index,
+			move * sizeof(XPointer));
+		memset(array->_xpointers + index, 0, delta * sizeof(XPointer));
+	} else {
+		if (index >= array->length) return -ERANGE;
 
-		memset(array->_xpointers + index, 0, delta_nb_entries * sizeof(XPointer));
-	}
-	else {
-		assert(delta_nb_entries <= 0);
-		assert(index >= (size_t) -delta_nb_entries);
+		memmove(array->_xpointers + index + delta,
+			array->_xpointers + index,
+			move * sizeof(XPointer));
 
-		memmove(array->_xpointers + index + delta_nb_entries, array->_xpointers + index,
-			nb_moved_entries * sizeof(XPointer));
-
-		tmp = talloc_realloc(array, array->_xpointers, XPointer, new_length);
-		if (tmp == NULL)
-			return -ENOMEM;
+		tmp = talloc_realloc(array, array->_xpointers, XPointer, new_len);
+		if (!tmp) return -ENOMEM;
 		array->_xpointers = tmp;
 	}
 
-	array->length = new_length;
+	array->length = new_len;
 	return 0;
 }
 
-/**
- * Copy into *@array_ the pointer array pointed to by @reg from
- * @tracee's memory space.  Only the first @nb_entries are copied,
- * unless it is 0 then all the entries up to the NULL pointer are
- * copied.  This function returns -errno when an error occured,
- * otherwise 0.
- */
-int fetch_array_of_xpointers(Tracee *tracee, ArrayOfXPointers **array_, Reg reg, size_t nb_entries)
+int fetch_array_of_xpointers(Tracee *tracee, ArrayOfXPointers **out, Reg reg, size_t limit)
 {
-	word_t pointer = 1; /* ie. != 0 */
-	word_t address;
-	ArrayOfXPointers *array;
+	word_t addr;
+	word_t ptr = 1;
 	size_t i;
+	ArrayOfXPointers *a;
 
-	assert(array_ != NULL);
+	if (!out) return -EINVAL;
 
-	*array_ = talloc_zero(tracee->ctx, ArrayOfXPointers);
-	if (*array_ == NULL)
-		return -ENOMEM;
-	array = *array_;
+	*out = talloc_zero(tracee->ctx, ArrayOfXPointers);
+	if (!*out) return -ENOMEM;
+	a = *out;
 
-	address = peek_reg(tracee, CURRENT, reg);
+	addr = peek_reg(tracee, CURRENT, reg);
 
-	for (i = 0; nb_entries != 0 ? i < nb_entries : pointer != 0; i++) {
-		void *tmp = talloc_realloc(array, array->_xpointers, XPointer, i + 1);
-		if (tmp == NULL)
-			return -ENOMEM;
-		array->_xpointers = tmp;
+	for (i = 0; (limit && i < limit) || (!limit && ptr); i++) {
+		void *tmp = talloc_realloc(a, a->_xpointers, XPointer, i + 1);
+		if (!tmp) return -ENOMEM;
+		a->_xpointers = tmp;
 
-		pointer = peek_word(tracee, address + i * sizeof_word(tracee));
-		if (errno != 0)
-			return -errno;
+		ptr = peek_word(tracee, addr + i * sizeof_word(tracee));
+		if (errno) return -errno;
 
-		array->_xpointers[i].remote = pointer;
-		array->_xpointers[i].local = NULL;
+		a->_xpointers[i].remote = ptr;
+		a->_xpointers[i].local  = NULL;
 	}
-	array->length = i;
 
-	/* By default, assume it is an array of string pointers.  */
-	array->read_xpointee   = (read_xpointee_t) read_xpointee_as_string;
-	array->sizeof_xpointee = sizeof_xpointee_as_string;
-	array->write_xpointee  = (write_xpointee_t) write_xpointee_as_string;
+	a->length = i;
 
-	/* By default, use generic callbacks: they rely on
-	 * array->read_xpointee() and array->sizeof_xpointee().  */
-	array->compare_xpointee = compare_xpointee_generic;
+	a->read_xpointee    = (read_xpointee_t)read_xpointee_as_string;
+	a->sizeof_xpointee  = sizeof_xpointee_as_string;
+	a->write_xpointee   = (write_xpointee_t)write_xpointee_as_string;
+	a->compare_xpointee = compare_xpointee_generic;
 
 	return 0;
 }
 
-/**
- * Copy @array into tracee's memory space, then put in @reg the
- * address where it was copied.  This function returns -errno if an
- * error occured, otherwise 0.
- */
-int push_array_of_xpointers(ArrayOfXPointers *array, Reg reg)
+int push_array_of_xpointers(ArrayOfXPointers *a, Reg reg)
 {
 	Tracee *tracee;
-	struct iovec *local;
-	size_t local_count;
-	size_t total_size;
-	word_t *pod_array;
-	word_t tracee_ptr;
-	int status;
+	struct iovec *vec;
+	size_t cnt;
+	size_t total;
+	word_t *pod;
+	word_t ptr;
+	int ret;
 	size_t i;
 
-	/* Nothing to do, for sure.  */
-	if (array == NULL)
-		return 0;
+	if (!a) return 0;
+	tracee = TRACEE(a);
 
-	tracee = TRACEE(array);
+	pod = talloc_zero_size(tracee->ctx, a->length * sizeof_word(tracee));
+	if (!pod) return -ENOMEM;
 
-	/* The pointer table is a POD array in the tracee's memory.  */
-	pod_array = talloc_zero_size(tracee->ctx, array->length * sizeof_word(tracee));
-	if (pod_array == NULL)
-		return -ENOMEM;
+	vec = talloc_zero_array(tracee->ctx, struct iovec, a->length + 1);
+	if (!vec) return -ENOMEM;
 
-	/* There's one vector per modified pointee + one vector for the
-	 * pod array.  */
-	local = talloc_zero_array(tracee->ctx, struct iovec, array->length + 1);
-	if (local == NULL)
-		return -ENOMEM;
+	total = a->length * sizeof_word(tracee);
+	vec[0].iov_base = pod;
+	vec[0].iov_len  = total;
+	cnt = 1;
 
-	/* The pod array is expected to be at the beginning of the
-	 * allocated memory by the caller.  */
-	total_size = array->length * sizeof_word(tracee);
-	local[0].iov_base = pod_array;
-	local[0].iov_len  = total_size;
-	local_count = 1;
+	for (i = 0; i < a->length; i++) {
+		ssize_t sz;
 
-	/* Create one vector for each modified pointee.  */
-	for (i = 0; i < array->length; i++) {
-		ssize_t size;
+		if (!a->_xpointers[i].local) continue;
 
-		if (array->_xpointers[i].local == NULL)
-			continue;
+		a->_xpointers[i].remote = total;
+		sz = sizeof_xpointee(a, i);
+		if (sz < 0) return sz;
 
-		/* At this moment, we only know the offsets in the
-		 * tracee's memory block. */
-		array->_xpointers[i].remote = total_size;
-
-		size = sizeof_xpointee(array, i);
-		if (size < 0)
-			return size;
-		total_size += size;
-
-		local[local_count].iov_base = array->_xpointers[i].local;
-		local[local_count].iov_len  = size;
-		local_count++;
+		total += sz;
+		vec[cnt].iov_base = a->_xpointers[i].local;
+		vec[cnt].iov_len  = sz;
+		cnt++;
 	}
 
-	/* Nothing has changed, don't update anything.  */
-	if (local_count == 1)
-		return 0;
-	assert(local_count < array->length + 1);
+	if (cnt == 1) return 0;
 
-	/* Modified pointees and the pod array are stored in a tracee's
-	 * memory block.  */
-	tracee_ptr = alloc_mem(tracee, total_size);
-	if (tracee_ptr == 0)
-		return -E2BIG;
+	ptr = alloc_mem(tracee, total);
+	if (!ptr) return -E2BIG;
 
-	/* Now, we know the absolute addresses in the tracee's
-	 * memory.  */
-	for (i = 0; i < array->length; i++) {
-		if (array->_xpointers[i].local != NULL)
-			array->_xpointers[i].remote += tracee_ptr;
+	for (i = 0; i < a->length; i++) {
+		if (a->_xpointers[i].local)
+			a->_xpointers[i].remote += ptr;
 
 		if (is_32on64_mode(tracee))
-			((uint32_t *) pod_array)[i] = array->_xpointers[i].remote;
+			((uint32_t*)pod)[i] = a->_xpointers[i].remote;
 		else
-			pod_array[i] = array->_xpointers[i].remote;
+			pod[i] = a->_xpointers[i].remote;
 	}
 
-	/* Write all the modified pointees and the pod array at once.  */
-	status = writev_data(tracee, tracee_ptr, local, local_count);
-	if (status < 0)
-		return status;
+	ret = writev_data(tracee, ptr, vec, cnt);
+	if (ret < 0) return ret;
 
-	poke_reg(tracee, reg, tracee_ptr);
+	poke_reg(tracee, reg, ptr);
 	return 0;
 }

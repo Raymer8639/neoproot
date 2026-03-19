@@ -1,120 +1,110 @@
 /* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
  *
- * This file is part of PRoot.
+ * This file is part of PRoot / proot-scicat
  *
  * Copyright (C) 2015 STMicroelectronics
+ * Copyright (C) 2026 Scicat
  *
  * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301 USA.
+ * modify it under the terms of the GNU General Public License
+ * published by the Free Software Foundation; either version 2 of
+ * the License, or (at your option) any later version.
  */
 
-#include <assert.h>     /* assert(3), */
-#include <talloc.h>     /* talloc_*, */
-#include <sys/queue.h>  /* LIST_*, */
-#include <string.h>     /* memset(3), */
+#include <assert.h>
+#include <talloc.h>
+#include <sys/queue.h>
+#include <string.h>
 
 #include "extension/extension.h"
 #include "cli/note.h"
 #include "build.h"
-
 #include "compat.h"
 
 /**
- * Remove an @extension from its tracee's list, then send it the
- * "REMOVED" event.
- *
- * Note: this is a Talloc destructor.
+ * Talloc destructor: remove an extension from its tracee's list
+ * and send REMOVED event.
  */
 static int remove_extension(Extension *extension)
 {
+	if (extension == NULL)
+		return -1;
+
 	LIST_REMOVE(extension, link);
 	extension->callback(extension, REMOVED, 0, 0);
 
-	(void)memset(extension, 0, sizeof(Extension));
+	memset(extension, 0, sizeof(Extension));
 	return 0;
 }
 
 /**
- * Allocate a new extension for the given @callback then attach it to
- * its @tracee.  This function returns NULL on error, otherwise the
- * new extension.
+ * Allocate a new Extension and attach it to @tracee's extension list.
  */
 static Extension *new_extension(Tracee *tracee, extension_callback_t callback)
 {
-	Extension *extension;
+	Extensions *exts;
+	Extension *ext;
 
-	/* Lazy allocation of the list head. */
+	if (tracee == NULL || callback == NULL)
+		return NULL;
+
+	/* Lazy initialize the extension list head */
 	if (tracee->extensions == NULL) {
-		tracee->extensions = talloc_zero(tracee, Extensions);
-		if (tracee->extensions == NULL)
+		exts = talloc_zero(tracee, Extensions);
+		if (exts == NULL)
 			return NULL;
+		tracee->extensions = exts;
 	}
 
-	/* Allocate a new extension. */
-	extension = talloc_zero(tracee->extensions, Extension);
-	if (extension == NULL)
+	ext = talloc_zero(tracee->extensions, Extension);
+	if (ext == NULL)
 		return NULL;
-	extension->callback = callback;
 
-	/* Attach it to its tracee. */
-	LIST_INSERT_HEAD(tracee->extensions, extension, link);
-	talloc_set_destructor(extension, remove_extension);
+	ext->callback = callback;
+	LIST_INSERT_HEAD(tracee->extensions, ext, link);
 
-	return extension;
+	talloc_set_destructor(ext, remove_extension);
+	return ext;
 }
 
 /**
- * Retrieve from @tracee->extensions the extension for the given
- * @callback.
+ * Get the extension attached to @tracee by its callback function.
  */
 Extension *get_extension(Tracee *tracee, extension_callback_t callback)
 {
-	Extension *extension;
+	Extension *ext;
 
-	if (tracee->extensions == NULL)
+	if (tracee == NULL || tracee->extensions == NULL || callback == NULL)
 		return NULL;
 
-	LIST_FOREACH(extension, tracee->extensions, link) {
-		if (extension->callback == callback)
-			return extension;
+	LIST_FOREACH(ext, tracee->extensions, link) {
+		if (ext->callback == callback)
+			return ext;
 	}
 
 	return NULL;
 }
 
 /**
- * Initialize a new extension for the given @callback then attach it
- * to its @tracee.  The parameter @cli is its argument that was passed
- * to the command-line interface.  This function return -1 if an error
- * occurred, otherwise 0.
+ * Create and initialize a new extension from CLI.
  */
 int initialize_extension(Tracee *tracee, extension_callback_t callback, const char *cli)
 {
-	Extension *extension;
+	Extension *ext;
 	int status;
 
-	extension = new_extension(tracee, callback);
-	if (extension == NULL) {
-		note(tracee, WARNING, INTERNAL, "can't create a new extension");
+	if (tracee == NULL || callback == NULL)
+		return -1;
+
+	ext = new_extension(tracee, callback);
+	if (ext == NULL) {
+		note(tracee, WARNING, INTERNAL, "failed to create extension");
 		return -1;
 	}
 
-	/* Remove the new extension if its initialized has failed.  */
-	status = extension->callback(extension, INITIALIZATION, (intptr_t) cli, 0);
+	status = ext->callback(ext, INITIALIZATION, (intptr_t)cli, 0);
 	if (status < 0) {
-		TALLOC_FREE(extension);
+		TALLOC_FREE(ext);
 		return status;
 	}
 
@@ -122,48 +112,40 @@ int initialize_extension(Tracee *tracee, extension_callback_t callback, const ch
 }
 
 /**
- * Rebuild a new list of extensions for this @child from its @parent.
- * The inheritance model is controlled by the @parent.
+ * Inherit extensions from @parent to @child according to clone_flags.
  */
 void inherit_extensions(Tracee *child, Tracee *parent, word_t clone_flags)
 {
-	Extension *parent_extension;
-	Extension *child_extension;
-	int status;
+	Extension *parent_ext;
+	Extension *child_ext;
+	int inherit_mode;
 
-	if (parent->extensions == NULL)
+	if (parent == NULL || child == NULL || parent->extensions == NULL)
 		return;
 
-	/* Sanity check.  */
+	/* Only allowed during reconf or fresh child */
 	assert(child->extensions == NULL || clone_flags == CLONE_RECONF);
 
-	LIST_FOREACH(parent_extension, parent->extensions, link) {
-		/* Ask the parent how this extension is
-		 * inheritable.  */
-		status = parent_extension->callback(parent_extension, INHERIT_PARENT,
-						(intptr_t)child, clone_flags);
+	LIST_FOREACH(parent_ext, parent->extensions, link) {
+		inherit_mode = parent_ext->callback(parent_ext, INHERIT_PARENT,
+						   (intptr_t)child, clone_flags);
+		if (inherit_mode < 0)
+			continue; /* not inheritable */
 
-		/* Not inheritable.  */
-		if (status < 0)
-			continue;
-
-		/* Inheritable...  */
-		child_extension = new_extension(child, parent_extension->callback);
-		if (child_extension == NULL) {
+		child_ext = new_extension(child, parent_ext->callback);
+		if (child_ext == NULL) {
 			note(parent, WARNING, INTERNAL,
-				"can't create a new extension for pid %d", child->pid);
+			     "cannot create extension for child %d", child->pid);
 			continue;
 		}
 
-		if (status == 0) {
-			/* ... with a shared config or ...  */
-			child_extension->config =
-				talloc_reference(child_extension, parent_extension->config);
-		}
-		else {
-			/* ... with another inheritance model.  */
-			child_extension->callback(child_extension, INHERIT_CHILD,
-						(intptr_t)parent_extension, clone_flags);
+		if (inherit_mode == 0) {
+			/* Share config (reference) */
+			child_ext->config = talloc_reference(child_ext, parent_ext->config);
+		} else {
+			/* Let extension handle child inheritance */
+			child_ext->callback(child_ext, INHERIT_CHILD,
+					    (intptr_t)parent_ext, clone_flags);
 		}
 	}
 }

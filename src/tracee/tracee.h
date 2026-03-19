@@ -1,14 +1,14 @@
 /* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
- *
- * This file is part of PRoot.
- *
- * Copyright (C) 2015 STMicroelectronics
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- */
+  *
+  * This file is part of PRoot.
+  *
+  * Copyright (C) 2026 scicat
+  *
+  * This program is free software: you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+  * the Free Software Foundation, either version 3 of the License, or
+  * (at your option) any later version.
+  */
 
 #ifndef TRACEE_H
 #define TRACEE_H

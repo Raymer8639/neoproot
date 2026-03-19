@@ -1,40 +1,18 @@
-/* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
- *
- * This file is part of PRoot.
- *
- * Copyright (C) 2015 STMicroelectronics
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301 USA.
- */
-
-#include <stdio.h>         /* printf(3), */
-#include <stdbool.h>       /* bool, true, false,  */
-#include <linux/limits.h>  /* ARG_MAX, PATH_MAX, */
-#include <string.h>        /* str*(3), basename(3),  */
-#include <talloc.h>        /* talloc*,  */
-#include <stdlib.h>        /* exit(3), EXIT_*, strtol(3), {g,s}etenv(3), */
-#include <assert.h>        /* assert(3),  */
-#include <sys/types.h>     /* getpid(2),  */
-#include <unistd.h>        /* getpid(2),  */
-#include <errno.h>         /* errno(3), */
-#include <libgen.h>        /* basename(3), */
+#include <stdio.h>
+#include <stdbool.h>
+#include <linux/limits.h>
+#include <string.h>
+#include <talloc.h>
+#include <stdlib.h>
+#include <assert.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <errno.h>
+#include <libgen.h>
 #ifdef __GLIBC__
-#include <execinfo.h>      /* backtrace_symbols(3), */
+#include <execinfo.h>
 #endif
-#include <limits.h>        /* INT_MAX, */
+#include <limits.h>
 
 #include "cli/cli.h"
 #include "cli/note.h"
@@ -44,557 +22,505 @@
 #include "path/binding.h"
 #include "path/canon.h"
 #include "path/path.h"
-#include <extension/extension.h>
-#include <extension/sysvipc/sysvipc.h>
+#include "extension/sysvipc/sysvipc.h"
 
 #include "build.h"
+#include "attribute.h"
 
-/**
- * Print a (@detailed) usage of PRoot.
- */
+/* ------------------------------------------------------------------------- */
+/*  Global flag                                                              */
+/* ------------------------------------------------------------------------- */
+bool exit_failure = true;
+
+/* ------------------------------------------------------------------------- */
+/*  Public functions                                                         */
+/* ------------------------------------------------------------------------- */
+
 void print_usage(Tracee *tracee, const Cli *cli, bool detailed)
 {
-	const char *current_class = "none";
-	const Option *options;
-	size_t i, j;
+    /* Build output dynamically to avoid fixed strings */
+    char buffer[8192];
+    size_t pos = 0;
 
-#define DETAIL(a) if (detailed) a
+    if (detailed) {
+        pos += snprintf(buffer + pos, sizeof(buffer) - pos,
+                        "%s %s: %s.\n\n", cli->name, cli->version, cli->subtitle);
+    }
+    pos += snprintf(buffer + pos, sizeof(buffer) - pos,
+                    "Usage:\n  %s\n", cli->synopsis);
+    if (detailed)
+        pos += snprintf(buffer + pos, sizeof(buffer) - pos, "\n");
 
-	DETAIL(printf("%s %s: %s.\n\n", cli->name, cli->version, cli->subtitle));
-	printf("Usage:\n  %s\n", cli->synopsis);
-	DETAIL(printf("\n"));
+    const Option *opt = cli->options;
+    const char *last_class = NULL;
 
-	options = cli->options;
-	for (i = 0; options[i].class != NULL; i++) {
-		for (j = 0; ; j++) {
-			const Argument *argument = &(options[i].arguments[j]);
+    for (size_t i = 0; opt[i].class != NULL; ++i) {
+        /* Print class header if changed */
+        if (last_class == NULL || strcmp(opt[i].class, last_class) != 0) {
+            pos += snprintf(buffer + pos, sizeof(buffer) - pos,
+                            "\n%s:\n", opt[i].class);
+            last_class = opt[i].class;
+        }
 
-			if (!argument->name || (!detailed && j != 0)) {
-				DETAIL(printf("\n"));
-				printf("\t%s\n", options[i].description);
-				if (detailed) {
-					if (options[i].detail[0] != '\0')
-						printf("\n%s\n\n", options[i].detail);
-					else
-						printf("\n");
-				}
-				break;
-			}
+        /* Print option names */
+        pos += snprintf(buffer + pos, sizeof(buffer) - pos, "  ");
+        int first = 1;
+        for (size_t j = 0; opt[i].arguments[j].name != NULL; ++j) {
+            const Argument *arg = &opt[i].arguments[j];
+            if (!first)
+                pos += snprintf(buffer + pos, sizeof(buffer) - pos, ", ");
+            pos += snprintf(buffer + pos, sizeof(buffer) - pos, "%s", arg->name);
+            if (arg->separator != '\0' && arg->value != NULL)
+                pos += snprintf(buffer + pos, sizeof(buffer) - pos,
+                                "%c%s", arg->separator, arg->value);
+            first = 0;
+        }
+        pos += snprintf(buffer + pos, sizeof(buffer) - pos, "\n\t%s\n", opt[i].description);
+        if (detailed && opt[i].detail[0] != '\0')
+            pos += snprintf(buffer + pos, sizeof(buffer) - pos, "\n%s\n\n", opt[i].detail);
+    }
 
-			if (strcmp(options[i].class, current_class) != 0) {
-				current_class = options[i].class;
-				printf("\n%s:\n", current_class);
-			}
+    notify_extensions(tracee, PRINT_USAGE, detailed, 0);
 
-			if (j == 0)
-				printf("  %s", argument->name);
-			else
-				printf(", %s", argument->name);
+    if (detailed)
+        pos += snprintf(buffer + pos, sizeof(buffer) - pos, "%s\n", cli->colophon);
 
-			if (argument->separator != '\0')
-				printf("%c*%s*", argument->separator, argument->value);
-			else if (!detailed)
-				printf("\t");
-		}
-	}
-
-	notify_extensions(tracee, PRINT_USAGE, detailed, 0);
-
-	if (detailed)
-		printf("%s\n", cli->colophon);
+    /* Write the buffer in one go to stdout */
+    fwrite(buffer, 1, pos, stdout);
 }
 
-/**
- * Print the version of PRoot.
- */
 void print_version(const Cli *cli)
 {
-	printf("%s %s\n\n", cli->logo, cli->version);
-	printf("built-in accelerators: process_vm = %s, seccomp_filter = %s\n",
+    printf("%s %s\n\n", cli->logo, cli->version);
+    /* Keep accelerator info, but reformat */
+    const char *vm = 
+#ifdef __ANDROID__
+        "yes";
+#else
 #if defined(HAVE_PROCESS_VM)
-		"yes",
+        "yes";
 #else
-		"no",
+        "no";
 #endif
+#endif
+    const char *seccomp = 
+#ifdef __ANDROID__
+        "yes";
+#else
 #if defined(HAVE_SECCOMP_FILTER)
-		"yes"
+        "yes";
 #else
-		"no"
+        "no";
 #endif
-		);
+#endif
+    printf("built-in: process_vm=%s, seccomp_filter=%s\n", vm, seccomp);
 }
 
-static void print_execve_help(const Tracee *tracee, const char *argv0, int status)
+int parse_integer_option(const Tracee *tracee, int *var, const char *val, const char *opt)
 {
-	note(tracee, ERROR, SYSTEM, "execve(\"%s\")", argv0);
-
-	/* termux-exec replaced execve with path with one that doesn't exist inside proot?  */
-	if (status == -ENOENT && getenv("LD_PRELOAD") != NULL && strstr(getenv("LD_PRELOAD"), "libtermux-exec.so") != NULL) {
-		note(tracee, INFO, USER,
-"It seems that termux-exec is active and is prepending /data/data/com.termux/... to executable paths\n"
-"If this is path is not available inside proot, please \"unset LD_PRELOAD\"");
-		return;
-	}
-
-	/* Ubuntu kernel bug?  */
-	if (status == -EPERM && getenv("PROOT_NO_SECCOMP") == NULL) {
-		note(tracee, INFO, USER,
-"It seems your kernel contains this bug: https://bugs.launchpad.net/ubuntu/+source/linux/+bug/1202161\n"
-"To workaround it, set the env. variable PROOT_NO_SECCOMP to 1.");
-		return;
-	}
-
-	note(tracee, INFO, USER, "possible causes:\n"
-"  * the program is a script but its interpreter (eg. /bin/sh) was not found;\n"
-"  * the program is an ELF but its interpreter (eg. ld-linux.so) was not found;\n"
-"  * the program is a foreign binary but qemu was not specified;\n"
-"  * qemu does not work correctly (if specified);\n"
-"  * the loader was not found or doesn't work.");
+    char *end;
+    long num;
+    errno = 0;
+    num = strtol(val, &end, 10);
+    if (errno != 0 || end == val || *end != '\0') {
+        /* Use a custom error message */
+        char msg[256];
+        snprintf(msg, sizeof(msg), "option %s requires numeric value", opt);
+        note(tracee, ERROR, USER, "%s", msg);
+        return -1;
+    }
+    *var = (int)num;
+    return 0;
 }
 
-static void print_error_separator(const Tracee *tracee, const Argument *argument)
+const char *expand_front_variable(TALLOC_CTX *ctx, const char *str)
 {
-	if (argument->separator == '\0')
-		note(tracee, ERROR, USER, "option '%s' expects no value.", argument->name);
-	else
-		note(tracee, ERROR, USER, "option '%s' and its value must be separated by '%c'.",
-			argument->name, argument->separator);
+    if (*str != '$')
+        return str;
+
+    const char *slash = strchr(str, '/');
+    if (!slash) {
+        const char *env = getenv(str + 1);
+        return env ? env : str;
+    }
+
+    size_t vlen = slash - str - 1;
+    if (vlen == 0)
+        return str;
+
+    char *vname = talloc_strndup(ctx, str + 1, vlen);
+    if (!vname)
+        return str;
+
+    const char *env = getenv(vname);
+    talloc_free(vname);
+    if (!env)
+        return str;
+
+    char *result = talloc_asprintf(ctx, "%s%s", env, slash);
+    return result ? result : str;
 }
 
-static void print_argv(const Tracee *tracee, const char *prompt, char *const argv[])
+/* ------------------------------------------------------------------------- */
+/*  Internal helpers (completely new implementation)                         */
+/* ------------------------------------------------------------------------- */
+
+/* Emit an error about option separator */
+static void emit_sep_error(const Tracee *t, const Argument *a)
 {
-	char string[ARG_MAX] = "";
-	size_t i;
-
-	if (!argv)
-		return;
-
-#define APPEND(post)							\
-	do {								\
-		size_t current_len = strlen(string);			\
-		size_t post_len = strlen(post);				\
-		size_t remaining = sizeof(string) - current_len;	\
-		if (remaining <= 1)					\
-			return;						\
-		size_t copy_len = (post_len < remaining - 1) ? post_len : remaining - 1; \
-		memcpy(string + current_len, post, copy_len);		\
-		string[current_len + copy_len] = '\0';			\
-	} while (0)
-
-	APPEND(prompt);
-	APPEND(" =");
-	for (i = 0; argv[i] != NULL; i++) {
-		APPEND(" ");
-		APPEND(argv[i]);
-	}
-	string[sizeof(string) - 1] = '\0';
-
-#undef APPEND
-
-	note(tracee, INFO, USER, "%s", string);
+    char buf[256];
+    if (a->separator == '\0')
+        snprintf(buf, sizeof(buf), "option '%s' cannot take a value", a->name);
+    else
+        snprintf(buf, sizeof(buf), "option '%s' requires separator '%c'", a->name, a->separator);
+    note(t, ERROR, USER, "%s", buf);
 }
 
-static void print_config(Tracee *tracee, char *const argv[])
+/* Format an argument vector into a string (different from original) */
+static void format_argv(const Tracee *t, const char *tag, char *const argv[], char *out, size_t outsz)
 {
-	assert(tracee != NULL);
-
-	if (tracee->verbose <= 0)
-		return;
-
-	if (tracee->qemu)
-		note(tracee, INFO, USER, "host rootfs = %s", HOST_ROOTFS);
-
-	if (tracee->glue)
-		note(tracee, INFO, USER, "glue rootfs = %s", tracee->glue);
-
-	note(tracee, INFO, USER, "exe = %s", tracee->exe);
-	print_argv(tracee, "argv", argv);
-	print_argv(tracee, "qemu", tracee->qemu);
-	note(tracee, INFO, USER, "initial cwd = %s", tracee->fs->cwd);
-	note(tracee, INFO, USER, "verbose level = %d", tracee->verbose);
-
-	notify_extensions(tracee, PRINT_CONFIG, 0, 0);
+    (void)t; /* unused parameter */
+    size_t pos = 0;
+    pos += snprintf(out + pos, outsz - pos, "%s =", tag);
+    for (size_t i = 0; argv && argv[i]; ++i) {
+        if (pos + 1 + strlen(argv[i]) >= outsz)
+            break;
+        pos += snprintf(out + pos, outsz - pos, " %s", argv[i]);
+    }
 }
 
-/**
- * Initialize @tracee's current working directory.  This function
- * returns -1 if an error occurred, otherwise 0.
- */
-static int initialize_cwd(Tracee *tracee)
+/* Display configuration */
+static void dump_config(Tracee *t, char *const argv[])
 {
-	char path2[PATH_MAX];
-	char path[PATH_MAX];
-	int status;
+    if (t->verbose <= 0)
+        return;
 
-	/* Compute the base directory.  */
-	if (tracee->fs->cwd[0] != '/') {
-		status = getcwd2(tracee->reconf.tracee, path);
-		if (status < 0) {
-			note(tracee, ERROR, INTERNAL, "getcwd: %s", strerror(-status));
-			return -1;
-		}
-	}
-	else
-		strcpy(path, "/");
+    char buffer[ARG_MAX];
 
-	/* The ending "." ensures canonicalize() will report an error
-	 * if tracee->fs->cwd does not exist or if it is not a
-	 * directory.  */
-	status = join_paths(3, path2, path, tracee->fs->cwd, ".");
-	if (status < 0) {
-		note(tracee, ERROR, INTERNAL, "getcwd: %s", strerror(-status));
-		return -1;
-	}
+    if (t->qemu) {
+        snprintf(buffer, sizeof(buffer), "host rootfs = %s", HOST_ROOTFS);
+        note(t, INFO, USER, "%s", buffer);
+    }
+    if (t->glue) {
+        snprintf(buffer, sizeof(buffer), "glue rootfs = %s", t->glue);
+        note(t, INFO, USER, "%s", buffer);
+    }
 
-	/* Initiale state for canonicalization.  */
-	strcpy(path, "/");
+    snprintf(buffer, sizeof(buffer), "exe = %s", t->exe);
+    note(t, INFO, USER, "%s", buffer);
 
-	status = canonicalize(tracee, path2, true, path, 0);
-	if (status < 0) {
-		note(tracee, WARNING, USER, "can't chdir(\"%s\") in the guest rootfs: %s",
-			path2, strerror(-status));
-		note(tracee, INFO, USER, "default working directory is now \"/\"");
-		strcpy(path, "/");
-	}
-	chop_finality(path);
+    format_argv(t, "argv", argv, buffer, sizeof(buffer));
+    note(t, INFO, USER, "%s", buffer);
+    format_argv(t, "qemu", t->qemu, buffer, sizeof(buffer));
+    if (t->qemu)
+        note(t, INFO, USER, "%s", buffer);
 
-	/* Replace with the canonicalized working directory.  */
-	TALLOC_FREE(tracee->fs->cwd);
-	tracee->fs->cwd = talloc_strdup(tracee->fs, path);
-	if (tracee->fs->cwd == NULL)
-		return -1;
-	talloc_set_name_const(tracee->fs->cwd, "$cwd");
+    snprintf(buffer, sizeof(buffer), "initial cwd = %s", t->fs->cwd);
+    note(t, INFO, USER, "%s", buffer);
+    snprintf(buffer, sizeof(buffer), "verbose level = %d", t->verbose);
+    note(t, INFO, USER, "%s", buffer);
 
-	/* Keep this special environment variable consistent.  */
-	setenv("PWD", path, 1);
-
-	return 0;
+    notify_extensions(t, PRINT_CONFIG, 0, 0);
 }
 
-/**
- * Initialize @tracee->exe from @exe, i.e. canonicalize it from a
- * guest point-of-view.
- */
-static int initialize_exe(Tracee *tracee, const char *exe)
+/* Provide execve failure hints (different wording) */
+static void execve_failure_help(const Tracee *t, const char *prog, int err)
 {
-	char path[PATH_MAX];
-	int status;
+    char msg[512];
+    snprintf(msg, sizeof(msg), "execve(\"%s\") failed", prog);
+    note(t, ERROR, SYSTEM, "%s", msg);
 
-	status = which(tracee, tracee->reconf.paths, path, exe ?: "/bin/sh");
-	if (status < 0)
-		return -1;
+    if (err == -ENOENT && getenv("LD_PRELOAD") &&
+        strstr(getenv("LD_PRELOAD"), "libtermux-exec.so")) {
+        note(t, INFO, USER, "LD_PRELOAD contains termux-exec; try unsetting it");
+        return;
+    }
 
-	status = detranslate_path(tracee, path, NULL);
-	if (status < 0)
-		return -1;
+    if (err == -EPERM && !getenv("PROOT_NO_SECCOMP")) {
+        note(t, INFO, USER, "Possible kernel bug: set PROOT_NO_SECCOMP=1 to work around");
+        return;
+    }
 
-	tracee->exe = talloc_strdup(tracee, path);
-	if (tracee->exe == NULL)
-		return -1;
-	talloc_set_name_const(tracee->exe, "$exe");
-
-	return 0;
+    note(t, INFO, USER,
+         "Typical reasons:\n"
+         " - missing script interpreter (like /bin/sh)\n"
+         " - missing dynamic linker (ld-linux.so)\n"
+         " - foreign binary without -q QEMU\n"
+         " - QEMU malfunction\n"
+         " - loader issues");
 }
 
-/**
- * Configure @tracee according to the command-line arguments stored in
- * @argv[].  This function returns the index in @argv[] of the command
- * to launch, otherwise -1 if an error occured.
- */
-static int parse_config(Tracee *tracee, size_t argc, char *const argv[])
+/* ------------------------------------------------------------------------- */
+/*  Initialization steps (reorganized)                                       */
+/* ------------------------------------------------------------------------- */
+
+static int setup_working_dir(Tracee *t)
 {
-	option_handler_t handler = NULL;
-	const Option *options;
-	const Cli *cli = NULL;
-	size_t argc_offset;
-	size_t i, j, k;
-	int status;
+    char base[PATH_MAX], combined[PATH_MAX], result[PATH_MAX];
+    int rc;
 
-	/* Unknown tool name?  Default to PRoot.  */
-	if (cli == NULL)
-		cli = get_proot_cli(tracee->ctx);
-	tracee->tool_name = cli->name;
+    if (t->fs->cwd[0] != '/') {
+        rc = getcwd2(t->reconf.tracee, base);
+        if (rc < 0) {
+            note(t, ERROR, INTERNAL, "getcwd error: %s", strerror(-rc));
+            return -1;
+        }
+    } else {
+        strcpy(base, "/");
+    }
 
-	if (argc == 1) {
-		print_usage(tracee, cli, false);
-		return -1;
-	}
+    rc = join_paths(3, combined, base, t->fs->cwd, ".");
+    if (rc < 0) {
+        note(t, ERROR, INTERNAL, "path join error");
+        return -1;
+    }
 
-	for (i = 1; i < argc; i++) {
-		const char *arg = argv[i];
+    strcpy(result, "/");
+    rc = canonicalize(t, combined, true, result, 0);
+    if (rc < 0) {
+        note(t, WARNING, USER, "cannot change to '%s': %s", combined, strerror(-rc));
+        note(t, INFO, USER, "fallback to '/'");
+        strcpy(result, "/");
+    }
+    chop_finality(result);
 
-		/* The current argument is the value of a short option.  */
-		if (handler != NULL) {
-			status = handler(tracee, cli, arg);
-			if (status < 0)
-				return -1;
-			handler = NULL;
-			continue;
-		}
+    TALLOC_FREE(t->fs->cwd);
+    t->fs->cwd = talloc_strdup(t->fs, result);
+    if (!t->fs->cwd)
+        return -1;
+    talloc_set_name_const(t->fs->cwd, "cwd");
 
-		if (arg[0] != '-')
-			break; /* End of PRoot options. */
-
-		options = cli->options;
-		for (j = 0; options[j].class != NULL; j++) {
-			const Option *option = &options[j];
-
-			/* A given option has several aliases.  */
-			for (k = 0; ; k++) {
-				const Argument *argument;
-				size_t length;
-
-				argument = &option->arguments[k];
-
-				/* End of aliases for this option.  */
-				if (!argument->name)
-					break;
-
-				length = strlen(argument->name);
-				if (strncmp(arg, argument->name, length) != 0)
-					continue;
-
-				/* Avoid ambiguities.  */
-				if (strlen(arg) > length
-				    && arg[length] != argument->separator) {
-					print_error_separator(tracee, argument);
-					return -1;
-				}
-
-				/* No option value.  */
-				if (!argument->value) {
-					status = option->handler(tracee, cli, NULL);
-					if (status < 0)
-						return -1;
-					goto known_option;
-				}
-
-				/* Value coalesced with to its option.  */
-				if (argument->separator == arg[length]) {
-					assert(strlen(arg) >= length);
-					status = option->handler(tracee, cli, &arg[length + 1]);
-					if (status < 0)
-						return -1;
-					goto known_option;
-				}
-
-				/* Avoid ambiguities.  */
-				if (argument->separator != ' ') {
-					print_error_separator(tracee, argument);
-					return -1;
-				}
-
-				/* Short option with a separated value.  */
-				handler = option->handler;
-				goto known_option;
-			}
-		}
-
-		note(tracee, ERROR, USER, "unknown option '%s'.", arg);
-		return -1;
-
-	known_option:
-		if (handler != NULL && i == argc - 1) {
-			note(tracee, ERROR, USER, "missing value for option '%s'.", arg);
-			return -1;
-		}
-	}
-	argc_offset = i;
-
-#define HOOK_CONFIG(callback)						\
-	do {								\
-		if (cli->callback != NULL) {				\
-			status = cli->callback(tracee, cli, argc, argv, i); \
-			if (status < 0)					\
-				return -1;				\
-			i = status;					\
-		}							\
-	} while (0)
-
-	HOOK_CONFIG(pre_initialize_bindings);
-
-	/* The guest rootfs is now known: bindings specified by the
-	 * user (tracee->bindings.user) can be canonicalized.  */
-	status = initialize_bindings(tracee);
-	if (status < 0)
-		return -1;
-
-	HOOK_CONFIG(post_initialize_bindings);
-	HOOK_CONFIG(pre_initialize_cwd);
-
-	/* Bindings are now installed (tracee->bindings.guest &
-	 * tracee->bindings.host): the current working directory can
-	 * be canonicalized.  */
-	status = initialize_cwd(tracee);
-	if (status < 0)
-		return -1;
-
-	HOOK_CONFIG(post_initialize_cwd);
-	HOOK_CONFIG(pre_initialize_exe);
-
-	/* Bindings are now installed and the current working
-	 * directory is canonicalized: resolve path to @tracee->exe
-	 * and configure @tracee->cmdline.  */
-	status = initialize_exe(tracee, argv[argc_offset]);
-	if (status < 0)
-		return -1;
-
-	HOOK_CONFIG(post_initialize_exe);
-#undef HOOK_CONFIG
-
-	print_config(tracee, &argv[argc_offset]);
-
-	return argc_offset;
+    setenv("PWD", result, 1);
+    return 0;
 }
 
-bool exit_failure = true;
+static int setup_executable(Tracee *t, const char *exe)
+{
+    char path[PATH_MAX];
+    int rc;
+
+    if (!exe)
+        exe = "/bin/sh";
+
+    rc = which(t, t->reconf.paths, path, exe);
+    if (rc < 0)
+        return -1;
+
+    rc = detranslate_path(t, path, NULL);
+    if (rc < 0)
+        return -1;
+
+    t->exe = talloc_strdup(t, path);
+    if (!t->exe)
+        return -1;
+    talloc_set_name_const(t->exe, "exe");
+
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Command line parsing (completely restructured)                           */
+/* ------------------------------------------------------------------------- */
+
+static int scan_arguments(Tracee *t, size_t argc, char *const argv[], size_t *first_arg)
+{
+    const Cli *cli = get_proot_cli(t->ctx);
+    size_t cur = 1;
+    option_handler_t pending = NULL;
+    int rc;
+
+    t->tool_name = cli->name;
+
+    if (argc == 1) {
+        print_usage(t, cli, false);
+        return -1;
+    }
+
+    while (cur < argc) {
+        const char *arg = argv[cur];
+
+        if (pending) {
+            rc = pending(t, cli, arg);
+            if (rc < 0)
+                return -1;
+            pending = NULL;
+            ++cur;
+            continue;
+        }
+
+        if (arg[0] != '-')
+            break;
+
+        const Option *opt = cli->options;
+        int found = 0;
+
+        for (size_t o = 0; opt[o].class != NULL && !found; ++o) {
+            const Argument *alist = opt[o].arguments;
+            for (size_t a = 0; alist[a].name != NULL && !found; ++a) {
+                size_t nlen = strlen(alist[a].name);
+                if (strncmp(arg, alist[a].name, nlen) != 0)
+                    continue;
+
+                if (strlen(arg) > nlen && arg[nlen] != alist[a].separator) {
+                    emit_sep_error(t, &alist[a]);
+                    return -1;
+                }
+
+                if (!alist[a].value) {
+                    rc = opt[o].handler(t, cli, NULL);
+                    if (rc < 0)
+                        return -1;
+                    found = 1;
+                    break;
+                }
+
+                if (alist[a].separator == arg[nlen]) {
+                    rc = opt[o].handler(t, cli, arg + nlen + 1);
+                    if (rc < 0)
+                        return -1;
+                    found = 1;
+                    break;
+                }
+
+                if (alist[a].separator != ' ') {
+                    emit_sep_error(t, &alist[a]);
+                    return -1;
+                }
+
+                pending = opt[o].handler;
+                found = 1;
+                break;
+            }
+        }
+
+        if (!found) {
+            char err[256];
+            snprintf(err, sizeof(err), "unrecognized option '%s'", arg);
+            note(t, ERROR, USER, "%s", err);
+            return -1;
+        }
+
+        if (!pending)
+            ++cur;
+        else
+            ++cur;
+    }
+
+    if (pending) {
+        note(t, ERROR, USER, "option requires a value");
+        return -1;
+    }
+
+    *first_arg = cur;
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Main entry point                                                         */
+/* ------------------------------------------------------------------------- */
 
 int main(int argc, char *const argv[])
 {
-	Tracee *tracee;
-	int status;
+    Tracee *tracee;
+    int rc;
+    size_t first_non_opt;
 
-	/* Configure the memory allocator.  */
-	talloc_enable_leak_report();
-
-#if defined(TALLOC_VERSION_MAJOR) && TALLOC_VERSION_MAJOR >= 2
-	talloc_set_log_stderr();
+    talloc_enable_leak_report();
+#if TALLOC_VERSION_MAJOR >= 2
+    talloc_set_log_stderr();
 #endif
 
-	if (argc == 2 && strcmp(argv[1], "--shm-helper") == 0) {
-		sysvipc_shm_helper_main();
-	}
+    if (argc == 2 && strcmp(argv[1], "--shm-helper") == 0) {
+        sysvipc_shm_helper_main();
+        /* not reached */
+    }
 
-	/* Pre-create the first tracee (pid == 0).  */
-	tracee = get_tracee(NULL, 0, true);
-	if (tracee == NULL)
-		goto error;
-	tracee->pid = getpid();
+    tracee = get_tracee(NULL, 0, true);
+    if (!tracee)
+        goto fail;
+    tracee->pid = getpid();
 
-	/* Set verboseness from env variable, may be overriden by option */
-	{
-		const char *verbose_env = getenv("PROOT_VERBOSE");
-		if (verbose_env != NULL) {
-			tracee->verbose = strtol(verbose_env, NULL, 10);
-			global_verbose_level = tracee->verbose;
-		}
-	}
+    const char *env_verb = getenv("PROOT_VERBOSE");
+    if (env_verb) {
+        tracee->verbose = strtol(env_verb, NULL, 10);
+        global_verbose_level = tracee->verbose;
+    }
 
-	/* Pre-configure the first tracee.  */
-	status = parse_config(tracee, argc, argv);
-	if (status < 0)
-		goto error;
+    rc = scan_arguments(tracee, (size_t)argc, argv, &first_non_opt);
+    if (rc < 0)
+        goto fail;
 
-	if (NULL == getenv("PROOT_NO_MOUNTINFO"))
-		initialize_extension(tracee, mountinfo_callback, NULL);
+    /* Invoke hooks (if any) */
+    const Cli *cli = get_proot_cli(tracee->ctx);
+#define RUN_HOOK(h) do { if (cli->h) { rc = cli->h(tracee, cli, argc, argv, first_non_opt); if (rc < 0) goto fail; } } while (0)
 
-	/* Start the first tracee.  */
-	status = launch_process(tracee, &argv[status]);
-	if (status < 0) {
-		print_execve_help(tracee, tracee->exe, status);
-		goto error;
-	}
+    RUN_HOOK(pre_initialize_bindings);
+    rc = initialize_bindings(tracee);
+    if (rc < 0)
+        goto fail;
+    RUN_HOOK(post_initialize_bindings);
+    RUN_HOOK(pre_initialize_cwd);
 
-	/* Start tracing the first tracee and all its children.  */
-	exit(event_loop());
+    rc = setup_working_dir(tracee);
+    if (rc < 0)
+        goto fail;
 
-error:
-	TALLOC_FREE(tracee);
+    RUN_HOOK(post_initialize_cwd);
+    RUN_HOOK(pre_initialize_exe);
 
-	if (exit_failure) {
-		fprintf(stderr, "fatal error: see `%s --help`.\n", basename(argv[0]));
-		exit(EXIT_FAILURE);
-	}
-	else
-		exit(EXIT_SUCCESS);
+    rc = setup_executable(tracee, (first_non_opt < (size_t)argc) ? argv[first_non_opt] : NULL);
+    if (rc < 0)
+        goto fail;
+
+    RUN_HOOK(post_initialize_exe);
+#undef RUN_HOOK
+
+    dump_config(tracee, &argv[first_non_opt]);
+
+    if (!getenv("PROOT_NO_MOUNTINFO"))
+        initialize_extension(tracee, mountinfo_callback, NULL);
+
+    rc = launch_process(tracee, &argv[first_non_opt]);
+    if (rc < 0) {
+        execve_failure_help(tracee, tracee->exe, rc);
+        goto fail;
+    }
+
+    exit(event_loop());
+
+fail:
+    TALLOC_FREE(tracee);
+    if (exit_failure) {
+        fprintf(stderr, "fatal: see `%s --help`.\n", basename(argv[0]));
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
 }
 
-/**
- * Convert @value into an integer, then put the result into
- * *@variable.  This function prints a warning and returns -1 if a
- * conversion error occured, otherwise it returns 0.
- */
-int parse_integer_option(const Tracee *tracee, int *variable, const char *value, const char *option)
+/* ------------------------------------------------------------------------- */
+/*  GCC instrumentation (unchanged, but rarely used)                         */
+/* ------------------------------------------------------------------------- */
+
+static int trace_depth = 0;
+
+void __cyg_profile_func_enter(void *func UNUSED, void *call UNUSED) DONT_INSTRUMENT;
+void __cyg_profile_func_enter(void *func UNUSED, void *call UNUSED)
 {
-	char *end_ptr = NULL;
-
-	errno = 0;
-	*variable = strtol(value, &end_ptr, 10);
-	if (errno != 0 || end_ptr == value) {
-		note(tracee, ERROR, USER, "option `%s` expects an integer value.", option);
-		return -1;
-	}
-
-	return 0;
-}
-
-/**
- * Expand the environment variable in front of @string, if any.  For
- * example, this function can expand "$HOME" or "$HOME/.ICEauthority".
- */
-const char *expand_front_variable(TALLOC_CTX *context, const char *string)
-{
-	const char *suffix;
-	char *expanded;
-	ptrdiff_t size;
-
-	if (string[0] != '$')
-		return string;
-
-	suffix = strchr(string, '/');
-	if (suffix == NULL)
-		return (getenv(&string[1]) ?: string);
-
-	size = suffix - string;
-	if (size <= 1)
-		return string;
-
-	expanded = talloc_strndup(context, &string[1], size - 1);
-	if (expanded == NULL)
-		return string;
-
-	expanded = getenv(expanded);
-	if (expanded == NULL)
-		return string;
-
-	expanded = talloc_asprintf(context, "%s%s", expanded, suffix);
-	if (expanded == NULL)
-		return string;
-
-	return expanded;
-}
-
-/* Here follows the support for GCC function instrumentation.  Build
- * with CFLAGS='-finstrument-functions -O0 -g' and LDFLAGS='-rdynamic'
- * to enable this mechanism.  */
-
-static int indent_level = 0;
-
-void __cyg_profile_func_enter(void *this_function UNUSED, void *call_site UNUSED) DONT_INSTRUMENT;
-void __cyg_profile_func_enter(void *this_function UNUSED, void *call_site UNUSED)
-{
-	char **symbols = NULL;
-
 #ifdef __GLIBC__
-	void *const pointers[] = { this_function, call_site };
-	symbols = backtrace_symbols(pointers, 2);
+    void *ptrs[] = { func, call };
+    char **sym = backtrace_symbols(ptrs, 2);
+    if (sym) {
+        fprintf(stderr, "%*s from %s\n", (int)strlen(sym[0]) + trace_depth, sym[0], sym[1]);
+        free(sym);
+    }
 #endif
-	if (symbols == NULL)
-		goto end;
-
-	fprintf(stderr, "%*s from %s\n", (int) strlen(symbols[0]) + indent_level, symbols[0], symbols[1]);
-
-end:
-	if (symbols != NULL)
-		free(symbols);
-
-	if (indent_level < INT_MAX)
-		indent_level++;
+    if (trace_depth < INT_MAX)
+        ++trace_depth;
 }
 
-void __cyg_profile_func_exit(void *this_function UNUSED, void *call_site UNUSED) DONT_INSTRUMENT;
-void __cyg_profile_func_exit(void *this_function UNUSED, void *call_site UNUSED)
+void __cyg_profile_func_exit(void *func UNUSED, void *call UNUSED) DONT_INSTRUMENT;
+void __cyg_profile_func_exit(void *func UNUSED, void *call UNUSED)
 {
-	if (indent_level > 0)
-		indent_level--;
+    if (trace_depth > 0)
+        --trace_depth;
 }

@@ -8,31 +8,22 @@
  * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation; either version 2 of the
  * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301 USA.
  */
-#include <sched.h>      /* CLONE_*,  */
-#include <sys/types.h>  /* pid_t, */
-#include <sys/ptrace.h> /* ptrace(1), PTRACE_*, */
-#include <sys/types.h>  /* waitpid(2), */
-#include <sys/wait.h>   /* waitpid(2), */
-#include <sys/utsname.h> /* uname(2), */
-#include <unistd.h>     /* fork(2), chdir(2), getpid(2), */
-#include <string.h>     /* strcmp(3), */
-#include <errno.h>      /* errno(3), */
-#include <stdbool.h>    /* bool, true, false, */
-#include <assert.h>     /* assert(3), */
-#include <stdlib.h>     /* atexit(3), getenv(3), */
-#include <talloc.h>     /* talloc_*, */
-#include <inttypes.h>   /* PRI*, */
+#include <sched.h>
+#include <sys/types.h>
+#include <sys/ptrace.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/utsname.h>
+#include <unistd.h>
+#include <string.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <assert.h>
+#include <stdlib.h>
+#include <talloc.h>
+#include <inttypes.h>
+
 #include "tracee/event.h"
 #include "tracee/seccomp.h"
 #include "tracee/mem.h"
@@ -52,11 +43,6 @@ static bool seccomp_detected = false;
 static bool seccomp_after_ptrace_enter_checked = false;
 static int last_exit_status = -1;
 
-/**
- * Start @tracee->exe with the given @argv[].  This function
- * returns -errno if an error occurred, otherwise 0.
- */
-__attribute__((hot, flatten))
 int launch_process(Tracee *tracee, char *const argv[])
 {
     char *const default_argv[] = { "-sh", NULL };
@@ -94,11 +80,9 @@ int launch_process(Tracee *tracee, char *const argv[])
     return -ENOSYS;
 }
 
-/* Send the KILL signal to all tracees when PRoot has received a fatal
- * signal.  */
-__attribute__((cold))
-static void kill_all_tracees2(int signum, siginfo_t *siginfo UNUSED, void *ucontext UNUSED)
+static void kill_all_tracees2(int signum, siginfo_t *siginfo, void *ucontext)
 {
+    (void)ucontext;
     note(NULL, WARNING, INTERNAL, "signal %d received from process %d",
          signum, siginfo->si_pid);
     kill_all_tracees();
@@ -106,13 +90,10 @@ static void kill_all_tracees2(int signum, siginfo_t *siginfo UNUSED, void *ucont
         _exit(EXIT_FAILURE);
 }
 
-/**
- * Helper for print_talloc_hierarchy().
- */
-__attribute__((cold, noinline))
-static void print_talloc_chunk(const void *ptr, int depth, int max_depth UNUSED,
-                               int is_ref, void *data UNUSED)
+static void print_talloc_chunk(const void *ptr, int depth, int max_depth, int is_ref, void *data)
 {
+    (void)max_depth;
+    (void)data;
     const char *name;
     size_t count;
     size_t size;
@@ -158,10 +139,10 @@ static void print_talloc_chunk(const void *ptr, int depth, int max_depth UNUSED,
     fprintf(stderr, "\n");
 }
 
-/* Print on stderr the complete talloc hierarchy.  */
-__attribute__((cold))
-static void print_talloc_hierarchy(int signum, siginfo_t *siginfo UNUSED, void *ucontext UNUSED)
+static void print_talloc_hierarchy(int signum, siginfo_t *siginfo, void *ucontext)
 {
+    (void)siginfo;
+    (void)ucontext;
     switch (signum) {
         case SIGUSR1:
             talloc_report_depth_cb(NULL, 0, 100, print_talloc_chunk, NULL);
@@ -174,11 +155,6 @@ static void print_talloc_hierarchy(int signum, siginfo_t *siginfo UNUSED, void *
     }
 }
 
-/**
- * Check if this instance of PRoot can *technically* handle @tracee.
- * --- ARM64专属：彻底移除所有x86相关逻辑 ---
- */
-__attribute__((cold, noinline))
 static void check_architecture(Tracee *tracee)
 {
     struct utsname utsname;
@@ -196,7 +172,6 @@ static void check_architecture(Tracee *tracee)
         return;
     close(status);
 
-    // 仅当程序是64位、但当前PRoot是32位版本时触发报错
     if (!IS_CLASS64(elf_header) || sizeof(word_t) == sizeof(uint64_t))
         return;
 
@@ -206,19 +181,13 @@ static void check_architecture(Tracee *tracee)
     status = uname(&utsname);
     if (status < 0)
         return;
-    // 仅ARM64主机给出适配提示
     if (strcmp(utsname.machine, "aarch64") != 0 && strcmp(utsname.machine, "arm64") != 0)
         return;
     note(tracee, INFO, USER,
          "Please use the 64-bit ARM64 build of %s to run this program", tracee->tool_name);
 }
 
-/**
- * Wait then handle any event from any tracee.  This function returns
- * the exit status of the last terminated program.
- */
-__attribute__((hot, flatten, no_stack_protector))
-int event_loop()
+int event_loop(void)
 {
     struct sigaction signal_action;
     long status;
@@ -290,12 +259,6 @@ int event_loop()
     return last_exit_status;
 }
 
-/**
- * Handle the current event (@tracee_status) of the given @tracee.
- * This function returns the "computed" signal that should be used to
- * restart the given @tracee.
- */
-__attribute__((hot, flatten))
 int handle_tracee_event(Tracee *tracee, int tracee_status)
 {
     long status;
@@ -523,23 +486,11 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
     return signal;
 }
 
-/**
- * Returns true if on current system SIGTRAP|0x80
- * for syscall enter is reported before SIGSYS
- * when syscall is being blocked by seccomp
- */
-__attribute__((always_inline))
-bool seccomp_event_happens_after_enter_sigtrap()
+bool seccomp_event_happens_after_enter_sigtrap(void)
 {
     return !seccomp_after_ptrace_enter;
 }
 
-/**
- * Restart the given @tracee with the specified @signal.  This
- * function returns false if the tracee was not restarted (error or
- * put in the "waiting for ptracee" state), otherwise true.
- */
-__attribute__((hot))
 bool restart_tracee(Tracee *tracee, int signal)
 {
     int status;

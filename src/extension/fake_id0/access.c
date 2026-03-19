@@ -1,55 +1,62 @@
 #include <linux/limits.h>
 #include <errno.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "extension/fake_id0/access.h"
 #include "extension/fake_id0/helper_functions.h"
 
-/** Handles the access and faccessat syscalls. Checks permissions according to
- *  a meta file if it exists. See access(2) for returned errors.
+/**
+ * 处理 access / faccessat 系统调用
+ * 根据 meta 文件做权限检查，遵循 access(2) 错误码
  */
 int handle_access_enter_end(Tracee *tracee, Reg path_sysarg,
-	Reg mode_sysarg, Reg dirfd_sysarg, Config *config)
+                            Reg mode_sysarg, Reg dirfd_sysarg, Config *config)
 {
-	int status, mode, perms, mask;
-	char path[PATH_MAX];
-	char rel_path[PATH_MAX];
-	char meta_path[PATH_MAX];
+    int mode, mask;
+    char path[PATH_MAX];
+    char rel_path[PATH_MAX];
+    char meta_path[PATH_MAX];
+    int ret;
 
-	status = read_sysarg_path(tracee, path, path_sysarg, CURRENT);
-	if(status < 0)
-		return status;
-	if(status == 1)
-		return 0;
+    // 读取用户路径
+    ret = read_sysarg_path(tracee, path, path_sysarg, CURRENT);
+    if (ret < 0)
+        return ret;
+    if (ret == 1)
+        return 0;
 
-	status = get_fd_path(tracee, rel_path, dirfd_sysarg, CURRENT);
-	if(status < 0)
-		return status;
+    // 处理 dirfd 相对路径
+    ret = get_fd_path(tracee, rel_path, dirfd_sysarg, CURRENT);
+    if (ret < 0)
+        return ret;
 
-	status = check_dir_perms(tracee, 'r', path, rel_path, config);
-	if(status < 0) 
-		return status;
+    // 检查目录访问权限
+    ret = check_dir_perms(tracee, 'r', path, rel_path, config);
+    if (ret < 0)
+        return ret;
 
-	// Only care about calls checking permissions.
-	mode = peek_reg(tracee, ORIGINAL, mode_sysarg);
-	if(mode & F_OK) 
-		return 0;
+    // 获取调用时的 mode
+    mode = peek_reg(tracee, ORIGINAL, mode_sysarg);
 
-	status = get_meta_path(path, meta_path);
-	if(status < 0)
-		return status;
+    // 只检查存在性，不校验权限
+    if (mode & F_OK)
+        return 0;
 
-	mask = 0;
-	if((mode & R_OK) == R_OK)
-		mask += 4;
-	if((mode & W_OK) == W_OK)
-		mask += 2;
-	if((mode & X_OK) == X_OK)
-		mask += 1; 
+    // 获取 meta 文件路径
+    ret = get_meta_path(path, meta_path);
+    if (ret < 0)
+        return ret;
 
-	perms = get_permissions(meta_path, config, 1);
-	if((perms & mask) != mask) 
-		return -EACCES;
+    // 构造需要的权限掩码
+    mask = 0;
+    if (mode & R_OK) mask |= 4;
+    if (mode & W_OK) mask |= 2;
+    if (mode & X_OK) mask |= 1;
 
-	return 0;
+    // 检查权限
+    if ((get_permissions(meta_path, config, 1) & mask) != mask)
+        return -EACCES;
+
+    return 0;
 }

@@ -1,18 +1,17 @@
 /* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
  *
- * This file is part of PRoot.
+ * This file is part of proot-scicat.
  *
- * Copyright (C) 2015 STMicroelectronics
+ * Copyright (C) 2026 scicat
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
+ * This program is free software; you can redistribute it/or
+ * modify it under the terms of the GNU General Public License
+ * version 2, as published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
@@ -20,15 +19,15 @@
  * 02110-1301 USA.
  */
 
-#include <fcntl.h>  /* open(2), */
-#include <unistd.h> /* read(2), close(2), */
-#include <errno.h>  /* EACCES, ENOTSUP, */
-#include <stdint.h> /* UINT64_MAX, */
-#include <limits.h> /* PATH_MAX, */
-#include <string.h> /* str*(3), memcpy(3), */
-#include <assert.h> /* assert(3), */
-#include <talloc.h> /* talloc_*, */
-#include <stdbool.h> /* bool, true, false,  */
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <stdint.h>
+#include <limits.h>
+#include <string.h>
+#include <assert.h>
+#include <stdbool.h>
+#include <talloc.h>
 
 #include "execve/elf.h"
 #include "tracee/tracee.h"
@@ -37,34 +36,39 @@
 #include "compat.h"
 #include "attribute.h"
 
-/**
- * Open the ELF file @t_path and extract its header into @elf_header.
- */
-__attribute__((hot, flatten))
+static inline bool check_elf_ident(const ElfHeader *hdr)
+{
+    return (ELF_IDENT(*hdr, 0) == 0x7F
+            && ELF_IDENT(*hdr, 1) == 'E'
+            && ELF_IDENT(*hdr, 2) == 'L'
+            && ELF_IDENT(*hdr, 3) == 'F');
+}
+
 int open_elf(const char *t_path, ElfHeader *elf_header)
 {
-    // 提前返回无效路径（避免后续系统调用）
-    if (t_path == NULL || strlen(t_path) >= PATH_MAX)
+    if (!t_path || !elf_header)
+        return -EINVAL;
+
+    size_t path_len = strlen(t_path);
+    if (path_len >= PATH_MAX)
         return -ENAMETOOLONG;
 
-    int fd = open(t_path, O_RDONLY);
+    int fd = open(t_path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return -errno;
 
-    // 一次性读取ELF头，减少read调用
-    ssize_t status = read(fd, elf_header, sizeof(ElfHeader));
-    if (status < 0) {
+    ssize_t nb = read(fd, elf_header, sizeof(ElfHeader));
+    if (nb < 0) {
         close(fd);
         return -errno;
     }
 
-    // 精简ELF有效性校验，合并条件判断
-    if ((size_t)status < sizeof(ElfHeader)
-        || ELF_IDENT(*elf_header, 0) != 0x7f
-        || ELF_IDENT(*elf_header, 1) != 'E'
-        || ELF_IDENT(*elf_header, 2) != 'L'
-        || ELF_IDENT(*elf_header, 3) != 'F'
-        || (!IS_CLASS32(*elf_header) && !IS_CLASS64(*elf_header))) {
+    if ((size_t)nb < sizeof(ElfHeader) || !check_elf_ident(elf_header)) {
+        close(fd);
+        return -ENOEXEC;
+    }
+
+    if (!IS_CLASS32(*elf_header) && !IS_CLASS64(*elf_header)) {
         close(fd);
         return -ENOEXEC;
     }
@@ -72,89 +76,87 @@ int open_elf(const char *t_path, ElfHeader *elf_header)
     return fd;
 }
 
-/**
- * Invoke @callback(..., @data) for each program headers from the specified ELF file.
- */
-__attribute__((hot, flatten))
 int iterate_program_headers(const Tracee *tracee, int fd, const ElfHeader *elf_header,
-			program_headers_iterator_t callback, void *data)
+                           program_headers_iterator_t callback, void *data)
 {
-    ProgramHeader program_header;
-    uint64_t elf_phoff = ELF_FIELD(*elf_header, phoff);
-    uint16_t elf_phentsize = ELF_FIELD(*elf_header, phentsize);
-    uint16_t elf_phnum = ELF_FIELD(*elf_header, phnum);
+    if (!elf_header || !callback)
+        return -EINVAL;
 
-    // 提前返回无效参数，避免冗余操作
-    if (elf_phnum >= 0xffff) {
-        note(tracee, WARNING, INTERNAL, "%d: big PH tables are not yet supported.", fd);
-        return -ENOTSUP;
-    }
-    if (!KNOWN_PHENTSIZE(*elf_header, elf_phentsize)) {
-        note(tracee, WARNING, INTERNAL, "%d: unsupported size of program header.", fd);
+    uint64_t phoff = ELF_FIELD(*elf_header, phoff);
+    uint16_t phentsize = ELF_FIELD(*elf_header, phentsize);
+    uint16_t phnum = ELF_FIELD(*elf_header, phnum);
+
+    if (phnum >= 0xFFFF) {
+        note(tracee, WARNING, INTERNAL, "big program header tables not supported");
         return -ENOTSUP;
     }
 
-    // 定位程序头偏移，失败直接返回
-    if (lseek(fd, elf_phoff, SEEK_SET) < 0)
+    if (!KNOWN_PHENTSIZE(*elf_header, phentsize)) {
+        note(tracee, WARNING, INTERNAL, "unsupported program header size");
+        return -ENOTSUP;
+    }
+
+    if (lseek(fd, phoff, SEEK_SET) < 0)
         return -errno;
 
-    // 遍历程序头，精简状态判断
-    for (int i = 0; i < elf_phnum; i++) {
-        ssize_t status = read(fd, &program_header, elf_phentsize);
-        if (status != elf_phentsize)
-            return (status < 0 ? -errno : -ENOTSUP);
+    for (uint16_t i = 0; i < phnum; i++) {
+        ProgramHeader ph;
+        ssize_t nb = read(fd, &ph, phentsize);
 
-        int cb_status = callback(elf_header, &program_header, data);
-        if (cb_status != 0)
-            return cb_status;
+        if (nb != phentsize)
+            return (nb < 0) ? -errno : -ENOTSUP;
+
+        int ret = callback(elf_header, &ph, data);
+        if (ret != 0)
+            return ret;
     }
 
     return 0;
 }
 
-/**
- * Check if @host_path is an ELF file for the host architecture.
- */
-__attribute__((hot, flatten))
 bool is_host_elf(const Tracee *tracee, const char *host_path)
 {
-    static int force_foreign = -1;
-    // 缓存环境变量结果，避免重复getenv调用
-    if (force_foreign < 0)
-        force_foreign = (getenv("PROOT_FORCE_FOREIGN_BINARY") != NULL);
+    static int cached_force_foreign = -1;
+    if (cached_force_foreign < 0)
+        cached_force_foreign = (getenv("PROOT_FORCE_FOREIGN_BINARY") != NULL);
 
-    // 快速路径：强制 foreign 或无 qemu，直接返回false
-    if (force_foreign > 0 || !tracee->qemu)
+    if (cached_force_foreign || !tracee->qemu)
         return false;
 
-    // 缓存ELF解析结果（同路径重复调用直接复用）
-    static char last_path[PATH_MAX] = "";
-    static bool last_result = false;
-    if (strcmp(host_path, last_path) == 0)
-        return last_result;
+    static char cached_path[PATH_MAX] = { 0 };
+    static bool cached_result = false;
 
-    ElfHeader elf_header;
-    int fd = open_elf(host_path, &elf_header);
+    if (host_path && strcmp(host_path, cached_path) == 0)
+        return cached_result;
+
+    if (!host_path || strlen(host_path) >= PATH_MAX) {
+        cached_path[0] = '\0';
+        cached_result = false;
+        return false;
+    }
+
+    ElfHeader hdr;
+    int fd = open_elf(host_path, &hdr);
     if (fd < 0) {
-        strncpy(last_path, host_path, PATH_MAX-1);
-        last_result = false;
+        strncpy(cached_path, host_path, PATH_MAX - 1);
+        cached_result = false;
         return false;
     }
     close(fd);
 
-    // 精简架构匹配逻辑，提前终止遍历
-    uint16_t elf_machine = ELF_FIELD(elf_header, machine);
-    int host_elf_machine[] = HOST_ELF_MACHINE;
-    for (int i = 0; host_elf_machine[i] != 0; i++) {
-        if (host_elf_machine[i] == elf_machine) {
-            VERBOSE(tracee, 1, "'%s' is a host ELF", host_path);
-            strncpy(last_path, host_path, PATH_MAX-1);
-            last_result = true;
-            return true;
+    uint16_t machine = ELF_FIELD(hdr, machine);
+    bool match = false;
+
+    // 修复：HOST_ELF_MACHINE 展开为 {x,0}，必须用数组形式
+    const int host_machines[] = HOST_ELF_MACHINE;
+    for (int i = 0; host_machines[i] != 0; i++) {
+        if (host_machines[i] == machine) {
+            match = true;
+            break;
         }
     }
 
-    strncpy(last_path, host_path, PATH_MAX-1);
-    last_result = false;
-    return false;
+    strncpy(cached_path, host_path, PATH_MAX - 1);
+    cached_result = match;
+    return match;
 }

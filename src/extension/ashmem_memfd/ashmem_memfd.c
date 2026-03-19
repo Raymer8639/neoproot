@@ -1,9 +1,12 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <unistd.h>
-#include <sys/syscall.h>  /* __NR_memfd_create,  */
-#include <linux/ashmem.h> /* ASHMEM_GET_SIZE,  */
-#include <linux/memfd.h>  /* MFD_CLOEXEC  */
+#include <fcntl.h>
+#include <sys/syscall.h>
+#include <linux/ashmem.h>
+#include <linux/memfd.h>
+#include <string.h>
+#include <errno.h>
 
 #include <talloc.h>
 
@@ -12,226 +15,194 @@
 #include "tracee/mem.h"
 #include "tracee/seccomp.h"
 #include "syscall/chain.h"
-#include "syscall/syscall.h" /* set_sysarg_data,  */
+#include "syscall/syscall.h"
 
-enum AshmemMemfdChainState {
+enum ChainState {
 	CS_IDLE,
-	CS_STAT_ENTERED,
-	CS_STAT_CHAINED_IOCTL
+	CS_WAIT_STAT,
+	CS_WAIT_IOCTL
 };
 
 typedef struct {
-	bool memfd_supported;
-	enum AshmemMemfdChainState chain_state;
+	int memfd_avail;
+	enum ChainState state;
 	int fd;
-	word_t addr;
-} AshmemMemfdState;
+	word_t st_size_addr;
+} AshmemState;
 
 static FilteredSysnum filtered_sysnums[] = {
-	{ PR_memfd_create,		0 },
+	{ PR_memfd_create,	0 },
 	{ PR_ftruncate,		0 },
+	{ PR_ftruncate64,	0 },
 	{ PR_fstat,		0 },
+	{ PR_fstat64,		0 },
+	{ PR_fstatat64,		0 },
 	FILTERED_SYSNUM_END,
 };
 
-static int detect_memfd_support() {
-	const char *assume_unsupported = getenv("PROOT_ASSUME_MEMFD_UNSUPPORTED");
-	if (assume_unsupported != NULL) {
-		if (0 == strcmp(assume_unsupported, "1")) {
-			return 0;
-		}
-		if (0 == strcmp(assume_unsupported, "0")) {
-			return 1;
-		}
+static int probe_memfd(void) {
+	const char *env = getenv("PROOT_ASSUME_MEMFD_UNSUPPORTED");
+	if (env) {
+		if (strcmp(env, "1") == 0) return 0;
+		if (strcmp(env, "0") == 0) return 1;
 	}
 
-	int reply_pipe[2];
-	int status = pipe(reply_pipe);
-	if (status < 0) {
-		return -1;
-	}
-
-	status = fork();
-	if (status < 0) {
-		close(reply_pipe[0]);
-		close(reply_pipe[1]);
-		return -1;
-	}
-
-	if (status == 0) {
-		/** Child process. Close readable end of pipe.  */
-		close(reply_pipe[0]);
-
-		/** Attempt creating memfd.  */
-		signal(SIGSYS, SIG_DFL);
-		int memfd = syscall(__NR_memfd_create, "support_probe", 0);
-
-		/** Send message to parent on success.  */
-		if (memfd >= 0) {
-			write(reply_pipe[1], "\x01", 1);
-			close(memfd);
-		}
-		close(reply_pipe[1]);
-		_exit(0);
-	}
-
-	/** Parent process.  */
-	close(reply_pipe[1]);
-	char reply_value = 0;
-	read(reply_pipe[0], &reply_value, 1);
-	close(reply_pipe[0]);
-	return reply_value == 1;
-}
-
-static bool is_ashmem_fd(Tracee *tracee, int fd) {
-	char path[PATH_MAX] = {};
-	if (readlink_proc_pid_fd(tracee->pid, fd, path) < 0) {
-		return false;
-	}
-	return 0 == strcmp(path, "/dev/ashmem");
-}
-
-static void ashmem_memfd_handle_stat(Extension *extension, Tracee *tracee, int fd, Reg stat_reg) {
-	if (is_ashmem_fd(tracee, fd)) {
-		AshmemMemfdState *state = talloc_get_type_abort(extension->config, AshmemMemfdState);
-		state->chain_state = CS_STAT_ENTERED;
-		state->fd = fd;
-		state->addr = peek_reg(tracee, CURRENT, stat_reg) + offsetof(struct stat, st_size);
-		tracee->restart_how = PTRACE_SYSCALL;
-	}
-}
-
-static int ashmem_memfd_handle_memfd_create(Extension *extension, Tracee *tracee, bool from_sigsys) {
-	AshmemMemfdState *state = talloc_get_type_abort(extension->config, AshmemMemfdState);
-	if (!state->memfd_supported) {
-		word_t flags = peek_reg(tracee, CURRENT, SYSARG_2);
-		set_sysnum(tracee, PR_openat);
-		set_sysarg_data(tracee, "/dev/ashmem", 12, SYSARG_2);
-		poke_reg(tracee, SYSARG_1, AT_FDCWD);
-		poke_reg(tracee, SYSARG_3, O_RDWR | ((flags & MFD_CLOEXEC) ? O_CLOEXEC : 0));
-		poke_reg(tracee, SYSARG_4, 0);
-		if (from_sigsys) {
-			restart_syscall_after_seccomp(tracee);
-			/* Skip further processing (such as forcing syscall result) from SIGSYS handler.  */
-			return 2;
-		}
+	int fd = syscall(__NR_memfd_create, "probe", MFD_CLOEXEC);
+	if (fd >= 0) {
+		close(fd);
+		return 1;
 	}
 	return 0;
 }
 
-static void ashmem_memfd_handle_syscall(Extension *extension) {
-	Tracee *tracee = TRACEE(extension);
-	switch (get_sysnum(tracee, CURRENT)) {
+static int is_ashmem(Tracee *tracee, int fd) {
+	char buf[PATH_MAX];
+	if (readlink_proc_pid_fd(tracee->pid, fd, buf) < 0)
+		return 0;
+	return strcmp(buf, "/dev/ashmem") == 0;
+}
+
+static void handle_fstat_enter(Extension *ext, Tracee *tracee, int fd, Reg addr_reg) {
+	AshmemState *s = ext->config;
+	if (!is_ashmem(tracee, fd)) return;
+
+	s->state = CS_WAIT_STAT;
+	s->fd    = fd;
+	s->st_size_addr = peek_reg(tracee, CURRENT, addr_reg) + offsetof(struct stat, st_size);
+	tracee->restart_how = PTRACE_SYSCALL;
+}
+
+static int handle_memfd_create(Extension *ext, Tracee *tracee, int from_sigsys) {
+	AshmemState *s = ext->config;
+	if (s->memfd_avail) return 0;
+
+	word_t flags = peek_reg(tracee, CURRENT, SYSARG_2);
+	set_sysnum(tracee, PR_openat);
+	poke_reg(tracee, SYSARG_1, AT_FDCWD);
+	set_sysarg_data(tracee, "/dev/ashmem", 12, SYSARG_2);
+	poke_reg(tracee, SYSARG_3, O_RDWR | ((flags & MFD_CLOEXEC) ? O_CLOEXEC : 0));
+	poke_reg(tracee, SYSARG_4, 0);
+
+	if (from_sigsys) {
+		restart_syscall_after_seccomp(tracee);
+		return 2;
+	}
+	return 0;
+}
+
+static void handle_syscall_enter(Extension *ext) {
+	Tracee *tracee = TRACEE(ext);
+	int num = get_sysnum(tracee, CURRENT);
+
+	switch (num) {
 	case PR_memfd_create:
-	{
-		ashmem_memfd_handle_memfd_create(extension, tracee, false);
+		handle_memfd_create(ext, tracee, 0);
 		break;
-	}
+
 	case PR_ftruncate:
-	case PR_ftruncate64:
-	{
+	case PR_ftruncate64: {
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
-		if (is_ashmem_fd(tracee, fd)) {
+		if (is_ashmem(tracee, fd)) {
+			word_t sz = peek_reg(tracee, CURRENT, SYSARG_2);
 			set_sysnum(tracee, PR_ioctl);
-			poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
 			poke_reg(tracee, SYSARG_2, ASHMEM_SET_SIZE);
+			poke_reg(tracee, SYSARG_3, sz);
 		}
+		break;
 	}
+
 	case PR_fstat:
-		ashmem_memfd_handle_stat(extension, tracee, peek_reg(tracee, CURRENT, SYSARG_1), SYSARG_2);
+	case PR_fstat64:
+		handle_fstat_enter(ext, tracee, peek_reg(tracee, CURRENT, SYSARG_1), SYSARG_2);
 		break;
-	case PR_fstatat64:
-	{
+
+	case PR_fstatat64: {
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
-		if (
-				fd >= 0 &&
-				/** Is path argument an empty string?  */
-				!(peek_word(tracee, peek_reg(tracee, CURRENT, SYSARG_2)) & 0xFF)
-		   ) {
-			ashmem_memfd_handle_stat(extension, tracee, fd, SYSARG_3);
+		word_t path = peek_reg(tracee, CURRENT, SYSARG_2);
+		if (fd >= 0 && path && (peek_int8(tracee, path) == 0)) {
+			handle_fstat_enter(ext, tracee, fd, SYSARG_3);
 		}
 		break;
 	}
+
 	default:
 		break;
 	}
 }
 
-static void ashmem_memfd_handle_stat_exit(Tracee *tracee, AshmemMemfdState *state) {
-	if (peek_reg(tracee, CURRENT, SYSARG_RESULT) || peek_word(tracee, state->addr)) {
-		state->chain_state = CS_IDLE;
+static void handle_fstat_exit(Extension *ext) {
+	Tracee *tracee = TRACEE(ext);
+	AshmemState *s = ext->config;
+
+	if (peek_reg(tracee, CURRENT, SYSARG_RESULT) != 0) {
+		s->state = CS_IDLE;
 		return;
 	}
 
-	register_chained_syscall(tracee, PR_ioctl, state->fd, ASHMEM_GET_SIZE, 0, 0, 0, 0);
-	state->chain_state = CS_STAT_CHAINED_IOCTL;
+	register_chained_syscall(tracee, PR_ioctl, s->fd, ASHMEM_GET_SIZE, 0,0,0,0);
+	s->state = CS_WAIT_IOCTL;
 }
 
-int ashmem_memfd_callback(Extension *extension, ExtensionEvent event, intptr_t data1, intptr_t data2 UNUSED)
-{
-	switch (event) {
-	case INITIALIZATION: {
-		extension->config = talloc_zero(extension, AshmemMemfdState);
-		AshmemMemfdState *state = talloc_get_type_abort(extension->config, AshmemMemfdState);
+static void handle_chained_exit(Extension *ext) {
+	Tracee *tracee = TRACEE(ext);
+	AshmemState *s = ext->config;
 
-		memset(state, 0, sizeof(*state));
-		state->memfd_supported = detect_memfd_support();
-
-		extension->filtered_sysnums = filtered_sysnums;
-
-		return 0;
+	if (s->state == CS_WAIT_IOCTL) {
+		word_t sz = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+		poke_word(tracee, s->st_size_addr, sz);
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		s->state = CS_IDLE;
 	}
-	case INHERIT_PARENT: /* Inheritable for sub reconfiguration ...  */
+}
+
+int ashmem_memfd_callback(Extension *ext, ExtensionEvent ev, intptr_t data1, intptr_t data2 UNUSED)
+{
+	Tracee *tracee = TRACEE(ext);
+	AshmemState *s;
+
+	switch (ev) {
+	case INITIALIZATION:
+		ext->config = talloc_zero(ext, AshmemState);
+		if (!ext->config) return -1;
+		s = ext->config;
+		s->memfd_avail = probe_memfd();
+		s->state = CS_IDLE;
+		ext->filtered_sysnums = filtered_sysnums;
+		return 0;
+
+	case INHERIT_PARENT:
 		return 1;
 
 	case INHERIT_CHILD: {
-		/* Create configuration in child.  */
-		Extension *parent = (Extension *) data1;
-		extension->config = talloc_zero(extension, AshmemMemfdState);
-		if (extension->config == NULL)
-			return -1;
-
-		AshmemMemfdState *old_state = talloc_get_type_abort(parent->config, AshmemMemfdState);
-		AshmemMemfdState *state = talloc_get_type_abort(extension->config, AshmemMemfdState);
-		state->memfd_supported = old_state->memfd_supported;
+		Extension *parent = (Extension *)data1;
+		ext->config = talloc_zero(ext, AshmemState);
+		if (!ext->config) return -1;
+		AshmemState *osp = parent->config;
+		AshmemState *nsp = ext->config;
+		nsp->memfd_avail = osp->memfd_avail;
+		nsp->state = CS_IDLE;
+		return 0;
 	}
 
 	case SYSCALL_ENTER_END:
-		ashmem_memfd_handle_syscall(extension);
+		handle_syscall_enter(ext);
 		return 0;
 
 	case SYSCALL_EXIT_START:
-	{
-		AshmemMemfdState *state = talloc_get_type_abort(extension->config, AshmemMemfdState);
-		switch (state->chain_state) {
-			case CS_IDLE:
-			case CS_STAT_CHAINED_IOCTL:
-				break;
-			case CS_STAT_ENTERED:
-				ashmem_memfd_handle_stat_exit(TRACEE(extension), state);
-				break;
-		}
+		s = ext->config;
+		if (s->state == CS_WAIT_STAT)
+			handle_fstat_exit(ext);
 		return 0;
-	}
-	case SIGSYS_OCC:
-	{
-		Tracee *tracee = TRACEE(extension);
-		if (get_sysnum(tracee, CURRENT) == PR_memfd_create) {
-			return ashmem_memfd_handle_memfd_create(extension, tracee, true);
-		}
-		return 0;
-	}
+
 	case SYSCALL_CHAINED_EXIT:
-	{
-		AshmemMemfdState *state = talloc_get_type_abort(extension->config, AshmemMemfdState);
-		if (state->chain_state == CS_STAT_CHAINED_IOCTL) {
-			state->chain_state = CS_IDLE;
-			Tracee *tracee = TRACEE(extension);
-			poke_uint32(tracee, state->addr, peek_reg(tracee, CURRENT, SYSARG_RESULT));
-			poke_reg(tracee, SYSARG_RESULT, 0);
-		}
+		handle_chained_exit(ext);
 		return 0;
-	}
+
+	case SIGSYS_OCC:
+		if (get_sysnum(tracee, CURRENT) == PR_memfd_create)
+			return handle_memfd_create(ext, tracee, 1);
+		return 0;
+
 	default:
 		return 0;
 	}
