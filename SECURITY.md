@@ -1,1 +1,1 @@
-Check https://termux.dev/security for info on Termux security policies and how to report vulnerabilities.
+检查 https://termux.dev/security 了解有关 Termux 安全策略以及如何报告漏洞的信息。
