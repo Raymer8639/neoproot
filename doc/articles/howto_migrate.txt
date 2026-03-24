@@ -1,0 +1,49 @@
+如何从其他环境迁移到 SciCat PRoot
+===================================
+
+本文档介绍如何从其他类似工具（如 Scratchbox2）迁移到 SciCat PRoot。
+
+概述
+----
+
+SciCat PRoot 是一个用户空间的系统调用拦截工具，提供类似 chroot、
+mount --bind 和 binfmt_misc 的功能。与 Scratchbox2 等工具相比，
+SciCat PRoot 不需要特殊设置或 root 权限。
+
+迁移步骤
+--------
+
+1. 理解 SciCat PRoot 架构
+   - SciCat PRoot 基于 ptrace 系统调用实现
+   - 通过拦截和修改系统调用参数实现路径重定向
+   - 不需要内核模块或特殊设置
+
+2. 路径映射转换
+   - 原来的 bind 挂载配置需要转换为 -b 参数
+   - 示例: 
+     Scratchbox2: [rw] /host/source/path -> /target/path
+     SciCat PRoot: -b /host/source/path:/target/path
+
+3. 环境变量配置
+   - SciCat PRoot 不需要特殊的环境变量
+   - 传统的环境变量（如 PATH）在隔离环境中正常工作
+
+4. 构建脚本调整
+   - 将原来的启动命令替换为 scicat-proot 命令
+   - 保持原有的构建参数和路径设置
+
+示例
+----
+
+原 Scratchbox2 命令:
+  sb2 -t my_target -d /path/to/rootfs make
+
+对应的 SciCat PRoot 命令:
+  scicat-proot -r /path/to/rootfs make
+
+注意事项
+--------
+
+- SciCat PRoot 可能无法处理某些底层系统调用
+- 在复杂环境中可能需要额外的路径绑定
+- 长路径名支持可能与原工具有所不同
