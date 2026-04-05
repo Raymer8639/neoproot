@@ -1,0 +1,91 @@
+=======
+ proot-scicat
+=======
+
+---------------------------------------------------------------
+用户空间的 chroot、mount --bind 和 binfmt_misc 实现
+---------------------------------------------------------------
+
+:Date: 2026-03-14
+:Version: 5.6.0
+:Manual section: 1
+
+Synopsis
+========
+
+**scicat-proot** [*option*] ... [*command*]
+
+Description
+===========
+
+proot-scicat 是一个用户空间的系统调用拦截和重定向工具，提供类似 chroot、
+mount --bind 和 binfmt_misc 的功能。它允许用户在无需特权的情况下创建
+隔离环境，重定向文件路径，并模拟不同的执行环境。
+
+proot-scicat 通过 ptrace 系统调用拦截进程的系统调用，动态修改系统调用
+参数，从而实现路径重定向和其他功能。它支持多种 CPU 架构的二进制文件
+执行，通过 QEMU 用户模式实现跨架构兼容性。
+
+主要特性包括：
+- 无需 root 权限的文件系统路径重定向
+- 支持 bind 挂载功能
+- 跨架构二进制执行支持
+- 环境变量和路径隔离
+- 系统调用拦截和修改
+
+Options
+=======
+
+**-r** *path*, **--rootfs**=*path*
+  指定新的根文件系统路径
+
+**-b** *path*, **--bind**=*path*
+  绑定挂载一个目录到另一个位置
+
+**-q** *command*, **--qemu**=*command*
+  指定用于执行不同架构二进制文件的 QEMU 命令
+
+**-w** *path*, **--pwd**=*path*
+  设置初始工作目录
+
+**-v** *number*, **--verbose**=*number*
+  设置详细级别 (0-5)
+
+**--help**
+  显示帮助信息
+
+**--version**
+  显示版本信息
+
+Examples
+========
+
+在指定目录作为根文件系统执行命令:
+  scicat-proot -r /path/to/rootfs /bin/ls /
+
+绑定挂载并执行命令:
+  scicat-proot -r /path/to/rootfs -b /tmp:/host-tmp /bin/bash
+
+使用 QEMU 模拟不同架构:
+  scicat-proot -q qemu-arm -r /path/to/arm-rootfs /bin/uname -m
+
+Security Considerations
+=======================
+
+proot-scicat 提供了用户空间的隔离，但并不能完全替代容器或虚拟化技术。
+在安全敏感环境中使用时，请注意：
+
+- PRoot 环境中的进程可以访问宿主系统的内核
+- 某些系统调用可能无法完全拦截
+- 建议在沙箱环境中使用 PRoot
+
+Bugs
+====
+
+请在项目仓库中报告 bug:
+https://gitee.com/scicat-team/proot-scicat
+
+See Also
+========
+
+chroot(1), mount(8), qemu(1), namespaces(7)
