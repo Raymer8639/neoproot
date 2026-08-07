@@ -322,21 +322,74 @@ static FORCE_INLINE void link2symlink_handle_statx(struct statx_syscall_state *s
     state->statx_buf.stx_nlink = parse_4digit(name + name_len - 4);
 }
 
+/* 判断文件名是否为 link2symlink 内部文件名：
+ *   .l2s.<name><NNNN>          （中间符号链接，数字前无点）
+ *   .l2s.<name><NNNN>.0002    （最终真实文件）
+ * <name> 本身可能含点（如 lib.d.ts），因此统一按“前缀 + 尾部 4 位数字”判断 */
+static FORCE_INLINE bool is_l2s_internal_name(const char *name) {
+    if (UNLIKELY(strncmp(name, PREFIX, PREFIX_LEN) != 0)) return false;
+    size_t len = strlen(name);
+    if (UNLIKELY(len < PREFIX_LEN + 5)) return false;   /* .l2s.xNNNN 为最短形态 */
+    for (int i = 1; i <= 4; i++) {
+        if (UNLIKELY(!isdigit((unsigned char)name[len - i]))) return false;
+    }
+    return true;
+}
+
 static FORCE_INLINE void translated_path(Tracee *restrict tracee, char *restrict translated_path) {
     if (UNLIKELY(!tracee || !translated_path)) return;
     Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
+    bool is_readlink_syscall = false;
     switch (sysnum) {
     case PR_unlink: case PR_unlinkat: case PR_link: case PR_linkat:
     case PR_rename: case PR_renameat: case PR_renameat2:
+        /* 这些 syscall 需要直接操作 .l2s 内部文件（decrement_link_count 等），不做任何改写 */
         return;
+    case PR_readlink: case PR_readlinkat:
+        /* readlink 应返回链接内容本身而非解析后的 final 路径（否则 EINVAL），
+         * 但对 .l2s 内部路径仍需映射（见下） */
+        is_readlink_syscall = true;
+        break;
     default: break;
     }
     if (UNLIKELY(should_skip_file_access_due_to_f2fs_bug(tracee, translated_path))) return;
+
+    char *filename = get_filename(translated_path, NULL);
+    if (UNLIKELY(is_l2s_internal_name(filename))) {
+        /* 进程可能通过 realpath/readlink 拿到 link2symlink 内部文件名后再次访问
+         * （如 /.l2s.lib.d.ts0001.0002，典型场景：pnpm store + tsc/Node 解析真实路径）。
+         * 此时翻译路径落在 rootfs 内而真实文件在 PROOT_L2S_DIR（可能在 rootfs 之外），
+         * 需要映射回真实位置，否则 open/stat/readlink 会 ENOENT。
+         * 翻译路径自身存在（L2S_DIR 未设置、文件在原目录）时无需映射。 */
+        if (UNLIKELY(access(translated_path, F_OK) != 0)) {
+            char alt[PATH_MAX] ALIGNED;
+            const char *l2s_dir = getenv("PROOT_L2S_DIR");
+            if (LIKELY(l2s_dir && l2s_dir[0] && strcmp(l2s_dir, "/") != 0)) {
+                snprintf(alt, sizeof(alt), "%s/%s", l2s_dir, filename);
+                if (LIKELY(access(alt, F_OK) == 0)) {
+                    strcpy(translated_path, alt);
+                    return;
+                }
+            }
+            /* PROOT_L2S_DIR=/ 或变量不可见时的常见情况：文件位于 host 根目录 */
+            snprintf(alt, sizeof(alt), "/%s", filename);
+            if (LIKELY(access(alt, F_OK) == 0)) {
+                strcpy(translated_path, alt);
+                return;
+            }
+        }
+        /* 翻译路径存在（同目录模式）或映射失败：readlink 返回链接内容，其余继续链解析 */
+        if (is_readlink_syscall) return;
+    } else if (is_readlink_syscall) {
+        /* 普通路径上的 readlink 不做链解析，返回链接内容本身 */
+        return;
+    }
+
     char link_target[PATH_MAX] ALIGNED, final_target[PATH_MAX] ALIGNED;
     int status = my_readlink(translated_path, link_target, PATH_MAX);
     if (UNLIKELY(status < 0)) return;
-    char *filename = get_filename(link_target, NULL);
-    if (UNLIKELY(strncmp(filename, PREFIX, PREFIX_LEN) != 0)) return;
+    char *link_filename = get_filename(link_target, NULL);
+    if (UNLIKELY(strncmp(link_filename, PREFIX, PREFIX_LEN) != 0)) return;
     status = my_readlink(link_target, final_target, PATH_MAX);
     if (UNLIKELY(status < 0)) return;
     strcpy(translated_path, final_target);
@@ -451,6 +504,35 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
             FILTERED_SYSNUM_END,
         };
         extension->filtered_sysnums = (FilteredSysnum *)filtered_sysnums;
+        return 0;
+    }
+    case GUEST_PATH: {
+        /* .l2s 内部路径（readlink/realpath 泄漏回 guest 的 host 路径）在翻译前拦截：
+         * 直接替换为 host 真实路径并跳过 rootfs 拼接/canonicalize（后者必然失败）。
+         * 注意：绝对路径时 data1(result) 仅为 "/"，完整路径在 data2(user_path)；
+         * 相对路径时 data1 为 cwd。因此基于 user_path 的 basename 判断，
+         * 命中后把映射后的 host 绝对路径写入 result 并返回 1（跳过翻译）。
+         * 同目录模式（文件在 rootfs 内）时映射目标不存在，走正常翻译路径。 */
+        char *result = (char *)data1;
+        char *user_path = (char *)data2;
+        char *filename = get_filename(user_path, NULL);
+        if (UNLIKELY(is_l2s_internal_name(filename))) {
+            char alt[PATH_MAX] ALIGNED;
+            const char *l2s_dir = getenv("PROOT_L2S_DIR");
+            if (LIKELY(l2s_dir && l2s_dir[0] && strcmp(l2s_dir, "/") != 0)) {
+                snprintf(alt, sizeof(alt), "%s/%s", l2s_dir, filename);
+                if (LIKELY(access(alt, F_OK) == 0)) {
+                    strcpy(result, alt);
+                    return 1;
+                }
+            }
+            /* PROOT_L2S_DIR=/ 或变量不可见时的常见情况：文件位于 host 根目录 */
+            snprintf(alt, sizeof(alt), "/%s", filename);
+            if (LIKELY(access(alt, F_OK) == 0)) {
+                strcpy(result, alt);
+                return 1;
+            }
+        }
         return 0;
     }
     case TRANSLATED_PATH:
