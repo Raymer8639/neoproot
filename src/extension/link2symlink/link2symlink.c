@@ -370,28 +370,45 @@ static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *pa
     filename = get_filename(intermediate, NULL);
     if (UNLIKELY(!is_l2s_internal_name(filename))) return 0;
 
+    /* 链内容可能是 guest 路径（/.l2s/.l2s.<name>，proot-distro 时代造的旧链）
+     * 或 host 绝对路径（uproot 容器会话造的链）。uproot 进程运行在 host（Termux）
+     * 侧，guest 路径 /.l2s/... 不可见，必须用 PROOT_L2S_DIR（host 绝对路径）定位。 */
+    const char *l2s_dir = getenv("PROOT_L2S_DIR");
+    char inter_host[PATH_MAX] ALIGNED, final_host[PATH_MAX] ALIGNED;
+    if (LIKELY(l2s_dir && l2s_dir[0] && strcmp(l2s_dir, "/") != 0)) {
+        snprintf(inter_host, sizeof(inter_host), "%s/%s", l2s_dir, filename);
+    } else {
+        strcpy(inter_host, intermediate);
+    }
+
     /* 第二跳：中间链接 -> final（.l2s.<name><NNNN>.0002，普通文件 = 数据）。
      * readlink 成功本身即证明 intermediate 是符号链接；
      * 不 lstat intermediate（外层 proot 对链中间件 EPERM，真机虽无此问题
      * 但统一用 readlink 更简洁）。final 是普通文件组件，lstat 安全。 */
-    status = my_readlink(intermediate, final, PATH_MAX);
+    status = my_readlink(inter_host, final, PATH_MAX);
     if (UNLIKELY(status < 0)) return 0;
-    status = lstat(final, &statl);
+    if (LIKELY(l2s_dir && l2s_dir[0] && strcmp(l2s_dir, "/") != 0)) {
+        char *final_name = get_filename(final, NULL);
+        snprintf(final_host, sizeof(final_host), "%s/%s", l2s_dir, final_name);
+    } else {
+        strcpy(final_host, final);
+    }
+    status = lstat(final_host, &statl);
     if (UNLIKELY(status < 0 || !S_ISREG(statl.st_mode))) return 0;
 
     /* 物化：数据移到被 exec 路径（rename 覆盖原 symlink 不跟随）。
      * 失败忽略——目标可能已被并发物化（幂等）或文件系统状态变化 */
-    if (UNLIKELY(rename(final, path) != 0)) return 0;
+    if (UNLIKELY(rename(final_host, path) != 0)) return 0;
 
     /* 反向链接：final 原位置 -> 被 exec 路径，保持 store 链不断 */
-    if (UNLIKELY(symlink(path, final) != 0)) {
+    if (UNLIKELY(symlink(path, final_host) != 0)) {
         /* 反向链接失败（极端）：回滚，数据放回 final，重建原链，避免数据丢失 */
-        rename(path, final);
+        rename(path, final_host);
         symlink(intermediate, path);
         return 0;
     }
 
-    VERBOSE(tracee, 1, "link2symlink: materialized execve \"%s\" (data moved from \"%s\")", path, final);
+    VERBOSE(tracee, 1, "link2symlink: materialized \"%s\" (data moved from \"%s\")", path, final_host);
     return 1;
 }
 
@@ -572,6 +589,24 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
          * 相对路径的 execve 跳过（pnpm/tsgo 场景均为绝对路径）。 */
         Sysnum g_sysnum = get_sysnum(tracee, ORIGINAL);
         if (UNLIKELY(g_sysnum == PR_execve || g_sysnum == PR_execveat)) {
+            char *user_path = (char *)data2;
+            if (LIKELY(user_path && user_path[0] == '/')) {
+                char host_path[PATH_MAX] ALIGNED;
+                strcpy(host_path, user_path);
+                if (LIKELY(substitute_binding(tracee, GUEST, host_path) >= 0))
+                    materialize_executable(tracee, host_path);
+            }
+        }
+        /* tsgo 场景（open 物化）：tsgo 用 open(path, O_PATH) + readlink(/proc/self/fd/N)
+         * 解析真实路径，readlink(fd) 由内核直接返回（uproot 无法拦截），若 fd 指向
+         * .l2s 链（symlink），readlink 返回链内容（/.l2s/.l2s.<hash>.0001.0002）→
+         * 当 TS 文件处理报 TS6054/TS2307/TS7006（类型库解析失败）。必须在 open 之前
+         * 把链物化为普通文件（此时 user_path 还是原始 guest 路径，链状态完好；
+         * SYSCALL_ENTER_END 时已被 canonicalize 解析成 final，链信息丢失）。
+         * 对所有 open 触发（不限于 O_PATH）：tsgo 会以多种方式访问类型文件，
+         * 全量物化保证一次 tsc 即全部就位；物化是幂等的（普通文件跳过），
+         * 数据仍 1 份（rename 移动），store 链由反向 symlink 保持完整。 */
+        if (UNLIKELY(g_sysnum == PR_open || g_sysnum == PR_openat)) {
             char *user_path = (char *)data2;
             if (LIKELY(user_path && user_path[0] == '/')) {
                 char host_path[PATH_MAX] ALIGNED;

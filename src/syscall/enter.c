@@ -453,7 +453,6 @@ int translate_syscall_enter(Tracee *tracee)
         else
             status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
         break;
-
     case PR_readlinkat:
     case PR_unlinkat:
     case PR_mkdirat:

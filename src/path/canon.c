@@ -311,7 +311,21 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
             } else if (UNLIKELY(res < 0)) return res;
         }
         res = readlink(host_path, scratch_path, PATH_MAX - 1);
-        if (UNLIKELY(res < 0)) return res;
+        if (UNLIKELY(res < 0)) {
+            /* stat cache 可能过期：link2symlink 物化（rename 覆盖 symlink）会把
+             * 链路径变成普通文件，而 cache 仍记录为 symlink → readlink 失败
+             * （EINVAL/ENOTDIR），导致 execve 翻译返回 -EPERM。
+             * 重新 lstat 验证：已非符号链接则更新 cache 并按普通文件继续。 */
+            struct stat st_now;
+            if (LIKELY(lstat(host_path, &st_now) == 0 && !S_ISLNK(st_now.st_mode))) {
+                stat_cache_insert(host_path, &st_now);
+                neon_strcpy_fast(scratch_path, guest_path);
+                res = join_paths(2, guest_path, scratch_path, comp);
+                if (UNLIKELY(res < 0)) return res;
+                continue;
+            }
+            return res;
+        }
         if (UNLIKELY((size_t)res >= PATH_MAX)) return -ENAMETOOLONG;
         scratch_path[res] = '\0';
         res = detranslate_path(tracee, scratch_path, host_path);
