@@ -17,6 +17,7 @@
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "path/path.h"
+#include "path/binding.h"
 #include "path/f2fs-bug.h"
 #include "arch.h"
 #include "attribute.h"
@@ -336,6 +337,64 @@ static FORCE_INLINE bool is_l2s_internal_name(const char *name) {
     return true;
 }
 
+/* execve 物化（tsgo/tsc 7.0 兼容，方案 C）：
+ * 被执行的路径若是 link2symlink 链（symlink -> 中间链接 -> final 数据文件），
+ * 在 canonicalize 解析链之前把数据 rename 到被 exec 的路径（原子移动，
+ * 覆盖原 symlink，rename 不跟随），并在 final 原位置创建反向 symlink
+ * 指向被 exec 路径，保持 store 链完整：
+ *
+ *   物化前：exec路径[symlink] -> 中间链接[symlink] -> final（数据 1 份）
+ *   物化后：exec路径[普通文件=数据]  ←（反向链接）final[symlink] -> exec路径
+ *           store -> 中间链接 -> final[symlink] -> exec路径（链不断）
+ *
+ * 这样 tsgo 用 O_PATH + readlink(/proc/self/fd/N) 解析自身路径时得到真实的
+ * node_modules 路径（而非 /.l2s/...），dirname 下找 lib.d.ts 恢复正常。
+ * 幂等：目标已是普通文件时直接跳过（并发 exec / 多级 shebang 安全）。
+ * 空间不变：mv 是移动不是复制，数据仍 1 份。 */
+static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *path) {
+    if (UNLIKELY(!tracee || !path)) return 0;
+    struct stat statl;
+    char intermediate[PATH_MAX] ALIGNED, final[PATH_MAX] ALIGNED;
+    char *filename;
+    int status;
+
+    /* 链起点判断用 readlink（不用 lstat）：嵌套环境下外层 proot 的
+     * link2symlink 会把 lstat 的链路径解析成 .l2s 内部名并拒绝（EPERM），
+     * 而 readlink 返回链接内容本身，任何环境下都可靠。
+     * readlink 失败 = 普通文件（已物化/无关）或不存在 → 跳过（幂等）。 */
+    status = my_readlink(path, intermediate, PATH_MAX);
+    if (UNLIKELY(status < 0)) return 0;
+
+    /* 第一跳：path -> 中间链接（.l2s.<name><NNNN>）。
+     * 名字不匹配 = 普通 symlink（非 link2symlink 链），不动 */
+    filename = get_filename(intermediate, NULL);
+    if (UNLIKELY(!is_l2s_internal_name(filename))) return 0;
+
+    /* 第二跳：中间链接 -> final（.l2s.<name><NNNN>.0002，普通文件 = 数据）。
+     * readlink 成功本身即证明 intermediate 是符号链接；
+     * 不 lstat intermediate（外层 proot 对链中间件 EPERM，真机虽无此问题
+     * 但统一用 readlink 更简洁）。final 是普通文件组件，lstat 安全。 */
+    status = my_readlink(intermediate, final, PATH_MAX);
+    if (UNLIKELY(status < 0)) return 0;
+    status = lstat(final, &statl);
+    if (UNLIKELY(status < 0 || !S_ISREG(statl.st_mode))) return 0;
+
+    /* 物化：数据移到被 exec 路径（rename 覆盖原 symlink 不跟随）。
+     * 失败忽略——目标可能已被并发物化（幂等）或文件系统状态变化 */
+    if (UNLIKELY(rename(final, path) != 0)) return 0;
+
+    /* 反向链接：final 原位置 -> 被 exec 路径，保持 store 链不断 */
+    if (UNLIKELY(symlink(path, final) != 0)) {
+        /* 反向链接失败（极端）：回滚，数据放回 final，重建原链，避免数据丢失 */
+        rename(path, final);
+        symlink(intermediate, path);
+        return 0;
+    }
+
+    VERBOSE(tracee, 1, "link2symlink: materialized execve \"%s\" (data moved from \"%s\")", path, final);
+    return 1;
+}
+
 static FORCE_INLINE void translated_path(Tracee *restrict tracee, char *restrict translated_path) {
     if (UNLIKELY(!tracee || !translated_path)) return;
     Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
@@ -507,6 +566,20 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
         return 0;
     }
     case GUEST_PATH: {
+        /* execve 物化（方案 C）：canonicalize 解析链之前、翻译前拦截。
+         * 此时 user_path 仍是原始 guest 路径（symlink 链状态），
+         * 用 substitute_binding 转成 host 路径后物化（只做前缀替换，不解析链）。
+         * 相对路径的 execve 跳过（pnpm/tsgo 场景均为绝对路径）。 */
+        Sysnum g_sysnum = get_sysnum(tracee, ORIGINAL);
+        if (UNLIKELY(g_sysnum == PR_execve || g_sysnum == PR_execveat)) {
+            char *user_path = (char *)data2;
+            if (LIKELY(user_path && user_path[0] == '/')) {
+                char host_path[PATH_MAX] ALIGNED;
+                strcpy(host_path, user_path);
+                if (LIKELY(substitute_binding(tracee, GUEST, host_path) >= 0))
+                    materialize_executable(tracee, host_path);
+            }
+        }
         /* .l2s 内部路径（readlink/realpath 泄漏回 guest 的 host 路径）在翻译前拦截：
          * 直接替换为 host 真实路径并跳过 rootfs 拼接/canonicalize（后者必然失败）。
          * 注意：绝对路径时 data1(result) 仅为 "/"，完整路径在 data2(user_path)；
