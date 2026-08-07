@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+    tags: ['v*']
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 本项目的构建目标是 ARMv8.2+ 的 Android/Termux 环境，
+    # 因此在原生 ARM64 runner 上构建验证（代码含 arm_neon.h 与 ARM64 内联汇编，不支持交叉到 x86）。
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [release, portable]
+    env:
+      MODE: ${{ matrix.mode }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang llvm libtalloc-dev upx binutils
+
+      - name: Build uproot
+        run: |
+          if [ "$MODE" = "release" ]; then
+            # 默认 ARMv8.2 满血优化（与作者默认一致）
+            make -C src uproot
+          else
+            # 通用构建（例如老设备可降级指令集），验证 MARCH 可覆盖性
+            make -C src uproot MARCH="-march=armv8-a -mtune=generic"
+          fi
+
+      - name: Check binary
+        run: |
+          file src/uproot
+          ls -lh src/uproot
+          test -x src/uproot
+
+      - name: Run test suite
+        run: |
+          cd tests
+          make -s all
+          PROOT=../src/uproot sh basic_test.sh
+          PROOT=../src/uproot sh advanced_test.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: uproot-${{ matrix.mode }}-${{ github.sha }}
+          path: src/uproot
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Rename artifacts
+        run: |
+          mkdir -p dist
+          for f in artifacts/uproot-*; do
+            case "$f" in
+              *-release-*) cp "$f" dist/uproot ;;
+              *-portable-*) cp "$f" dist/uproot-portable ;;
+            esac
+          done
+          ls -lh dist
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -6,7 +6,7 @@ echo "开始 SciCat PRoot 高级功能测试..."
 
 # 检查 proot 命令
 if [ -z "$PROOT" ]; then
-    PROOT="./scicat-proot"
+    PROOT="../src/uproot"
 fi
 
 # 创建复杂的测试环境

@@ -3,7 +3,7 @@
 
 CC ?= gcc
 CFLAGS ?= -Wall -O2 -g
-PROOT ?= ./scicat-proot
+PROOT ?= ../src/uproot
 
 # 测试程序列表
 TEST_PROGS = test_argv test_echo test_file_ops test_dir_ops

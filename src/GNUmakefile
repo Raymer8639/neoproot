@@ -14,23 +14,30 @@ STRIP    ?= $(CROSS_COMPILE)strip
 OBJCOPY  ?= $(CROSS_COMPILE)objcopy
 llvm-objdump  ?= $(CROSS_COMPILE)llvm-objdump
 
-#自动压缩工具
+#自动压缩工具（可选：未安装 upx 时自动跳过压缩步骤）
 UPX ?= upx
 UPX_FLAGS ?= --ultra-brute --lzma --best --compress-icons=0 --no-reloc
+HAVE_UPX := $(shell command -v $(UPX) 2>/dev/null)
+
+# 目标架构优化参数，可被命令行覆盖，例如：
+#   make MARCH="-march=native"            # 使用本机最优指令集
+#   make MARCH="-march=armv8.4-a+memtag"  # 更高版本 ARM 指令集
+# 默认针对 ARMv8.2（覆盖绝大多数 64 位 Android 设备）
+MARCH ?= -march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto -mtune=generic
 
 CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH)
 
-CFLAGS   += -std=c23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections -march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto -mtune=generic -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
-CXXFLAGS += -std=c++23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections -march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto -mtune=generic -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
+CFLAGS   += -std=c23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
+CXXFLAGS += -std=c++23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
 
 LDFLAGS += -ltalloc -lm -ldl -lc -lstdc++ -flto=thin -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--icf=all,-z,relro,-z,now -Wl,--strip-all -lpthread -s
 
 # cli/cli.o 去掉 flto 避免链接错误
-cli/cli.o: CFLAGS := -std=c23 -Wall -Wextra -O3 -ffunction-sections -fdata-sections -march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto -mtune=generic -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
+cli/cli.o: CFLAGS := -std=c23 -Wall -Wextra -O3 -ffunction-sections -fdata-sections $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
 
 # syscall 专用高性能优化
-syscall/%.o: CFLAGS   := -std=c23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections -fomit-frame-pointer -funroll-loops -fno-stack-protector -fno-strict-overflow -fno-trapping-math -march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto -mtune=generic -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
-syscall/%.o: CXXFLAGS := -std=c++23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections -fomit-frame-pointer -funroll-loops -fno-stack-protector -fno-strict-overflow -fno-trapping-math -march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto -mtune=generic -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
+syscall/%.o: CFLAGS   := -std=c23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections -fomit-frame-pointer -funroll-loops -fno-stack-protector -fno-strict-overflow -fno-trapping-math $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
+syscall/%.o: CXXFLAGS := -std=c++23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections -fomit-frame-pointer -funroll-loops -fno-stack-protector -fno-strict-overflow -fno-trapping-math $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
 
 OBJECTS += \
     cli/uproot.o		\
@@ -158,12 +165,16 @@ OBJIFY = $($(quiet)GEN)									\
 				grep architecture | cut -f 1 -d , | awk '{print $$2}'`	\
 		$< $@
 
-#链接 + strip + 自动 upx 压缩
+#链接 + strip + 自动 upx 压缩（未安装 upx 时跳过压缩）
 uproot: $(OBJECTS)
 	$(LINK)
 	$(STRIP) --strip-all $@
+ifeq ($(HAVE_UPX),)
+	@echo "  SKIP	upx 未安装，跳过压缩（安装 upx 可进一步减小体积）"
+else
 	$(quiet_UPX) $(UPX_FLAGS) $@ $(silently)
 	$(STRIP) --strip-all $@
+endif
 
 %.o: $(SRC)%.c
 	@mkdir -p $(dir $@)
