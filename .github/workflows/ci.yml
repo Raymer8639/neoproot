@@ -67,14 +67,15 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: true
+      # 注意：不能用 merge-multiple——两个 artifact 的文件内容同名（都是 uproot），
+      # 合并会互相覆盖，导致 dist 为空、Release 无资产。
       - name: Rename artifacts
         run: |
           mkdir -p dist
-          for f in artifacts/uproot-*; do
-            case "$f" in
-              *-release-*) cp "$f" dist/uproot ;;
-              *-portable-*) cp "$f" dist/uproot-portable ;;
+          for d in artifacts/uproot-*; do
+            case "$d" in
+              *-release-*) cp "$d/uproot" dist/uproot ;;
+              *-portable-*) cp "$d/uproot" dist/uproot-portable ;;
             esac
           done
           ls -lh dist
