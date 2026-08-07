@@ -115,19 +115,72 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
     }
 
     if (LIKELY(first_link)) {
+        struct stat l2s_st;
         do {
             snprintf(new_intermediate, PATH_MAX, "%s%04d", intermediate, suffix++);
-        } while (access(new_intermediate, F_OK) != -1 && suffix < MAX_LINK_SUFFIX);
+        } while (lstat(new_intermediate, &l2s_st) == 0 && suffix < MAX_LINK_SUFFIX);
+        /* 用 lstat（不跟随）替代 access：access 跟随 symlink，旧残留断链
+         * （.l2s.xxxNNNN → 不存在的 final）会被误判为"名字可用"，随后
+         * symlink 报 EEXIST（symlink 不跟随，能看见断链本身） */
         strcpy(intermediate, new_intermediate);
         snprintf(final, PATH_MAX, "%s.0002", intermediate);
         status = rename(original, final);
-        if (UNLIKELY(status < 0)) return -errno;
+        if (UNLIKELY(status < 0)) {
+            /* 并发竞态：pnpm 多 worker 同时 link 同一 store 文件（内容寻址，
+             * 多包共享同内容）。数据已被其他 worker rename 走（同 hash 链
+             * 已建好）→ 直接把 dest 链接到已存在的中间链接，链内容相同安全 */
+            if (errno == ENOENT) {
+                status = read_path(tracee, dest_path, peek_reg(tracee, CURRENT, dest_sysarg));
+                if (LIKELY(status >= 0) && lstat(intermediate, &l2s_st) == 0) {
+                    status = symlink(intermediate, dest_path);
+                    if (LIKELY(status == 0)) {
+                        poke_reg(tracee, SYSARG_RESULT, 0);
+                        set_sysnum(tracee, PR_void);
+                        return 0;
+                    }
+                }
+            }
+            return -errno;
+        }
         status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t)original, (intptr_t)final);
         if (UNLIKELY(status < 0)) return status;
         status = symlink(final, intermediate);
-        if (UNLIKELY(status < 0)) return -errno;
+        if (UNLIKELY(status < 0)) {
+            if (errno == EEXIST) {
+                /* 并发或残留：中间链接名已存在。检查它是否可用：
+                 * lstat 确认存在 + readlink 目标存在 → 复用（同 hash 内容相同）；
+                 * 断链（目标不存在）→ 删除重建 */
+                char existing[PATH_MAX] ALIGNED;
+                if (lstat(intermediate, &l2s_st) == 0 &&
+                    my_readlink(intermediate, existing, PATH_MAX) >= 0 &&
+                    access(existing, F_OK) == 0) {
+                    /* 有效链：复用。数据同 hash 内容相同（我们的 rename
+                     * 覆盖同内容无害）。重建 original 链接 + dest 链接 */
+                    if (access(original, F_OK) != 0)
+                        symlink(intermediate, original);
+                    status = read_path(tracee, dest_path, peek_reg(tracee, CURRENT, dest_sysarg));
+                    if (LIKELY(status >= 0)) {
+                        status = symlink(intermediate, dest_path);
+                        if (LIKELY(status == 0)) {
+                            poke_reg(tracee, SYSARG_RESULT, 0);
+                            set_sysnum(tracee, PR_void);
+                            return 0;
+                        }
+                    }
+                } else {
+                    /* 断链残留：删除后重建自己的链 */
+                    unlink(intermediate);
+                    if (symlink(final, intermediate) == 0) {
+                        status = symlink(intermediate, original);
+                        if (UNLIKELY(status < 0 && errno != EEXIST)) return -errno;
+                        goto dest_link;
+                    }
+                }
+            }
+            return -errno;
+        }
         status = symlink(intermediate, original);
-        if (UNLIKELY(status < 0)) return -errno;
+        if (UNLIKELY(status < 0 && errno != EEXIST)) return -errno;
     } else {
         status = my_readlink(intermediate, final, PATH_MAX);
         if (UNLIKELY(status < 0)) return status;
@@ -146,6 +199,7 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
         if (UNLIKELY(status < 0)) return -errno;
     }
 
+dest_link:
     status = read_path(tracee, dest_path, peek_reg(tracee, CURRENT, dest_sysarg));
     if (LIKELY(status >= 0)) {
         status = symlink(intermediate, dest_path);
