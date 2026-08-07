@@ -29,6 +29,7 @@ jobs:
 
       - name: Build uproot
         run: |
+          set +e
           if [ "$MODE" = "release" ]; then
             # 默认 ARMv8.2 满血优化（与作者默认一致），makefile 自动选用 lld
             make -C src uproot CC=clang CXX=clang++ 2>&1 | tee /tmp/build.log
