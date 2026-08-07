@@ -2,7 +2,7 @@
 
 > 下一代半原生轻量级容器：比官方 PRoot 更快、更稳、更小，专为 **ARM64 / Android (Termux)** 优化。
 
-[![CI](https://github.com/Raymer8639/proot-scicat/actions/workflows/ci.yml/badge.svg)](https://github.com/Raymer8639/proot-scicat/actions/workflows/ci.yml)
+[![CI](https://github.com/Raymer8639/proot-scicat-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/Raymer8639/proot-scicat-ai/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-ARM64%20%2F%20Android-blue)
 ![Language](https://img.shields.io/badge/C%2FC%2B%2B-C23%20%2F%20C%2B%2B23-orange)
 ![License](https://img.shields.io/badge/license-GPLv2-green)
@@ -41,7 +41,7 @@ proot-scicat（又名 **uproot**）是在原始 [PRoot](https://github.com/proot
 
 ### 方式一：使用已发布二进制（推荐）
 
-从 [Releases](https://github.com/Raymer8639/proot-scicat/releases) 下载 `uproot`，放入 `$PREFIX/bin` 并赋予执行权限：
+从 [Releases](https://github.com/Raymer8639/proot-scicat-ai/releases) 下载 `uproot`，放入 `$PREFIX/bin` 并赋予执行权限：
 
 ```sh
 chmod +x uproot
@@ -52,7 +52,7 @@ mv uproot $PREFIX/bin/
 
 ```sh
 pkg install clang make llvm binutils talloc upx
-git clone https://github.com/Raymer8639/proot-scicat.git
+git clone https://github.com/Raymer8639/proot-scicat-ai.git
 cd proot-scicat
 sh build.sh install     # 构建并安装到 $PREFIX/bin
 ```
@@ -88,9 +88,9 @@ uproot -0 -r /data/data/com.termux/files/home/rootfs \
 
 本项目由社区接手维护，欢迎：
 
-- 提交 [Issue](https://github.com/Raymer8639/proot-scicat/issues) 报告问题
+- 提交 [Issue](https://github.com/Raymer8639/proot-scicat-ai/issues) 报告问题
 - 提交 PR 修复 bug、优化性能
-- 在 [Discussions](https://github.com/Raymer8639/proot-scicat/discussions) 交流使用心得
+- 在 [Discussions](https://github.com/Raymer8639/proot-scicat-ai/discussions) 交流使用心得
 
 ## 许可证
 

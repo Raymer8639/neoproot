@@ -2,8 +2,8 @@
 
 ## 报告安全漏洞
 
-- 通过 [GitHub Security Advisories](https://github.com/Raymer8639/proot-scicat/security/advisories/new) 私下报告漏洞（推荐）
-- 或通过 [Issues](https://github.com/Raymer8639/proot-scicat/issues) 提交（请勿包含利用细节）
+- 通过 [GitHub Security Advisories](https://github.com/Raymer8639/proot-scicat-ai/security/advisories/new) 私下报告漏洞（推荐）
+- 或通过 [Issues](https://github.com/Raymer8639/proot-scicat-ai/issues) 提交（请勿包含利用细节）
 
 我们会在确认后尽快修复并发布。
 
