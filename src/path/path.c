@@ -512,7 +512,9 @@ Comparison compare_paths2(const char *path1, size_t len1,
         uint8x16_t v1 = vld1q_u8((const uint8_t *)(path1 + i));
         uint8x16_t v2 = vld1q_u8((const uint8_t *)(path2 + i));
         uint8x16_t eq = vceqq_u8(v1, v2);
-        if (vmaxvq_u8(eq) != 0xff)
+        /* vmaxvq 无法检测"存在不等"（只要有一个字节相等最大值就是 0xff）
+         * 必须用 vminvq：任一字节不等（0x00）则最小值非 0xff */
+        if (vminvq_u8(eq) != 0xff)
             return PATHS_ARE_NOT_COMPARABLE;
     }
     for (; i < min_len; i++) {
