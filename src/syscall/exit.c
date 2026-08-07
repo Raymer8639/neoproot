@@ -3,6 +3,9 @@
 #include <linux/net.h>
 #include <linux/ioctl.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <unistd.h>
 
 #include "cli/note.h"
 #include "syscall/syscall.h"
@@ -296,7 +299,6 @@ void translate_syscall_exit(Tracee *tracee)
             status = -ENAMETOOLONG;
             break;
         }
-
         if (status == 1) {
             word_t dirfd = peek_reg(tracee, ORIGINAL, SYSARG_1);
             if (syscall_number == PR_readlink || dirfd < 0) {
@@ -329,6 +331,73 @@ void translate_syscall_exit(Tracee *tracee)
                 memcpy(referee, tracee->exe, len + 1);
                 status = len + 1;
                 goto write_back;
+            }
+        }
+
+        /* Linux readlink 在用户缓冲不足时静默截断并返回 bufsiz（"缓冲满"
+         * 语义，调用方凭返回值扩大缓冲重试，如 tsgo realpath 的 O_PATH +
+         * readlink(/proc/self/fd/N) 技巧）。截断内容经 detranslate 缩短后
+         * 返回值 < bufsiz，会破坏该语义（调用方误以为结果完整拿到截断
+         * 路径）。此时从宿主侧重读完整内容再 detranslate。 */
+        if (old_size == max_size) {
+            char full[PATH_MAX];
+            bool reread = false;
+
+            if (strncmp(referer, "/proc/", 6) == 0) {
+                /* /proc/self/fd/N 或 /proc/<pid>/fd/N：内核结果无法从
+                 * tracee 内存恢复（已截断），从宿主侧 /proc/<pid>/fd/N
+                 * 重读（PATH_MAX 缓冲不截断）。 */
+                pid_t rpid = tracee->pid;
+                const char *fdpart = NULL;
+
+                if (strncmp(referer, "/proc/self/fd/", 14) == 0)
+                    fdpart = referer + 14;
+                else {
+                    const char *p = referer + 6;
+                    char *end = NULL;
+                    long v = strtol(p, &end, 10);
+                    if (end != p && *end == '/' && strncmp(end + 1, "fd/", 3) == 0) {
+                        rpid = (pid_t)v;
+                        fdpart = end + 4;
+                    }
+                }
+                if (fdpart != NULL) {
+                    char *end = NULL;
+                    long v = strtol(fdpart, &end, 10);
+                    if (end != fdpart && *end == '\0' && v >= 0 && v <= 0x7fffffff
+                        && readlink_proc_pid_fd(rpid, (int)v, full) == 0)
+                        reread = true;
+                }
+            }
+            else if (referer[0] == '/') {
+                /* 普通路径（enter 阶段已翻译为 host 路径）：宿主侧直接重读。 */
+                ssize_t n = readlink(referer, full, sizeof(full) - 1);
+                if (n >= 0) {
+                    full[n] = '\0';
+                    reread = true;
+                }
+            }
+
+            if (reread) {
+                int st = detranslate_path(tracee, full, referer);
+                if (st > 0) {
+                    size_t full_len = st - 1; /* detranslate 返回含 \0 的长度 */
+                    if (full_len + 1 <= max_size) {
+                        status = write_data(tracee, output, full, full_len + 1);
+                        if (status < 0)
+                            break;
+                        status = full_len; /* 完整返回 */
+                    } else {
+                        /* guest 路径仍超用户缓冲：保持"缓冲满"语义，
+                         * 返回 max_size 让调用方扩大缓冲重试。 */
+                        status = write_data(tracee, output, full, max_size);
+                        if (status < 0)
+                            break;
+                        status = max_size;
+                    }
+                    break;
+                }
+                /* detranslate 失败（bind 外路径等）→ 沿用内核原结果 */
             }
         }
 
