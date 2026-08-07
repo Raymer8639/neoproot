@@ -337,20 +337,20 @@ static FORCE_INLINE bool is_l2s_internal_name(const char *name) {
     return true;
 }
 
-/* execve 物化（tsgo/tsc 7.0 兼容，方案 C）：
- * 被执行的路径若是 link2symlink 链（symlink -> 中间链接 -> final 数据文件），
- * 在 canonicalize 解析链之前把数据 rename 到被 exec 的路径（原子移动，
- * 覆盖原 symlink，rename 不跟随），并在 final 原位置创建反向 symlink
- * 指向被 exec 路径，保持 store 链完整：
+/* open/execve 物化（tsgo/tsc 7.0 兼容，方案 C）：
+ * 被 open/exec 的路径若是 link2symlink 链（symlink -> 中间链接 -> final 数据文件），
+ * 在 canonicalize 解析链之前把数据【复制】到目标路径（普通文件副本，保留权限），
+ * 数据仍保留在 final（.l2s 目录），store 链永远完整：
  *
- *   物化前：exec路径[symlink] -> 中间链接[symlink] -> final（数据 1 份）
- *   物化后：exec路径[普通文件=数据]  ←（反向链接）final[symlink] -> exec路径
- *           store -> 中间链接 -> final[symlink] -> exec路径（链不断）
+ *   物化前：exec路径[symlink] -> 中间链接[symlink] -> final（数据）
+ *   物化后：exec路径[普通文件=副本]    final 仍持有数据（store 链原样）
  *
  * 这样 tsgo 用 O_PATH + readlink(/proc/self/fd/N) 解析自身路径时得到真实的
  * node_modules 路径（而非 /.l2s/...），dirname 下找 lib.d.ts 恢复正常。
  * 幂等：目标已是普通文件时直接跳过（并发 exec / 多级 shebang 安全）。
- * 空间不变：mv 是移动不是复制，数据仍 1 份。 */
+ * 空间：副本多一份（仅限被物化的文件）；不用 rename 移动——若目标随后被删除
+ * （如 pnpm 重建 node_modules），移动会丢掉唯一数据副本导致 store 链断
+ * （ERR_PNPM_ENOENT 根因），复制则数据永在 .l2s。 */
 static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *path) {
     if (UNLIKELY(!tracee || !path)) return 0;
     struct stat statl;
@@ -396,19 +396,46 @@ static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *pa
     status = lstat(final_host, &statl);
     if (UNLIKELY(status < 0 || !S_ISREG(statl.st_mode))) return 0;
 
-    /* 物化：数据移到被 exec 路径（rename 覆盖原 symlink 不跟随）。
-     * 失败忽略——目标可能已被并发物化（幂等）或文件系统状态变化 */
-    if (UNLIKELY(rename(final_host, path) != 0)) return 0;
-
-    /* 反向链接：final 原位置 -> 被 exec 路径，保持 store 链不断 */
-    if (UNLIKELY(symlink(path, final_host) != 0)) {
-        /* 反向链接失败（极端）：回滚，数据放回 final，重建原链，避免数据丢失 */
-        rename(path, final_host);
-        symlink(intermediate, path);
+    /* 物化改为【复制】而非移动：数据永远保留在 final（.l2s 目录），
+     * 目标路径放一份副本（保留权限）。
+     * 原实现用 rename 把唯一数据副本移到目标路径，若目标随后被删除
+     * （如 pnpm install 重建 node_modules 时删除旧文件/旧包目录），
+     * 唯一数据副本丢失 → store 链断裂 → 后续访问 ENOENT
+     * （ERR_PNPM_ENOENT copyfile 根因）。复制后数据永在 .l2s，
+     * 链永不断，副本可被任意删除重建。
+     * 空间代价：被物化的文件多一份副本（仅限 open/exec 的文件），
+     * 正确性优先。 */
+    unlink(path); /* 删除链（不跟随），副本作为普通文件创建 */
+    int in_fd = open(final_host, O_RDONLY);
+    int out_fd = open(path, O_WRONLY | O_CREAT | O_EXCL, statl.st_mode & 07777);
+    if (LIKELY(in_fd >= 0 && out_fd >= 0)) {
+        char buf[65536];
+        ssize_t rd;
+        while ((rd = read(in_fd, buf, sizeof(buf))) > 0) {
+            ssize_t wr = write(out_fd, buf, rd);
+            if (UNLIKELY(wr != rd)) { rd = -1; break; }
+        }
+        if (UNLIKELY(rd < 0)) {
+            close(in_fd);
+            close(out_fd);
+            unlink(path);
+            return 0;
+        }
+        close(in_fd);
+        close(out_fd);
+        /* 保留可执行位等权限（rename 保持 inode 权限，复制需显式恢复） */
+        if (UNLIKELY(chmod(path, statl.st_mode & 07777) != 0)) {
+            unlink(path);
+            return 0;
+        }
+    } else {
+        if (in_fd >= 0) close(in_fd);
+        if (out_fd >= 0) close(out_fd);
+        unlink(path);
         return 0;
     }
 
-    VERBOSE(tracee, 1, "link2symlink: materialized \"%s\" (data moved from \"%s\")", path, final_host);
+    VERBOSE(tracee, 1, "link2symlink: materialized \"%s\" (copied from \"%s\")", path, final_host);
     return 1;
 }
 
