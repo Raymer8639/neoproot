@@ -29,20 +29,13 @@ jobs:
 
       - name: Build uproot
         run: |
-          set +e
           if [ "$MODE" = "release" ]; then
             # 默认 ARMv8.2 满血优化（与作者默认一致），makefile 自动选用 lld
-            make -C src uproot CC=clang CXX=clang++ 2>/tmp/build.err | tee /tmp/build.log
+            make -C src uproot CC=clang CXX=clang++
           else
             # 通用构建（例如老设备可降级指令集），验证 MARCH 可覆盖性
-            make -C src uproot CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic" 2>/tmp/build.err | tee /tmp/build.log
+            make -C src uproot CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
           fi
-          status=${PIPESTATUS[0]}
-          if [ $status -ne 0 ]; then
-            msg=$( { echo "=== STDOUT tail 250 ==="; tail -250 /tmp/build.log; echo "=== STDERR tail 150 ==="; tail -150 /tmp/build.err; } | head -c 7000 | sed 's/%/%25/g; s/\r/%0D/g' | tr '\n' '%0A' )
-            echo "::error::$msg" >&2
-          fi
-          exit $status
 
       - name: Check binary
         run: |

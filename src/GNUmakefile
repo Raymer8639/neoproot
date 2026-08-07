@@ -226,6 +226,16 @@ $(eval $(call define_from_arch.h,,LOADER_ADDRESS))
 LOADER_CFLAGS  += -fPIC -ffreestanding $(LOADER_ARCH_CFLAGS)
 LOADER_LDFLAGS += -static -nostdlib -Wl$(BUILD_ID_NONE),-Ttext=$(LOADER_ADDRESS),--rosegment,-z,noexecstack
 
+# loader 链接同样需要 lld（--rosegment 是 lld 专属选项；
+# LLVM 官方预编译 clang 默认链接器是自带 lld，但发行版 clang（如 Ubuntu）默认 GNU ld 会失败）。
+# 注意：必须在 LOADER_LDFLAGS 赋值之后追加。
+ifeq ($(HAVE_LLD),)
+# 无 lld 时改用 GNU ld 可接受的选项（--rosegment 是 lld 专属，去掉后功能等价）
+LOADER_LDFLAGS := -static -nostdlib -Wl$(BUILD_ID_NONE),-Ttext=$(LOADER_ADDRESS),-z,noexecstack
+else
+LOADER_LDFLAGS += -fuse-ld=lld
+endif
+
 loader/loader.o: $(SRC)loader/loader.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CPPFLAGS) $(filter-out -flto=thin,$(CXXFLAGS)) $(LOADER_CFLAGS) -MD -c $(SRC)$< -o $@
