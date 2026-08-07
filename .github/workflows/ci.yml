@@ -31,11 +31,14 @@ jobs:
         run: |
           if [ "$MODE" = "release" ]; then
             # 默认 ARMv8.2 满血优化（与作者默认一致），makefile 自动选用 lld
-            make -C src uproot CC=clang CXX=clang++
+            make -C src uproot CC=clang CXX=clang++ 2>&1 | tee /tmp/build.log
           else
             # 通用构建（例如老设备可降级指令集），验证 MARCH 可覆盖性
-            make -C src uproot CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
+            make -C src uproot CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic" 2>&1 | tee /tmp/build.log
           fi
+          status=${PIPESTATUS[0]}
+          tail -80 /tmp/build.log >> "$GITHUB_STEP_SUMMARY"
+          exit $status
 
       - name: Check binary
         run: |
