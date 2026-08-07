@@ -237,7 +237,11 @@
 #        define NT_ARM_SYSTEM_CALL		0x404
 #    endif
 #    ifndef SYS_SECCOMP
-#        define SYS_SECCOMP 1
+#        /* glibc 在 <bits/siginfo-consts.h> 中以枚举形式提供 SYS_SECCOMP（并在其后定义宏），
+         * 此处若再 define 会与枚举标识符冲突导致编译失败；bionic / musl 无此枚举，需要回退定义 */
+#        if !defined(__GLIBC__)
+#            define SYS_SECCOMP 1
+#        endif
 #    endif
 
 #endif /* COMPAT_H */

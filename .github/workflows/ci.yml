@@ -25,16 +25,16 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang llvm libtalloc-dev upx binutils
+          sudo apt-get install -y -qq clang llvm lld libtalloc-dev upx binutils
 
       - name: Build uproot
         run: |
           if [ "$MODE" = "release" ]; then
-            # 默认 ARMv8.2 满血优化（与作者默认一致）
-            make -C src uproot
+            # 默认 ARMv8.2 满血优化（与作者默认一致），makefile 自动选用 lld
+            make -C src uproot CC=clang CXX=clang++
           else
             # 通用构建（例如老设备可降级指令集），验证 MARCH 可覆盖性
-            make -C src uproot MARCH="-march=armv8-a -mtune=generic"
+            make -C src uproot CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
           fi
 
       - name: Check binary

@@ -3,7 +3,19 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/syscall.h>
-#include <linux/ashmem.h>
+#include <sys/ioctl.h>
+/* linux/ashmem.h 仅存在于 Android 内核头文件（上游 Linux 5.18 起移除）。
+ * 有则包含，无则用固定 ABI 常量回退，保证 glibc/musl 环境也能编译。 */
+#if defined(__has_include)
+#    if __has_include(<linux/ashmem.h>)
+#        include <linux/ashmem.h>
+#    endif
+#endif
+#ifndef ASHMEM_SET_SIZE
+#    define __ASHMEMIOC 0x77
+#    define ASHMEM_GET_SIZE _IOR(__ASHMEMIOC, 3, size_t)
+#    define ASHMEM_SET_SIZE _IOW(__ASHMEMIOC, 3, size_t)
+#endif
 #include <linux/memfd.h>
 #include <string.h>
 #include <errno.h>

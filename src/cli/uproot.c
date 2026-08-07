@@ -52,7 +52,14 @@ int main(int argc, char *const argv[])
         return proot_main(argc, argv);
     }
 
-    execve("/system/bin/sh", sh_argv, environ);
+    // 首选 shell 执行失败时（例如 proot 容器内 /system 目录不可 exec），
+    // 自动回退到 /bin/sh 再试一次
+    if (execve(sh_argv[0], sh_argv, environ) != 0
+        && strcmp(sh_argv[0], "/system/bin/sh") == 0
+        && access("/bin/sh", X_OK) == 0) {
+        sh_argv[0] = "/bin/sh";
+        execve(sh_argv[0], sh_argv, environ);
+    }
 
     perror("execve shell failed");
     free(sh_argv);

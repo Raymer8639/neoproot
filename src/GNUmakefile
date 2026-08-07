@@ -9,6 +9,7 @@ GIT      = git
 RM       = rm
 INSTALL  = install
 CC       ?= $(CROSS_COMPILE)clang
+CXX      ?= $(CROSS_COMPILE)clang++
 LD       = $(CC)
 STRIP    ?= $(CROSS_COMPILE)strip
 OBJCOPY  ?= $(CROSS_COMPILE)objcopy
@@ -31,6 +32,15 @@ CFLAGS   += -std=c23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sec
 CXXFLAGS += -std=c++23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
 
 LDFLAGS += -ltalloc -lm -ldl -lc -lstdc++ -flto=thin -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--icf=all,-z,relro,-z,now -Wl,--strip-all -lpthread -s
+
+# --icf=all 仅 lld 支持：有 ld.lld 时显式启用 lld；否则自动移除该选项。
+#（Termux 的 clang 默认链接器即为 lld，行为不变）
+HAVE_LLD := $(shell command -v ld.lld 2>/dev/null)
+ifeq ($(HAVE_LLD),)
+LDFLAGS := $(subst --icf=all,,$(LDFLAGS))
+else
+LDFLAGS += -fuse-ld=lld
+endif
 
 # cli/cli.o 去掉 flto 避免链接错误
 cli/cli.o: CFLAGS := -std=c23 -Wall -Wextra -O3 -ffunction-sections -fdata-sections $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
@@ -151,6 +161,22 @@ USE_BUILD_H := $(patsubst $(SRC)%.c,%.o,$(shell grep -E -sl 'include[[:space:]]+
 $(USE_BUILD_H): build.h
 
 ######################################################################
+# build.h 生成规则
+# 原上游的自动配置（CHECK_*）已被禁用，这里提供轻量替代：
+# VERSION 可由命令行覆盖（make VERSION="x.y.z-scicat"），
+# 未指定时自动取 git 描述；cli/proot.h 中另有内置默认值兜底。
+
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo uproot-unknown)
+
+build.h:
+	@echo "  GEN	$@"
+	@echo "/* This file is auto-generated, edit at your own risk.  */" > $@
+	@echo "#ifndef BUILD_H" >> $@
+	@echo "#define BUILD_H" >> $@
+	@echo "#define VERSION \"$(VERSION)\"" >> $@
+	@echo "#endif /* BUILD_H */" >> $@
+
+######################################################################
 # Build rules
 
 COMPILE = $($(quiet)CC) $(CPPFLAGS) $(CFLAGS) -MD -c $(SRC)$< -o $@
@@ -180,6 +206,12 @@ endif
 	@mkdir -p $(dir $@)
 	$(COMPILE)
 
+# 显式 C++ 编译规则（tracee/mem.cpp、tracee/reg.cpp），避免依赖 make 隐式规则，
+# 并启用 -MD 依赖跟踪
+%.o: $(SRC)%.cpp
+	@mkdir -p $(dir $@)
+	$($(quiet)CC) $(CPPFLAGS) $(CXXFLAGS) -MD -c $(SRC)$< -o $@
+
 cli/%-licenses.o: licenses cli/cli.o
 	$(OBJIFY)
 
@@ -196,7 +228,7 @@ LOADER_LDFLAGS += -static -nostdlib -Wl$(BUILD_ID_NONE),-Ttext=$(LOADER_ADDRESS)
 
 loader/loader.o: $(SRC)loader/loader.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LOADER_CFLAGS) -MD -c $(SRC)$< -o $@
+	$(CXX) $(CPPFLAGS) $(filter-out -flto=thin,$(CXXFLAGS)) $(LOADER_CFLAGS) -MD -c $(SRC)$< -o $@
 
 loader/assembly.o: $(SRC)loader/assembly.S
 	@mkdir -p $(dir $@)
