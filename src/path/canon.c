@@ -19,6 +19,8 @@
 #include "extension/extension.h"
 
 #define STAT_CACHE_SIZE      64
+#define STAT_CACHE_MASK      (STAT_CACHE_SIZE - 1)
+#define STAT_CACHE_PROBE     8
 #define CACHE_ALIGN          __attribute__((aligned(64)))
 #define NEON_VEC_BYTES        16
 
@@ -29,6 +31,7 @@
 typedef struct CACHE_ALIGN {
     char     path[PATH_MAX];
     struct   stat st;
+    uint32_t crc;
     unsigned valid    : 1;
     unsigned lru_time : 31;
 } StatCacheEntry;
@@ -54,24 +57,50 @@ static ALWAYS_INLINE size_t neon_strlen_fast(const char *s) {
 }
 
 static ALWAYS_INLINE int neon_strcmp_fast(const char *a, const char *b) {
-    size_t len_a = neon_strlen_fast(a);
-    size_t len_b = neon_strlen_fast(b);
-    size_t min = len_a < len_b ? len_a : len_b;
-    for (size_t i = 0; i < min; i += NEON_VEC_BYTES) {
-        size_t chunk = min - i;
-        if (chunk > NEON_VEC_BYTES) chunk = NEON_VEC_BYTES;
-        uint8x16_t va = vld1q_u8((const uint8_t *)(a + i));
-        uint8x16_t vb = vld1q_u8((const uint8_t *)(b + i));
-        uint8x16_t eq = vceqq_u8(va, vb);
-        if (vminvq_u8(eq) != 0xFF) {
-            for (size_t j = 0; j < chunk; j++) {
-                unsigned char ca = a[i + j];
-                unsigned char cb = b[i + j];
-                if (ca != cb) return ca - cb;
+    const uint8_t *pa = (const uint8_t *)a;
+    const uint8_t *pb = (const uint8_t *)b;
+    size_t i = 0;
+    /* 逐字节对齐到 16 字节边界（短字符串如 "."、".."、组件名在此即返回） */
+    for (; (uintptr_t)(pa + i) % NEON_VEC_BYTES != 0; i++) {
+        unsigned char ca = pa[i], cb = pb[i];
+        if (UNLIKELY(ca != cb)) return ca - cb;
+        if (UNLIKELY(ca == '\0')) return 0;
+    }
+    uint8x16_t zero = vdupq_n_u8(0);
+    for (;; i += NEON_VEC_BYTES) {
+        uint8x16_t va = vld1q_u8(pa + i);
+        uint8x16_t vb = vld1q_u8(pb + i);
+        uint8x16_t eq  = vceqq_u8(va, vb);           /* 相等 → 0xFF */
+        uint8x16_t za  = vceqq_u8(va, zero);         /* a 结束 → 0xFF（相等时 b 同步结束） */
+        uint8x16_t stop = vmaxq_u8(vmvnq_u8(eq), za); /* 不等 或 a 结束 */
+        if (vmaxvq_u8(stop) != 0) {
+            for (size_t j = 0; j < NEON_VEC_BYTES; j++) {
+                unsigned char ca = pa[i + j], cb = pb[i + j];
+                if (UNLIKELY(ca != cb)) return ca - cb;
+                if (UNLIKELY(ca == '\0')) return 0;
             }
         }
     }
-    return (unsigned char)(len_a < len_b ? -1 : len_a > len_b ? 1 : 0);
+}
+
+/* 复制 C 字符串（含终止符），不做尾部清零（比 memset PATH_MAX 快得多） */
+static ALWAYS_INLINE void neon_strcpy_fast(char *restrict d, const char *restrict s) {
+    size_t i = 0;
+    for (;; i += NEON_VEC_BYTES) {
+        uint8x16_t v = vld1q_u8((const uint8_t *)(s + i));
+        vst1q_u8((uint8_t *)(d + i), v);
+        if (vmaxvq_u8(vceqq_u8(v, vdupq_n_u8(0))) != 0)
+            return;  /* 已复制终止符 */
+    }
+}
+
+/* 复制已知长度的组件（含终止符） */
+static ALWAYS_INLINE void copy_component(char *restrict d, const char *restrict s, size_t len) {
+    size_t i = 0;
+    for (; i + NEON_VEC_BYTES <= len; i += NEON_VEC_BYTES)
+        vst1q_u8((uint8_t *)(d + i), vld1q_u8((const uint8_t *)(s + i)));
+    for (; i < len; i++) d[i] = s[i];
+    d[len] = '\0';
 }
 
 static ALWAYS_INLINE uint32_t crc32_path(const char *s, size_t len) {
@@ -88,48 +117,49 @@ static ALWAYS_INLINE uint32_t crc32_path(const char *s, size_t len) {
     return crc;
 }
 
-static ALWAYS_INLINE char *neon_strncpy_fast(char *d, const char *s, size_t n) {
-    if (UNLIKELY(n == 0)) return d;
-    size_t slen = neon_strlen_fast(s);
-    size_t cp = slen < n ? slen : n - 1;
-    for (size_t i = 0; i < cp; i += NEON_VEC_BYTES) {
-        size_t chunk = cp - i;
-        if (chunk > NEON_VEC_BYTES) chunk = NEON_VEC_BYTES;
-        uint8x16_t v = vld1q_u8((const uint8_t *)(s + i));
-        vst1q_u8((uint8_t *)(d + i), v);
-    }
-    d[cp] = '\0';
-    for (size_t i = cp + 1; i < n; i++) d[i] = 0;
-    return d;
-}
-
 static int stat_cache_lookup(const char *restrict path, struct stat *restrict out_st) {
     size_t len = neon_strlen_fast(path);
     uint32_t h = crc32_path(path, len);
-    for (int i = 0; i < STAT_CACHE_SIZE; i++) {
-        StatCacheEntry *e = &stat_cache[i];
-        if (UNLIKELY(!e->valid)) continue;
-        size_t elen = neon_strlen_fast(e->path);
-        if (elen != len) continue;
-        if (crc32_path(e->path, elen) == h) {
-            if (LIKELY(neon_strcmp_fast(e->path, path) == 0)) {
-                *out_st = e->st;
-                e->lru_time = ++stat_cache_clock;
-                return 0;
-            }
+    unsigned slot = h & STAT_CACHE_MASK;
+    /* crc32 直接索引 + 短线性探测；空槽终止（插入保证连续性） */
+    for (unsigned i = 0; i < STAT_CACHE_PROBE; i++) {
+        StatCacheEntry *e = &stat_cache[(slot + i) & STAT_CACHE_MASK];
+        if (UNLIKELY(!e->valid)) return -ENOENT;
+        if (e->crc != h) continue;
+        if (LIKELY(neon_strcmp_fast(e->path, path) == 0)) {
+            *out_st = e->st;
+            e->lru_time = ++stat_cache_clock;
+            return 0;
         }
     }
     return -ENOENT;
 }
 
 static void stat_cache_insert(const char *restrict path, const struct stat *restrict st) {
-    StatCacheEntry *victim = &stat_cache[0];
-    for (int i = 1; i < STAT_CACHE_SIZE; i++) {
-        if (stat_cache[i].lru_time < victim->lru_time)
-            victim = &stat_cache[i];
+    size_t len = neon_strlen_fast(path);
+    uint32_t h = crc32_path(path, len);
+    unsigned slot = h & STAT_CACHE_MASK;
+    for (unsigned i = 0; i < STAT_CACHE_PROBE; i++) {
+        StatCacheEntry *e = &stat_cache[(slot + i) & STAT_CACHE_MASK];
+        if (UNLIKELY(!e->valid)) {
+            neon_strcpy_fast(e->path, path);
+            e->st = *st;
+            e->crc = h;
+            e->valid = 1;
+            e->lru_time = ++stat_cache_clock;
+            return;
+        }
     }
-    neon_strncpy_fast(victim->path, path, PATH_MAX);
+    /* 探测窗口全满：替换窗口内最老的项 */
+    StatCacheEntry *victim = &stat_cache[slot & STAT_CACHE_MASK];
+    for (unsigned i = 1; i < STAT_CACHE_PROBE; i++) {
+        StatCacheEntry *e = &stat_cache[(slot + i) & STAT_CACHE_MASK];
+        if (e->lru_time < victim->lru_time)
+            victim = e;
+    }
+    neon_strcpy_fast(victim->path, path);
     victim->st = *st;
+    victim->crc = h;
     victim->valid = 1;
     victim->lru_time = ++stat_cache_clock;
 }
@@ -150,7 +180,7 @@ static ALWAYS_INLINE Finality next_component(char component[NAME_MAX], const cha
     while (**cursor && **cursor != '/') (*cursor)++;
     size_t len = *cursor - start;
     if (UNLIKELY(len >= NAME_MAX)) return -ENAMETOOLONG;
-    neon_strncpy_fast(component, start, len + 1);
+    copy_component(component, start, len);
     int want_dir = (**cursor == '/');
     while (**cursor == '/') (*cursor)++;
     if (!**cursor) return want_dir ? FINAL_SLASH : FINAL_NORMAL;
@@ -163,7 +193,7 @@ static int substitute_binding_stat(Tracee *restrict tracee, Finality finality,
                                    char host_path[PATH_MAX]) {
     struct stat statl;
     int res;
-    neon_strncpy_fast(host_path, guest_path, PATH_MAX);
+    neon_strcpy_fast(host_path, guest_path);
     res = substitute_binding(tracee, GUEST, host_path);
     if (UNLIKELY(res < 0)) return res;
     if (tracee->glue_type == 0) {
@@ -238,7 +268,7 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
         res = substitute_binding_stat(tracee, fin, recursion_level, scratch_path, host_path);
         if (UNLIKELY(res < 0)) return res;
         if (res <= 0 || (fin == FINAL_NORMAL && !deref_final)) {
-            neon_strncpy_fast(scratch_path, guest_path, PATH_MAX);
+            neon_strcpy_fast(scratch_path, guest_path);
             res = join_paths(2, guest_path, scratch_path, comp);
             if (UNLIKELY(res < 0)) return res;
             continue;
@@ -249,7 +279,7 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
             if (res == CANONICALIZE) goto canon_symlink;
             if (res == DONT_CANONICALIZE) {
                 if (fin == FINAL_NORMAL) {
-                    neon_strncpy_fast(guest_path, scratch_path, PATH_MAX);
+                    neon_strcpy_fast(guest_path, scratch_path);
                     return 0;
                 }
             } else if (UNLIKELY(res < 0)) return res;
@@ -270,11 +300,11 @@ canon_symlink:
         switch (fin) {
             case FINAL_SLASH:
                 join_paths(2, scratch_path, guest_path, "");
-                neon_strncpy_fast(guest_path, scratch_path, PATH_MAX);
+                neon_strcpy_fast(guest_path, scratch_path);
                 break;
             case FINAL_DOT:
                 join_paths(2, scratch_path, guest_path, ".");
-                neon_strncpy_fast(guest_path, scratch_path, PATH_MAX);
+                neon_strcpy_fast(guest_path, scratch_path);
                 break;
             default: break;
         }
