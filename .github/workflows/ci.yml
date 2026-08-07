@@ -38,7 +38,9 @@ jobs:
             make -C src uproot CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic" 2>&1 | tee /tmp/build.log
           fi
           status=${PIPESTATUS[0]}
-          tail -80 /tmp/build.log >> "$GITHUB_STEP_SUMMARY"
+          if [ $status -ne 0 ]; then
+            tail -40 /tmp/build.log | sed 's/^/::error::/' >&2
+          fi
           exit $status
 
       - name: Check binary
