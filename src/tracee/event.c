@@ -28,6 +28,12 @@
 #include "extension/extension.h"
 #include "execve/elf.h"
 #include "attribute.h"
+
+/* SYS_SECCOMP 兜底：<signal.h> 已在上方包含（glibc 的枚举声明已完成），
+ * bionic/musl 无此枚举，部分 glibc（如 Ubuntu 24.04 的 2.39）受条件编译保护未提供 */
+#ifndef SYS_SECCOMP
+#    define SYS_SECCOMP 1
+#endif
 #include "compat.h"
 
 // ==================== C23 编译期静态检查 ====================

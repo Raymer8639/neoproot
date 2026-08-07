@@ -106,6 +106,7 @@ static ALWAYS_INLINE void copy_component(char *restrict d, const char *restrict 
 static ALWAYS_INLINE uint32_t crc32_path(const char *s, size_t len) {
     uint32_t crc = 0xFFFFFFFFU;
     const uint8_t *p = (const uint8_t *)s;
+#if defined(__ARM_FEATURE_CRC32)
     while (len >= 4) {
         crc = __crc32w(crc, *(const uint32_t *)p);
         p += 4; len -= 4;
@@ -114,6 +115,31 @@ static ALWAYS_INLINE uint32_t crc32_path(const char *s, size_t len) {
         crc = __crc32b(crc, *p);
         p += 1; len -= 1;
     }
+#else
+    /* portable 构建（如 -march=armv8-a，无 +crc）的软件 CRC-32：
+     * 与 ARM crc32 指令语义一致（IEEE 802.3 反射多项式 0xEDB88320，LSB 先行），
+     * 保证同二进制内哈希结果自洽，仅作为 stat cache 索引使用 */
+    while (len >= 4) {
+        uint32_t word = *(const uint32_t *)p;
+        for (int i = 0; i < 32; i++) {
+            uint32_t bit = (word ^ crc) & 1;
+            crc >>= 1;
+            if (bit) crc ^= 0xEDB88320U;
+            word >>= 1;
+        }
+        p += 4; len -= 4;
+    }
+    while (len >= 1) {
+        uint32_t byte = *p;
+        for (int i = 0; i < 8; i++) {
+            uint32_t bit = (byte ^ crc) & 1;
+            crc >>= 1;
+            if (bit) crc ^= 0xEDB88320U;
+            byte >>= 1;
+        }
+        p += 1; len -= 1;
+    }
+#endif
     return crc;
 }
 

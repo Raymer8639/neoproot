@@ -236,12 +236,11 @@
 #    ifndef NT_ARM_SYSTEM_CALL
 #        define NT_ARM_SYSTEM_CALL		0x404
 #    endif
-#    ifndef SYS_SECCOMP
-#        /* glibc 在 <bits/siginfo-consts.h> 中以枚举形式提供 SYS_SECCOMP（并在其后定义宏），
-         * 此处若再 define 会与枚举标识符冲突导致编译失败；bionic / musl 无此枚举，需要回退定义 */
-#        if !defined(__GLIBC__)
-#            define SYS_SECCOMP 1
-#        endif
-#    endif
+/* 注意：SYS_SECCOMP 不在此处兜底。
+ * 它在 glibc <bits/siginfo-consts.h> 中以枚举形式提供（部分版本受条件编译保护，
+ * 如 Ubuntu 24.04 的 glibc 2.39 在 __USE_GNU 未生效时不提供；Arch 新版无条件提供），
+ * 且各文件 include 顺序不同（compat.h 可能在 <signal.h> 之前引入），在此定义宏
+ * 会与枚举声明冲突。唯一使用处 tracee/event.c 已保证先 include <signal.h>，
+ * 兜底定义放在该文件内。 */
 
 #endif /* COMPAT_H */
