@@ -271,9 +271,16 @@ int push_array_of_xpointers(ArrayOfXPointers *a, Reg reg)
     if (UNLIKELY(!base))
         return -E2BIG;
 
+    /* 每个 local 字符串在 base 中的实际偏移是"pod 区 + 前面所有字符串长度"
+     * 的累加；旧代码固定指向最后一个字符串（total - vec[cnt-1].iov_len），
+     * 导致 argv 所有指针都指向同一字符串（shebang 展开后 argv 全变成脚本
+     * 路径，env/node 的 ld.so 误判 argv[0] 为脚本而反复 exec，死循环）。 */
+    word_t off = word_sz * nr_ptr;
     for (size_t i = 0; LIKELY(i < nr_ptr); i++) {
-        if (a->_xpointers[i].local)
-            a->_xpointers[i].remote = base + (total - vec[cnt-1].iov_len);
+        if (a->_xpointers[i].local) {
+            a->_xpointers[i].remote = base + off;
+            off += sizeof_xpointee(a, i);
+        }
         pod[i] = a->_xpointers[i].remote;
     }
 
