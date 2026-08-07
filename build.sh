@@ -14,13 +14,21 @@ case "$(uname -m)" in
     *) echo "错误: 本项目仅支持 aarch64/arm64 设备" >&2; exit 1 ;;
 esac
 
-# 检查依赖
+# 检查依赖（注意：llvm/binutils 是包名不是命令名，用代表性命令检测）
 MISSING=""
-for pkg in clang make llvm binutils; do
-    if ! command -v "$pkg" >/dev/null 2>&1; then
-        MISSING="$MISSING $pkg"
-    fi
-done
+check_cmd() { # 用法: check_cmd <包名> <命令>...
+    pkg=$1; shift
+    for c in "$@"; do
+        if command -v "$c" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    MISSING="$MISSING $pkg"
+}
+check_cmd clang clang
+check_cmd make make
+check_cmd llvm llvm-config llvm-ar
+check_cmd binutils as ld.bfd
 
 # talloc 是头文件库依赖，检查 pkg-config
 if ! pkg-config --exists talloc 2>/dev/null; then

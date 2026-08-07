@@ -199,7 +199,7 @@ ifeq ($(HAVE_UPX),)
 	@echo "  SKIP	upx 未安装，跳过压缩（安装 upx 可进一步减小体积）"
 else
 	$(quiet_UPX) $(UPX_FLAGS) $@ $(silently)
-	$(STRIP) --strip-all $@
+	# 注意：UPX 压缩后不能再 strip（二进制已无节表，GNU strip 会报 "has no sections" 导致 CI 失败）
 endif
 
 %.o: $(SRC)%.c
