@@ -36,6 +36,14 @@ LDFLAGS += -ltalloc -lm -ldl -lc -lstdc++ -flto=thin -Wl,-z,noexecstack -Wl,--gc
 # --icf=all 仅 lld 支持：有 ld.lld 时显式启用 lld；否则自动移除该选项。
 #（Termux 的 clang 默认链接器即为 lld，行为不变）
 HAVE_LLD := $(shell command -v ld.lld 2>/dev/null)
+
+# seccomp 过滤器检测（性能关键）：只停靠白名单 syscall，否则全量 ptrace
+# 停靠每个 syscall（慢 100-1000 倍）。上游 proot 由 configure 检测，
+# 魔改版丢失该检测导致从未启用——所有 syscall 全量停靠的性能根因。
+HAVE_SECCOMP_FILTER := $(shell printf '#include <linux/seccomp.h>\n#include <linux/filter.h>\n#include <sys/syscall.h>\n#ifndef __NR_seccomp\n#error no seccomp\n#endif\nint main(void){return 0;}' | $(CC) -x c - -o /dev/null 2>/dev/null && echo 1)
+ifeq ($(HAVE_SECCOMP_FILTER),1)
+  CPPFLAGS += -DHAVE_SECCOMP_FILTER
+endif
 ifeq ($(HAVE_LLD),)
 LDFLAGS := $(subst --icf=all,,$(LDFLAGS))
 else
