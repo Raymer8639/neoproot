@@ -35,6 +35,9 @@ static_assert(offsetof(struct seccomp_data, nr) < UINT32_MAX, "nr offset too lar
 
 #define DEBUG_FILTER(...)
 
+/* ioctl args1 过滤版指令数（1 JEQ nr + 1 LD args1 + 6 对 JEQ+RET = 14） */
+#define IOCTL_ARGS1_STMTS 14
+
 static ALWAYS_INLINE int new_program_filter(struct sock_fprog *restrict program) {
     program->filter = talloc_array(NULL, struct sock_filter, 0);
     if (UNLIKELY(!program->filter))
@@ -69,24 +72,52 @@ static ALWAYS_INLINE int add_trace_syscall(struct sock_fprog *restrict program,
     return add_statements(program, sizeof(stmts)/sizeof(*stmts), stmts);
 }
 
+/* ioctl 等按参数条件过滤的变体：只有 args[1] 匹配特定值才停靠，
+ * 其余直通（nvim 等高频 ioctl 全部停靠会拖慢终端操作）。
+ * 指令布局：JEQ nr 不匹配跳 SKIP；匹配则 LD args[1] 后逐个 JEQ+RET。
+ * SKIP = 1(LD) + 2*n(JEQ+RET) */
+static ALWAYS_INLINE int add_trace_syscall_args1(struct sock_fprog *restrict program,
+                                                 word_t syscall, int flag,
+                                                 const uint32_t *args1, size_t n_args1) {
+    if (UNLIKELY(syscall > UINT32_MAX))
+        return -ERANGE;
+    size_t skip = 1 + 2 * n_args1;
+    struct sock_filter *stmts = talloc_array(NULL, struct sock_filter, 2 + skip);
+    if (UNLIKELY(!stmts))
+        return -ENOMEM;
+    size_t idx = 0;
+    stmts[idx++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
+                                               (uint32_t)syscall, 0, (uint8_t)skip);
+    stmts[idx++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                                               offsetof(struct seccomp_data, args[1]));
+    for (size_t i = 0; i < n_args1; i++) {
+        stmts[idx++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
+                                                   args1[i], 0, 1);
+        stmts[idx++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE + flag);
+    }
+    int ret = add_statements(program, idx, stmts);
+    talloc_free(stmts);
+    return ret;
+}
+
 static ALWAYS_INLINE int end_arch_section(struct sock_fprog *restrict program,
-                                          size_t nb_traced) {
+                                          size_t nb_traced, size_t extra_stmts) {
     const struct sock_filter stmt = BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
     int ret = add_statements(program, 1, &stmt);
     if (UNLIKELY(ret < 0))
         return ret;
     size_t used = talloc_array_length(program->filter) - program->len;
-    size_t expected = 1 + nb_traced * 2;
+    size_t expected = 1 + nb_traced * 2 + extra_stmts;
     if (UNLIKELY(used != expected))
         return -ERANGE;
     return 0;
 }
 
 static ALWAYS_INLINE int start_arch_section(struct sock_fprog *restrict program,
-                                            uint32_t arch, size_t nb_traced) {
+                                            uint32_t arch, size_t nb_traced, size_t extra_stmts) {
     size_t arch_off = offsetof(struct seccomp_data, arch);
     size_t nr_off   = offsetof(struct seccomp_data, nr);
-    size_t sec_len  = 1 + nb_traced * 2;
+    size_t sec_len  = 1 + nb_traced * 2 + extra_stmts;
     if (UNLIKELY(arch_off > UINT32_MAX || nr_off > UINT32_MAX || sec_len > UINT32_MAX - 1))
         return -ERANGE;
     const struct sock_filter stmts[] = {
@@ -128,14 +159,18 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums) {
 
     for (size_t i = 0; i < n_arch; ++i) {
         size_t n_trace = 0;
+        size_t ioctl_extra = 0;
         for (size_t j = 0; j < archs[i].nb_abis; ++j) {
             for (size_t k = 0; sysnums[k].value != PR_void; ++k) {
                 word_t sc = detranslate_sysnum(archs[i].abis[j], sysnums[k].value);
-                if (sc != SYSCALL_AVOIDER)
-                    ++n_trace;
+                if (sc == SYSCALL_AVOIDER)
+                    continue;
+                ++n_trace;
+                if (sysnums[k].value == PR_ioctl)
+                    ioctl_extra += IOCTL_ARGS1_STMTS - 2; /* args1 版比普通版多出的指令 */
             }
         }
-        ret = start_arch_section(&prog, archs[i].value, n_trace);
+        ret = start_arch_section(&prog, archs[i].value, n_trace, ioctl_extra);
         if (UNLIKELY(ret < 0))
             goto out;
         for (size_t j = 0; j < archs[i].nb_abis; ++j) {
@@ -143,12 +178,27 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums) {
                 word_t sc = detranslate_sysnum(archs[i].abis[j], sysnums[k].value);
                 if (sc == SYSCALL_AVOIDER)
                     continue;
-                ret = add_trace_syscall(&prog, sc, sysnums[k].flags);
+                if (sysnums[k].value == PR_ioctl) {
+                    /* 只对需要改写的 ioctl cmd 停靠（终端 termios2 兼容 + DRM），
+                     * 其余 ioctl 直通——nvim 等高频终端 ioctl 不再每次 ptrace 停靠 */
+                    static const uint32_t ioctl_cmds[] = {
+                        0x5404,      /* TCSETS + 2 */
+                        0x802c542a,  /* TCGETS2  _IOR('T',0x2A,termios2) size=0x2c */
+                        0x402c542b,  /* TCSETS2  _IOW('T',0x2B,termios2) */
+                        0x402c542c,  /* TCSETSW2 _IOW('T',0x2C,termios2) */
+                        0x402c542d,  /* TCSETSF2 _IOW('T',0x2D,termios2) */
+                        0x40049409,  /* _IOW(0x94, 9, int) DRM */
+                    };
+                    ret = add_trace_syscall_args1(&prog, sc, sysnums[k].flags,
+                                                  ioctl_cmds, 6);
+                } else {
+                    ret = add_trace_syscall(&prog, sc, sysnums[k].flags);
+                }
                 if (UNLIKELY(ret < 0))
                     goto out;
             }
         }
-        ret = end_arch_section(&prog, n_trace);
+        ret = end_arch_section(&prog, n_trace, ioctl_extra);
         if (UNLIKELY(ret < 0))
             goto out;
     }
