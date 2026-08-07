@@ -6,6 +6,18 @@
 // 声明cli.c中的核心函数
 extern int proot_main(int argc, char *const argv[]);
 
+/* 优先使用 Android 的 /system/bin/sh；
+ * 在嵌入式 Linux / 其他环境回退到 /bin/sh，避免 execve 直接失败 */
+static const char *find_shell(void)
+{
+    if (access("/system/bin/sh", X_OK) == 0)
+        return "/system/bin/sh";
+    if (access("/bin/sh", X_OK) == 0)
+        return "/bin/sh";
+    /* 两者都不存在时返回默认值，由 execve 报告具体错误 */
+    return "/system/bin/sh";
+}
+
 int main(int argc, char *const argv[])
 {
     // 要传递给termux的命令
@@ -24,7 +36,7 @@ int main(int argc, char *const argv[])
     }
 
     int idx = 0;
-    sh_argv[idx++] = "/system/bin/sh";
+    sh_argv[idx++] = (char *)find_shell();
     sh_argv[idx++] = "-c";
     sh_argv[idx++] = shell_cmd;
     sh_argv[idx++] = argv[0];
