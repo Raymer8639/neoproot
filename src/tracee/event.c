@@ -444,10 +444,15 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
                         {
                             const bool was_sysenter = IS_IN_SYSENTER(tracee);
                             translate_syscall(tracee);
+                            /* Android GKI 5.15 内核：NO_SYSCALL(AVOIDER) 后 seccomp
+                             * filter 链（zygote 的 app filter）仍会继续检查，看到
+                             * syscall 号 -1 会返回 TRAP → SIGSYS(si_syscall=-1)。
+                             * 该 SIGSYS 必须被抑制（信号置 0 丢弃），否则
+                             * handle_seccomp_event 的 default 分支会把 x0 覆盖为
+                             * -ENOSYS，破坏已设置的返回值。不依赖 after_enter：
+                             * 真机（老模式 after_enter=false）同样需要。 */
                             if (was_sysenter) {
-                                tracee->skip_next_seccomp_signal = (
-                                        after_enter &&
-                                        get_sysnum(tracee, CURRENT) == PR_void);
+                                tracee->skip_next_seccomp_signal = (get_sysnum(tracee, CURRENT) == PR_void);
                             }
                             if (tracee->chain.suppressed_signal && tracee->chain.syscalls == NULL && !tracee->restore_original_regs_after_seccomp_event) {
                                 signal = tracee->chain.suppressed_signal;
@@ -533,6 +538,12 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
                 // SYSENTER事件处理
                 tracee->restart_how = PTRACE_CONT;
                 translate_syscall(tracee);
+                /* Android GKI 5.15：AVOIDER(PR_void) 后 zygote seccomp filter 链
+                 * 会产生 SIGSYS(si_syscall=-1)，必须抑制。老模式(after_enter=false)
+                 * 下 enter 走这里，若翻译结果为 AVOIDER 则预置抑制标志（双保险，
+                 * 主判断在 SIGSYS 分支的 si_syscall == SYSCALL_AVOIDER）。 */
+                if (get_sysnum(tracee, CURRENT) == PR_void)
+                    tracee->skip_next_seccomp_signal = true;
                 if (tracee->seccomp == DISABLING)
                     tracee->restart_how = PTRACE_SYSCALL;
                 if (!after_enter && tracee->restart_how == PTRACE_SYSCALL)
@@ -575,7 +586,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
                         translate_syscall(tracee);
                     }
                     const bool skip_signal = tracee->skip_next_seccomp_signal ||
-                        (after_enter && (word_t)siginfo.si_syscall == SYSCALL_AVOIDER);
+                        (word_t)siginfo.si_syscall == SYSCALL_AVOIDER;
                     if (skip_signal) {
                         VERBOSE(tracee, 4, "suppressed SIGSYS after void syscall");
                         tracee->skip_next_seccomp_signal = false;
