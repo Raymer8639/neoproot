@@ -308,12 +308,37 @@ void translate_syscall_exit(Tracee *tracee)
                 break;
         }
 
+        /* /proc/self/exe（及当前 tracee 的 /proc/<pid>/exe）：内核返回的是
+         * 内部 loader 的临时路径（/tmp/proot-loader-*），必须替换为真实
+         * 二进制路径，否则 tsgo（typescript-go）等按自身路径找 lib.d.ts
+         * 的程序会 panic（"bundled: ... does not exist"）。 */
+        if (tracee->exe != NULL) {
+            bool is_exe_link = (strcmp(referer, "/proc/self/exe") == 0);
+            if (!is_exe_link) {
+                char proc_exe[PATH_MAX];
+                int n = snprintf(proc_exe, sizeof(proc_exe), "/proc/%d/exe", tracee->pid);
+                if (n > 0 && (size_t) n < sizeof(proc_exe))
+                    is_exe_link = (strcmp(referer, proc_exe) == 0);
+            }
+            if (is_exe_link) {
+                size_t len = strlen(tracee->exe);
+                if (len + 1 > PATH_MAX) {
+                    status = -ENAMETOOLONG;
+                    break;
+                }
+                memcpy(referee, tracee->exe, len + 1);
+                status = len + 1;
+                goto write_back;
+            }
+        }
+
         status = detranslate_path(tracee, referee, referer);
         if (status < 0)
             break;
         if (status == 0)
             goto end;
 
+write_back:
         if ((size_t)status < max_size) {
             new_size = status - 1;
             status = write_data(tracee, output, referee, status);

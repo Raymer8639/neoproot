@@ -455,6 +455,15 @@ int translate_execve_enter(Tracee *tr)
 	if (UNLIKELY(ret < 0))
 		return ret;
 
+	// 内部 loader 的 execve：保持 new_exe/host_exe 指向真实二进制，
+	// 否则 /proc/self/exe 会变成 loader 临时路径（/tmp/proot-loader-*），
+	// 导致 tsgo（typescript-go）等按自身路径找附属文件的程序 panic
+	// （bundled: .../lib.d.ts does not exist）。参数保持 loader 路径原样执行。
+	loader = get_loader_path(tr);
+	if (loader != NULL && strcmp(user, loader) == 0) {
+		return 0;
+	}
+
 	raw = talloc_strdup(tr->ctx, user);
 	if (UNLIKELY(!raw))
 		return -ENOMEM;
