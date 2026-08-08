@@ -104,8 +104,12 @@ int handle_statx_syscall(Tracee *restrict tracee, bool from_sigsys)
         if (UNLIKELY(status < 0)) {
             return status;
         }
-        // 通知扩展处理，直接返回结果
-        return notify_extensions(tracee, STATX_SYSCALL, (intptr_t)&state, 0);
+        // 通知扩展处理（fake_id0 属主改写 / link2symlink nlink），然后写回用户缓冲区
+        status = notify_extensions(tracee, STATX_SYSCALL, (intptr_t)&state, 0);
+        if (UNLIKELY(status < 0)) {
+            return status;
+        }
+        return write_data(tracee, statx_addr, &state.statx_buf, sizeof(struct statx));
     }
 
 fill_statx:
