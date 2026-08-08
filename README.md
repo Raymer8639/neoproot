@@ -6,6 +6,9 @@
 ![Platform](https://img.shields.io/badge/platform-ARM64%20%2F%20Android-blue)
 ![Language](https://img.shields.io/badge/C%2FC%2B%2B-C23%20%2F%20C%2B%2B23-orange)
 ![License](https://img.shields.io/badge/license-GPLv2-green)
+![AI](https://img.shields.io/badge/AI-assisted-100%25-purple)
+
+> **🤖 AI 声明：本项目的全部代码（含维护过程中的所有修改、修复与优化）均使用 AI 辅助编写/审查完成。**
 
 proot-scicat（又名 **uproot**）是在原始 [PRoot](https://github.com/proot-me/proot) 项目基础上，由社区爱好者重新维护的增强版本。原始 PRoot 官方自 2023 年起更新放缓，大量编译警告、Android 兼容性问题、用户体验瑕疵长期未修复。
 
@@ -20,6 +23,8 @@ proot-scicat（又名 **uproot**）是在原始 [PRoot](https://github.com/proot
 - ✅ 最大延迟 ↓ 40%+，更顺滑；线程更公平、抖动更小
 - ✅ C23/C++23 现代精简架构，放弃通用兼容换取 ARMv8.2 满血性能
 - ✅ 内置 `uproot.c` 主程序：自动处理 Termux 环境初始化（wake-lock、fd 上限、LD_* 清理），无需手工加启动参数
+- ✅ 移除上游魔改的路径翻译线程池（cond_wait 往返开销）：真机 syscall 处理速度与官方 PRoot 持平（lstat 304us/次 vs 原版 293-312us），修复 nvim 等高频操作卡顿
+- ✅ link2symlink 硬链接模拟全面兼容 pnpm / tsc（tsgo）——物化机制解决 tsgo 的 O_PATH+readlink 真实路径探测（TS2307/TS6054/panic 全部解决）
 
 ## 性能数据
 
@@ -76,7 +81,7 @@ uproot -0 -r /data/data/com.termux/files/home/rootfs \
 
 ## 版本命名
 
-基于官方 PRoot 版本号，后缀 `-scicat` 标识本分支，例如 `5.6.0-scicat`。变更历史见 [CHANGELOG.md](CHANGELOG.md)。
+基于官方 PRoot 版本号，后缀 `-scicat` 标识本分支，例如 `5.6.0-scicat`。**最新版本：`v5.7.2-scicat`**（2026-08-08）。变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 构建产物说明
 
