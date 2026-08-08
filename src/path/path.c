@@ -396,23 +396,40 @@ size_t substitute_path_prefix(char path[PATH_MAX], size_t old_prefix_len,
     size_t path_len = strlen(path);
     size_t new_len;
 
+    /* new_prefix 是 "/"（如 detranslate 回 guest 根）：
+     * 结果 = 剩余部分（path[old_prefix_len..]，其自身已含前导 '/'，故 new_prefix
+     * 隐含其中）；边界：整个路径被替换时结果应为 "/"（原代码得空串的 bug）。 */
     if (new_prefix_len == 1) {
         new_len = path_len - old_prefix_len;
-        if (new_len > 0)
-            memmove(path, path + old_prefix_len, new_len);
-        else
+        if (new_len == 0) {
             path[0] = '/';
+            new_len = 1;
+        }
+        else
+            memmove(path, path + old_prefix_len, new_len);
         path[new_len] = '\0';
         return new_len;
     }
 
+    /* old_prefix 是 "/"（guest 根绑定）：结果 = new_prefix + 完整路径（含前导 '/'），
+     * 路径长度 = new_prefix_len + path_len。
+     * 历史 bug：path_len==1（路径就是 "/"）时原 memmove 被跳过，path[new_prefix_len]
+     * 位置未写终止符，把调用者缓冲残留字节（栈垃圾）拼进结果——真机症状：
+     * stat("/") 翻译成 ".../rootfsq"（多一个 'q'）→ ENOENT → rm -rf 报
+     * "failed to get attributes of '/'"。线程池版因 worker 的 memset(result,0)
+     * 恰好清零掩盖了此 bug（83e37e0 移除线程池后暴露）。 */
     if (old_prefix_len == 1) {
+        if (path_len == 1) {
+            new_len = new_prefix_len;
+            if (new_len >= PATH_MAX) return -ENAMETOOLONG;
+            memcpy(path, new_prefix, new_prefix_len);
+            path[new_len] = '\0';
+            return new_len;
+        }
         new_len = new_prefix_len + path_len;
         if (new_len >= PATH_MAX) return -ENAMETOOLONG;
-        if (path_len > 1)
-            memmove(path + new_prefix_len, path, path_len);
+        memmove(path + new_prefix_len, path, path_len + 1);
         memcpy(path, new_prefix, new_prefix_len);
-        path[new_len] = '\0';
         return new_len;
     }
 
