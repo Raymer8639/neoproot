@@ -38,6 +38,11 @@
 #define DELETED_SUFFIX " (deleted)"
 #define DELETED_SUFFIX_LEN (sizeof(DELETED_SUFFIX)-1)
 #define MAX_LINK_SUFFIX 1000
+/* final 编号（%04d）上限：9999 = 数据本体 1 + 链接数 9998。
+ * 超限（第 9999 个链接）时 %04d 溢出为 5 位，parse_4digit 取尾 4 位
+ * 错乱（0000→0）→ 后续 unlink 误判计数归零删数据——必须提前拒绝。
+ * 返回 -EMLINK（与真硬链接超限同 errno），pnpm 等会自动 fallback copy。 */
+#define MAX_LINK_COUNT 9999
 #define SIZEOF_RELEVANT_STRUCT_STAT 72
 
 static int decrement_link_count(Tracee *tracee, Reg sysarg);
@@ -186,6 +191,10 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
         if (UNLIKELY(status < 0)) return status;
         size_t final_len = strlen(final);
         link_count = parse_4digit(final + final_len - 4) + 1;
+        /* 编号溢出保护：链接数到顶（第 9999 个链接会写出 5 位编号）
+         * → 拒绝并返回 EMLINK，让调用方（pnpm）fallback 到复制模式 */
+        if (UNLIKELY(link_count > MAX_LINK_COUNT))
+            return -EMLINK;
         strncpy(new_final, final, final_len - 4);
         snprintf(new_final + final_len - 4, 5, "%04d", link_count);
         status = rename(final, new_final);
