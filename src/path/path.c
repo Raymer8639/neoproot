@@ -11,7 +11,6 @@
 #include <stddef.h>
 #include <inttypes.h>
 #include <arm_neon.h>
-#include <pthread.h>
 #include <stdlib.h>
 
 #include "path/path.h"
@@ -35,184 +34,6 @@ static inline int is_proc_path(const char *s)
             s[5] == '/');
 }
 
-//生产者-消费者核心定义
-typedef struct PathTask PathTask;
-struct PathTask {
-    // 输入参数（只读）
-    Tracee *tracee;
-    int dir_fd;
-    bool deref_final;
-    char user_path[PATH_MAX];
-
-    // 输出结果
-    char result[PATH_MAX];
-    int ret_code;
-
-    // 任务同步（独立锁，无全局竞争）
-    pthread_mutex_t done_mutex;
-    pthread_cond_t done_cond;
-    int is_done;
-
-    // 队列节点
-    PathTask *next;
-};
-
-// 任务队列（生产者-消费者核心）
-static struct {
-    PathTask *head;
-    PathTask *tail;
-    pthread_mutex_t mutex;
-    pthread_cond_t has_task;
-    int shutdown;
-} task_queue = {
-    .head = NULL,
-    .tail = NULL,
-    .mutex = PTHREAD_MUTEX_INITIALIZER,
-    .has_task = PTHREAD_COND_INITIALIZER,
-    .shutdown = 0
-};
-
-static pthread_t worker_thread;
-static int thread_inited = 0;
-
-// 消费者工作线程（无锁冲突核心）
-static void* path_worker(void *arg)
-{
-    (void)arg;
-    PathTask *task;
-    char guest_path[PATH_MAX];
-    int ret;
-
-    while (1) {
-        // 1. 仅拿任务时加锁，拿完立刻释放，锁持有时间极短
-        pthread_mutex_lock(&task_queue.mutex);
-        while (!task_queue.head && !task_queue.shutdown) {
-            pthread_cond_wait(&task_queue.has_task, &task_queue.mutex);
-        }
-
-        if (task_queue.shutdown && !task_queue.head) {
-            pthread_mutex_unlock(&task_queue.mutex);
-            break;
-        }
-
-        // 取出任务，立刻释放队列锁
-        task = task_queue.head;
-        task_queue.head = task->next;
-        if (!task_queue.head) task_queue.tail = NULL;
-        pthread_mutex_unlock(&task_queue.mutex);
-
-        // 2. 路径计算全程无锁，绝对不会和proot内部锁冲突
-        memset(task->result, 0, PATH_MAX);
-        ret = 0;
-
-        if (is_proc_path(task->user_path)) {
-            memcpy(task->result, task->user_path, PATH_MAX - 1);
-            task->result[PATH_MAX - 1] = '\0';
-            ret = 0;
-            goto task_finish;
-        }
-
-        if (task->user_path[0] == '/') {
-            task->result[0] = '/';
-            task->result[1] = '\0';
-        } else if (task->dir_fd != AT_FDCWD) {
-            ret = readlink_proc_pid_fd(task->tracee->pid, task->dir_fd, task->result);
-            if (ret < 0) goto task_finish;
-            if (task->result[0] != '/') { ret = -ENOTDIR; goto task_finish; }
-            ret = detranslate_path(task->tracee, task->result, NULL);
-            if (ret < 0) goto task_finish;
-        } else {
-            ret = getcwd2(task->tracee, task->result);
-            if (ret < 0) goto task_finish;
-        }
-
-        ret = notify_extensions(task->tracee, GUEST_PATH, (intptr_t)task->result, (intptr_t)task->user_path);
-        if (ret < 0) goto task_finish;
-        if (ret == 0) {
-            ret = join_paths(2, guest_path, task->result, task->user_path);
-            if (ret < 0) goto task_finish;
-            ret = canonicalize(task->tracee, guest_path, task->deref_final, task->result, 0);
-            if (ret < 0) goto task_finish;
-            ret = substitute_binding(task->tracee, GUEST, task->result);
-            if (ret < 0) goto task_finish;
-        }
-        notify_extensions(task->tracee, TRANSLATED_PATH, (intptr_t)task->result, 0);
-        ret = 0;
-
-task_finish:
-        // 3. 仅通知任务完成时加任务独立锁，和队列锁完全隔离
-        task->ret_code = ret;
-        pthread_mutex_lock(&task->done_mutex);
-        task->is_done = 1;
-        pthread_cond_signal(&task->done_cond);
-        pthread_mutex_unlock(&task->done_mutex);
-    }
-
-    return NULL;
-}
-
-//  线程初始化（仅调用1次） 
-static void path_thread_init(void)
-{
-    if (__atomic_test_and_set(&thread_inited, __ATOMIC_SEQ_CST))
-        return;
-    pthread_create(&worker_thread, NULL, path_worker, NULL);
-}
-
-//  生产者提交任务（主线程调用） 
-static PathTask* path_task_submit(Tracee *tracee, int dir_fd, const char *user_path, bool deref_final)
-{
-    PathTask *task = malloc(sizeof(PathTask));
-    if (!task) return NULL;
-
-    // 初始化任务
-    memset(task, 0, sizeof(PathTask));
-    task->tracee = tracee;
-    task->dir_fd = dir_fd;
-    task->deref_final = deref_final;
-    strncpy(task->user_path, user_path, PATH_MAX - 1);
-    pthread_mutex_init(&task->done_mutex, NULL);
-    pthread_cond_init(&task->done_cond, NULL);
-    task->is_done = 0;
-
-    // 仅入队时加锁，入队完立刻释放
-    pthread_mutex_lock(&task_queue.mutex);
-    task->next = NULL;
-    if (task_queue.tail)
-        task_queue.tail->next = task;
-    else
-        task_queue.head = task;
-    task_queue.tail = task;
-    pthread_cond_signal(&task_queue.has_task);
-    pthread_mutex_unlock(&task_queue.mutex);
-
-    return task;
-}
-
-//  等待任务完成（主线程调用） 
-static int path_task_wait(PathTask *task, char result[PATH_MAX])
-{
-    if (!task || !result) return -EINVAL;
-
-    // 等待任务完成，仅用任务独立锁，无全局竞争
-    pthread_mutex_lock(&task->done_mutex);
-    while (!task->is_done) {
-        pthread_cond_wait(&task->done_cond, &task->done_mutex);
-    }
-    pthread_mutex_unlock(&task->done_mutex);
-
-    // 拷贝结果，释放资源
-    memcpy(result, task->result, PATH_MAX);
-    int ret = task->ret_code;
-
-    pthread_mutex_destroy(&task->done_mutex);
-    pthread_cond_destroy(&task->done_cond);
-    free(task);
-
-    return ret;
-}
-
-//  以下是你原版代码，完全未改动 
 int join_paths(int number_paths, char result[PATH_MAX], ...)
 {
     va_list paths;
@@ -367,16 +188,6 @@ int readlink_proc_pid_fd(pid_t pid, int fd, char path[PATH_MAX])
 int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
                    const char *user_path, bool deref_final)
 {
-    // 注释掉下面这行，就完全走你原版逻辑，线程池完全不启用
-    path_thread_init();
-
-    // 线程池模式
-    PathTask *task = path_task_submit(tracee, dir_fd, user_path, deref_final);
-    if (task) {
-        return path_task_wait(task, result);
-    }
-
-    // 降级走原版逻辑，绝对不会崩
     char guest_path[PATH_MAX];
     int ret;
 
@@ -418,7 +229,11 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 
 skip:
     notify_extensions(tracee, TRANSLATED_PATH, (intptr_t)result, 0);
-    return ret;
+    /* 必须返回 0：substitute_binding 成功时返回 1（“已替换”信号），
+     * 不能外泄给调用者（which/realpath2 等只认 0 为成功）。
+     * 2026-08-08 线程池删除后验证：原降级路径 return ret 泄漏 1
+     * → which 失败 → 启动 fatal（真机 nothread 版复现）。上游 proot 同。 */
+    return 0;
 }
 
 int detranslate_path(Tracee *tracee, char path[PATH_MAX], const char t_referrer[PATH_MAX])
