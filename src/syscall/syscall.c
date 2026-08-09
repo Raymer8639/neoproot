@@ -74,31 +74,30 @@ static inline long arm64_svc_direct(long sysnum, long a1, long a2, long a3, long
 }
 
 // 安全白名单：仅无副作用、只读、无需PRoot处理的系统调用
+// ⚠️ 2026-08-09 审查瘦身（对话十三）：移除以下错误项——
+//   getpid/getppid/gettid：SVC 在 tracer 进程执行，返回的是 uproot 自己的 pid，不是 tracee 的
+//   uname：绕过 --kernel-release 虚拟化（tracee 应看到模拟内核版本）
+//   sigpending：返回 tracer 挂起信号，非 tracee 的
+//   times：返回 tracer 进程 CPU 时间
+//   nanosleep/clock_nanosleep：tracer 自己睡眠 → 阻塞整个事件循环（所有 tracee 冻结）
+// 保留项均为系统级语义（时钟/随机数/系统信息），与进程无关，SVC 执行结果正确。
+// 注：clock_gettime 的 CLOCK_PROCESS/THREAD_CPUTIME_ID 仍会返回 tracer 的时间（罕见边角，可接受）
 __attribute__((always_inline, const))
 static inline bool is_svc_safe_syscall(word_t sysnum)
 {
     switch (sysnum) {
-        // 时间相关（最高频，无副作用）
+        // 时间相关（墙钟/单调时钟，系统级时钟源，与进程无关）
         case PR_gettimeofday:
         case PR_clock_gettime:
         case PR_clock_getres:
         case PR_time:
-        case PR_times:
-        case PR_nanosleep:
-        case PR_clock_nanosleep:
-        // 调度相关（无需PRoot处理）
+        // 调度相关（无副作用）
         case PR_sched_yield:
         case PR_sched_get_priority_max:
         case PR_sched_get_priority_min:
-        // 安全随机数
+        // 安全随机数（与进程无关）
         case PR_getrandom:
-        // 信号只读
-        case PR_sigpending:
-        // 进程信息只读
-        case PR_getpid:
-        case PR_getppid:
-        case PR_gettid:
-        case PR_uname:
+        // 系统信息（全局，与进程无关）
         case PR_sysinfo:
             return true;
         default:
