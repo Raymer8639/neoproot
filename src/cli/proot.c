@@ -54,11 +54,24 @@ static int handle_option_b(Tracee *restrict t, const Cli *restrict c, const char
         return -1;
     }
     char *guest = strchr(copy, ':');
+    bool readonly = false;
     if (guest) {
         *guest = '\0';
         guest++;
+        char *opt = strchr(guest, ':');
+        if (opt) {
+            *opt = '\0';
+            opt++;
+            if (STRCMP(opt, "ro") == 0)
+                readonly = true;
+            else if (opt[0] != '\0')
+                note(t, WARNING, USER, "unknown bind option '%s', ignored", opt);
+        }
     }
-    int ret = new_binding(t, copy, guest, true) ? 0 : -1;
+    Binding *b = new_binding(t, copy, guest, true);
+    if (b && readonly)
+        b->readonly = true;
+    int ret = b ? 0 : -1;
     talloc_free(copy);
     return ret;
 }

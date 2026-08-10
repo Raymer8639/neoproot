@@ -12,6 +12,7 @@ typedef struct binding {
 	Path host;
 	Path guest;
 
+	bool readonly;
 	bool need_substitution;
 	bool must_exist;
 
