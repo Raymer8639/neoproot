@@ -3,6 +3,7 @@
 #include <string.h>
 #include <errno.h>
 #include <stdint.h>
+#include <sys/sysinfo.h>
 #include <arm_neon.h>
 
 #include "syscall/syscall.h"
@@ -81,6 +82,9 @@ static inline long arm64_svc_direct(long sysnum, long a1, long a2, long a3, long
 //   times：返回 tracer 进程 CPU 时间
 //   nanosleep/clock_nanosleep：tracer 自己睡眠 → 阻塞整个事件循环（所有 tracee 冻结）
 // 保留项均为系统级语义（时钟/随机数/系统信息），与进程无关，SVC 执行结果正确。
+// ⚠️ 2026-08-12 指针写回修复（对话十五）：带指针参数的项（gettimeofday/clock_getres/
+//   getrandom/sysinfo）经 tracer 本地缓冲 SVC 执行 + write_data() 写回 tracee，
+//   修复上游 fed15d1 隐患（结果写入 tracer 内存、tracee 读不到）；getrandom 仅 ≤128B 直通。
 // 注：clock_gettime 的 CLOCK_PROCESS/THREAD_CPUTIME_ID 仍会返回 tracer 的时间（罕见边角，可接受）
 __attribute__((always_inline, const))
 static inline bool is_svc_safe_syscall(word_t sysnum)
@@ -219,27 +223,73 @@ void translate_syscall(Tracee *tracee)
 				const int ext_status = notify_extensions(tracee, SYSCALL_CHAINED_ENTER, 0, 0);
 				if (ext_status == 0) {
 					// 读取tracee的系统调用参数
-					const long a1 = peek_reg(tracee, CURRENT, SYSARG_1);
-					const long a2 = peek_reg(tracee, CURRENT, SYSARG_2);
+					long a1 = peek_reg(tracee, CURRENT, SYSARG_1);
+					long a2 = peek_reg(tracee, CURRENT, SYSARG_2);
 					const long a3 = peek_reg(tracee, CURRENT, SYSARG_3);
 					const long a4 = peek_reg(tracee, CURRENT, SYSARG_4);
 					const long a5 = peek_reg(tracee, CURRENT, SYSARG_5);
 					const long a6 = peek_reg(tracee, CURRENT, SYSARG_6);
 
-					// 执行SVC直接调用，无ptrace嵌套开销
-					const long ret = arm64_svc_direct(sysnum, a1, a2, a3, a4, a5, a6);
+					/* ---- 指针参数写回机制（2026-08-12 修复上游 fed15d1 隐患）----
+					 * SVC 在 tracer 进程内执行：若直接传 tracee 的指针，内核会把结果写入
+					 * tracer 自己的地址空间，tracee 读不到（gettimeofday/clock_getres/
+					 * getrandom/sysinfo 均受影响）。
+					 * 修法：指针参数改指 tracer 栈上缓冲 → SVC 执行 → 成功后用
+					 * write_data()（PTRACE_POKEDATA）把缓冲写回 tracee 原地址。
+					 * 缓冲大小（ARM64）：timeval 16B / timespec 16B / timezone 8B / sysinfo 112B */
+					uint64_t svc_buf1[16]; /* 128B：timeval / timespec / sysinfo */
+					uint64_t svc_buf2[4];  /* 32B：timezone / timespec */
+					word_t orig_ptr1 = 0, orig_ptr2 = 0;
+					size_t wb_size1 = 0, wb_size2 = 0;
+					bool svc_ok = true;
 
-					// 回填结果到tracee寄存器
-					poke_reg(tracee, SYSARG_RESULT, (word_t)ret);
-					// 设置为空系统调用，内核不会重复执行
-					set_sysnum(tracee, PR_void);
+					switch (sysnum) {
+					case PR_gettimeofday: /* struct timeval*（16B）+ struct timezone*（8B，可空） */
+						if (a1 != 0) { orig_ptr1 = (word_t)a1; wb_size1 = 16; a1 = (long)svc_buf1; }
+						if (a2 != 0) { orig_ptr2 = (word_t)a2; wb_size2 = 8;  a2 = (long)svc_buf2; }
+						break;
+					case PR_clock_gettime:
+					case PR_clock_getres: /* struct timespec*（16B，可空） */
+						if (a2 != 0) { orig_ptr2 = (word_t)a2; wb_size2 = 16; a2 = (long)svc_buf2; }
+						break;
+					case PR_getrandom: /* void* 缓冲：仅限小请求直通，大请求回退原版路径 */
+						if (a2 > (long)sizeof(svc_buf1)) { svc_ok = false; }
+						else if (a1 != 0) { orig_ptr1 = (word_t)a1; wb_size1 = (size_t)a2; a1 = (long)svc_buf1; }
+						break;
+					case PR_sysinfo: /* struct sysinfo*（112B） */
+						if (a1 != 0) { orig_ptr1 = (word_t)a1; wb_size1 = sizeof(struct sysinfo); a1 = (long)svc_buf1; }
+						break;
+					default: /* 无指针项：time / sched_yield / sched_get_priority_* */
+						break;
+					}
 
-					// 保存寄存器状态，完全兼容原版后续流程
-					save_current_regs(tracee, ORIGINAL);
-					save_current_regs(tracee, MODIFIED);
+					if (svc_ok) {
+						// 执行SVC直接调用，无ptrace嵌套开销
+						long ret = arm64_svc_direct(sysnum, a1, a2, a3, a4, a5, a6);
 
-					// 跳转到原版后续流程，不破坏任何逻辑
-					goto svc_direct_done;
+						// 成功时把 tracer 缓冲写回 tracee（getrandom 实际写入 = 返回值字节数）
+						if (ret >= 0) {
+							if (sysnum == PR_getrandom)
+								wb_size1 = (size_t)ret;
+							if (orig_ptr1 != 0 && wb_size1 > 0)
+								(void)write_data(tracee, orig_ptr1, svc_buf1, wb_size1);
+							if (orig_ptr2 != 0 && wb_size2 > 0)
+								(void)write_data(tracee, orig_ptr2, svc_buf2, wb_size2);
+						}
+
+						// 回填结果到tracee寄存器
+						poke_reg(tracee, SYSARG_RESULT, (word_t)ret);
+						// 设置为空系统调用，内核不会重复执行
+						set_sysnum(tracee, PR_void);
+
+						// 保存寄存器状态，完全兼容原版后续流程
+						save_current_regs(tracee, ORIGINAL);
+						save_current_regs(tracee, MODIFIED);
+
+						// 跳转到原版后续流程，不破坏任何逻辑
+						goto svc_direct_done;
+					}
+					/* svc_ok == false（getrandom 大缓冲等）→ 落回原版 translate 流程 */
 				}
 			}
 #endif
