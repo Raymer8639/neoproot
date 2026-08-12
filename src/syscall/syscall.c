@@ -265,7 +265,11 @@ void translate_syscall(Tracee *tracee)
 
 					if (svc_ok) {
 						// 执行SVC直接调用，无ptrace嵌套开销
-						long ret = arm64_svc_direct(sysnum, a1, a2, a3, a4, a5, a6);
+						// ⚠️ 2026-08-12 修复：必须用 detranslate 后的内核号（上游 fed15d1 直接用
+						//   PR 内部枚举号 → SVC 执行的是错误 syscall（如 getrandom=123 实际是
+						//   sched_getaffinity）→ 全部失败，SVC_DIRECT 从未真正生效
+						const word_t svc_sysnum = detranslate_sysnum(get_abi(tracee), sysnum);
+						const long ret = arm64_svc_direct(svc_sysnum, a1, a2, a3, a4, a5, a6);
 
 						// 成功时把 tracer 缓冲写回 tracee（getrandom 实际写入 = 返回值字节数）
 						if (ret >= 0) {
