@@ -3,6 +3,7 @@
 #include <string.h>
 #include <errno.h>
 #include <stdint.h>
+#include <time.h>
 #include <sys/sysinfo.h>
 #include <arm_neon.h>
 
@@ -250,6 +251,15 @@ void translate_syscall(Tracee *tracee)
 						break;
 					case PR_clock_gettime:
 					case PR_clock_getres: /* struct timespec*（16B，可空） */
+						/* CLOCK_PROCESS/THREAD_CPUTIME_ID 是进程/线程相关时钟：SVC 在 tracer
+						 * 内执行会返回 uproot 的 CPU 时间（2026-08-12 修复后 SVC 真正生效，
+						 * 此边角暴露）→ 回退原版路径由 tracee 自己执行。clock_getres 的分辨率
+						 * 是系统级常量与进程无关，无需排除。 */
+						if (sysnum == PR_clock_gettime
+						    && (a1 == (long)CLOCK_PROCESS_CPUTIME_ID || a1 == (long)CLOCK_THREAD_CPUTIME_ID)) {
+							svc_ok = false;
+							break;
+						}
 						if (a2 != 0) { orig_ptr2 = (word_t)a2; wb_size2 = 16; a2 = (long)svc_buf2; }
 						break;
 					case PR_getrandom: /* void* 缓冲：仅限小请求直通，大请求回退原版路径 */
@@ -289,6 +299,11 @@ void translate_syscall(Tracee *tracee)
 						// 保存寄存器状态，完全兼容原版后续流程
 						save_current_regs(tracee, ORIGINAL);
 						save_current_regs(tracee, MODIFIED);
+
+						// SVC 直通成功：显式置 status = 0（跳过 translate_syscall_enter
+						// 导致后续 "if (status < 0)" 读未初始化值，垃圾值可能覆盖正确返回——
+						// 2026-08-12 排查发现，虽未实测触发但属未定义行为）
+						status = 0;
 
 						// 跳转到原版后续流程，不破坏任何逻辑
 						goto svc_direct_done;
