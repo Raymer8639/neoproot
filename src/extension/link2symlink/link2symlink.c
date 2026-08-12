@@ -8,6 +8,9 @@
 #include <limits.h>
 #include <ctype.h>
 #include <fcntl.h>
+#include <sys/ptrace.h>  /* PTRACE_SYSCALL, */
+#include <stdbool.h>     /* bool, */
+#include <talloc.h>      /* talloc_*, */
 
 #include "cli/note.h"
 #include "extension/extension.h"
@@ -278,8 +281,9 @@ static HOT int decrement_link_count(Tracee *restrict tracee, Reg path_sysarg) {
     return 0;
 }
 
-static HOT int handle_sysexit_end(Tracee *restrict tracee) {
-    if (UNLIKELY(!tracee)) return 0;
+static HOT int handle_sysexit_end(Extension *extension) {
+    if (UNLIKELY(!extension)) return 0;
+    Tracee *restrict tracee = TRACEE(extension);
     word_t sysnum = get_sysnum(tracee, ORIGINAL);
     word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
     struct stat final_stat, statl;
@@ -398,6 +402,174 @@ static FORCE_INLINE bool is_l2s_internal_name(const char *name) {
         if (UNLIKELY(!isdigit((unsigned char)name[len - i]))) return false;
     }
     return true;
+}
+
+/* ---- 上游 7ff389a1 移植：/proc/<pid>/fd/<fd> 名字替换 ----
+ * 内核只认识 l2s 存储名（.l2s.<name><NNNN>.0002），在 /proc/<pid>/fd/<fd>
+ * 上报的就是它；open(O_PATH)+readlink(/proc/self/fd/N) 类程序
+ * （typescript-go、musl realpath(3)）因此拿到内部名。本机制记住 tracee
+ * 打开描述符时用的链名，readlink 出口换回（事件 READLINK_PROC_FD）。 */
+
+typedef struct {
+	/* 正在翻译路径的最后一个组件被解引用前的 host 路径（链名）；
+	 * 空 = 本次路径的末组件不是 l2s 链。 */
+	char final_component[PATH_MAX];
+
+	/* 当前 syscall 被重定向走的假硬链接名；exit 阶段拿到 fd 号后
+	 * 登记进 fd_cache，然后清空。 */
+	char pending_link[PATH_MAX];
+} Link2SymlinkConfig;
+
+static FORCE_INLINE Link2SymlinkConfig *get_config(Extension *extension, bool allocate) {
+	if (UNLIKELY(extension->config == NULL)) {
+		if (!allocate)
+			return NULL;
+		extension->config = talloc_zero(extension, Link2SymlinkConfig);
+	}
+	return talloc_get_type(extension->config, Link2SymlinkConfig);
+}
+
+static FORCE_INLINE bool is_open_syscall(Sysnum sysnum) {
+	switch (sysnum) {
+	case PR_creat:
+	case PR_open:
+	case PR_openat:
+		/* 注：本 fork 无 PR_openat2 sysnum（scicat 基线早于 openat2），
+		 * 上游含之；openat2 场景不做 fd 换名，其余一致。 */
+		return true;
+	default:
+		return false;
+	}
+}
+
+/* host_path 是否为 l2s 目录里的【最终数据文件】".l2s.<name><NNNN>.0002"
+ * （中间链接 ".l2s.<name><NNNN>" 数字前无点，这里排除） */
+static FORCE_INLINE bool is_l2s_file(const char *host_path) {
+	char *name = get_filename((char *)host_path, NULL);
+	size_t len = strlen(name);
+	if (UNLIKELY(strncmp(name, PREFIX, PREFIX_LEN) != 0)) return false;
+	if (UNLIKELY(len < PREFIX_LEN + 5)) return false; /* 5 = strlen(".0002") */
+	if (UNLIKELY(name[len - 5] != '.')) return false;
+	for (int i = 1; i <= 4; i++)
+		if (UNLIKELY(!isdigit((unsigned char)name[len - i]))) return false;
+	return true;
+}
+
+/* 解假硬链接链：link(链) -> intermediate(中间链) -> final(数据文件) */
+static FORCE_INLINE int resolve_faked_hard_link(const char link[PATH_MAX], char final[PATH_MAX]) {
+	char intermediate[PATH_MAX] ALIGNED;
+	int status = my_readlink(link, intermediate, PATH_MAX);
+	if (UNLIKELY(status < 0)) return status;
+	char *name = get_filename(intermediate, NULL);
+	if (UNLIKELY(strncmp(name, PREFIX, PREFIX_LEN) != 0)) return -EINVAL;
+	status = my_readlink(intermediate, final, PATH_MAX);
+	return UNLIKELY(status < 0) ? status : 0;
+}
+
+/* 经假硬链接打开的 fd 登记表：内核只知道 l2s 存储名，这里记住 tracee
+ * 用的名字。不做 close/dup/fork 簿记：条目失效在使用时检出后丢弃。 */
+#define FD_CACHE_SIZE 64
+
+static struct {
+	pid_t pid;
+	int fd;
+	char *link;
+} fd_cache[FD_CACHE_SIZE];
+static size_t fd_cache_index;
+
+static void remember_fd(pid_t pid, int fd, const char link[PATH_MAX]) {
+	size_t index;
+	size_t slot = FD_CACHE_SIZE;
+	char *copy;
+
+	/* 复用同一描述符的旧条目，避免缓存被陈旧副本塞满 */
+	for (index = 0; index < FD_CACHE_SIZE; index++) {
+		if (fd_cache[index].link != NULL
+		    && fd_cache[index].pid == pid && fd_cache[index].fd == fd) {
+			slot = index;
+			break;
+		}
+	}
+	if (slot == FD_CACHE_SIZE) {
+		slot = fd_cache_index;
+		fd_cache_index = (fd_cache_index + 1) % FD_CACHE_SIZE;
+	}
+
+	/* 条目与 PRoot 同寿（描述符比打开它的进程活得久、线程不共享 pid），
+	 * 不从任何 tracee talloc。 */
+	copy = talloc_strdup(NULL, link);
+	if (copy == NULL)
+		return;
+
+	talloc_free(fd_cache[slot].link);
+	fd_cache[slot].link = copy;
+	fd_cache[slot].pid  = pid;
+	fd_cache[slot].fd   = fd;
+}
+
+/* 返回 pid 进程的 fd 打开时用的链名；未知返回 NULL。线程共享描述符但
+ * 不共享 pid——兄弟线程的条目作兜底返回，调用方负责校验文件仍一致。 */
+static const char *recall_fd(pid_t pid, int fd) {
+	const char *fallback = NULL;
+	size_t index;
+
+	for (index = 0; index < FD_CACHE_SIZE; index++) {
+		if (fd_cache[index].link == NULL || fd_cache[index].fd != fd)
+			continue;
+		if (fd_cache[index].pid == pid)
+			return fd_cache[index].link;
+		fallback = fd_cache[index].link;
+	}
+	return fallback;
+}
+
+/* READLINK_PROC_FD：把内核上报的 l2s 存储名替换为 tracee 打开时用的名字 */
+static FORCE_INLINE void readlink_proc_fd(struct readlink_proc_fd_state *state) {
+	char final[PATH_MAX] ALIGNED;
+	const char *link;
+
+	if (!is_l2s_file(state->host_path))
+		return;
+
+	link = recall_fd(state->pid, state->fd);
+	if (link == NULL)
+		return;
+
+	/* fd 号会复用、链可能已删——确认记住的名字仍指向同一文件 */
+	if (resolve_faked_hard_link(link, final) < 0)
+		return;
+	if (strcmp(final, state->host_path) != 0)
+		return;
+
+	strcpy(state->host_path, link);
+	state->substituted = true;
+}
+
+/* open 类 syscall 被重定向到 l2s 数据文件时，记住 tracee 用的链名
+ * （canonicalize 期间记录在 final_component），并强制 exit 停靠拿 fd 号。 */
+static FORCE_INLINE void remember_opened_link(Extension *extension, const char host_path[PATH_MAX]) {
+	Tracee *tracee = TRACEE(extension);
+	Link2SymlinkConfig *config;
+	char final[PATH_MAX] ALIGNED;
+
+	if (!is_l2s_file(host_path))
+		return;
+
+	config = get_config(extension, false);
+	if (config == NULL || config->final_component[0] == '\0')
+		return;
+
+	/* tracee 可能直接点名 l2s 内部文件——链解析失败，跳过 */
+	if (resolve_faked_hard_link(config->final_component, final) < 0)
+		return;
+	if (strcmp(final, host_path) != 0)
+		return;
+
+	strcpy(config->pending_link, config->final_component);
+
+	/* fd 号只有 exit 阶段才知，seccomp 默认跳过 exit——强制停靠 */
+	tracee->sysexit_pending = true;
+	tracee->restart_how = PTRACE_SYSCALL;
 }
 
 /* open/execve 物化（tsgo/tsc 7.0 兼容，方案 C）：
@@ -530,8 +702,9 @@ static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *pa
     return 1;
 }
 
-static FORCE_INLINE void translated_path(Tracee *restrict tracee, char *restrict translated_path) {
-    if (UNLIKELY(!tracee || !translated_path)) return;
+static FORCE_INLINE void translated_path(Extension *restrict extension, char *restrict translated_path) {
+    if (UNLIKELY(!extension || !translated_path)) return;
+    Tracee *restrict tracee = TRACEE(extension);
     Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
     bool is_readlink_syscall = false;
     switch (sysnum) {
@@ -586,6 +759,10 @@ static FORCE_INLINE void translated_path(Tracee *restrict tracee, char *restrict
     if (UNLIKELY(strncmp(link_filename, PREFIX, PREFIX_LEN) != 0)) return;
     status = my_readlink(link_target, final_target, PATH_MAX);
     if (UNLIKELY(status < 0)) return;
+    /* 上游 7ff389a1：open 被重定向到 l2s 数据文件时，记下 tracee 用的链名
+     * （供 /proc/<pid>/fd/<fd> readlink 换名），并强制 exit 停靠拿 fd 号。 */
+    if (UNLIKELY(is_open_syscall(sysnum)))
+        remember_opened_link(extension, final_target);
     strcpy(translated_path, final_target);
 }
 
@@ -634,12 +811,19 @@ static FORCE_INLINE int handle_linkat_from_proc_fd(Tracee *restrict tracee) {
 }
 
 HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
-                               intptr_t data1, intptr_t data2 UNUSED) {
+                               intptr_t data1, intptr_t data2) {
     if (UNLIKELY(!extension)) return -EINVAL;
     Tracee *tracee = TRACEE(extension);
     int status;
 
     switch (event) {
+    case SYSCALL_ENTER_START: {
+        /* 忘掉未被 exit 阶段消费的解引用记录（上游 7ff389a1） */
+        Link2SymlinkConfig *config = get_config(extension, false);
+        if (config != NULL)
+            config->pending_link[0] = '\0';
+        return 0;
+    }
     case SYSCALL_ENTER_END: {
         Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
         switch (sysnum) {
@@ -676,8 +860,21 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
             return 0;
         }
     }
-    case SYSCALL_EXIT_END:
-        return handle_sysexit_end(tracee);
+    case SYSCALL_EXIT_END: {
+        /* open 类 syscall 的 exit 停靠只为拿 fd 号（上游 7ff389a1
+         * 登记 fd_cache）；fd 可为任意非负值，先于其他 exit 处理。 */
+        if (UNLIKELY(is_open_syscall(get_sysnum(tracee, ORIGINAL)))) {
+            Link2SymlinkConfig *config = get_config(extension, false);
+            word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+            if (config != NULL && config->pending_link[0] != '\0') {
+                if ((int) result >= 0)
+                    remember_fd(tracee->pid, (int) result, config->pending_link);
+                config->pending_link[0] = '\0';
+            }
+            return 0;
+        }
+        return handle_sysexit_end(extension);
+    }
     case INITIALIZATION: {
         static const FilteredSysnum filtered_sysnums[] = {
             { PR_link,        FILTER_SYSEXIT },
@@ -701,6 +898,13 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
         return 0;
     }
     case GUEST_PATH: {
+        /* 新路径开始 canonicalize——清掉上一路径的末组件记录
+         * （上游 7ff389a1 的 HOST_PATH 消费配对） */
+        {
+            Link2SymlinkConfig *config = get_config(extension, false);
+            if (config != NULL)
+                config->final_component[0] = '\0';
+        }
         /* execve 物化（方案 C）：canonicalize 解析链之前、翻译前拦截。
          * 此时 user_path 仍是原始 guest 路径（symlink 链状态），
          * 用 substitute_binding 转成 host 路径后物化（只做前缀替换，不解析链）。
@@ -768,11 +972,31 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
         }
         return 0;
     }
+    case HOST_PATH: {
+        /* 记录最终组件被解引用前的名字（data2 = 首个通知，即
+         * IS_FINAL && recursion==0）。只有 open 类 syscall 需要。 */
+        Link2SymlinkConfig *config;
+
+        if (!(bool) data2)
+            return 0;
+        if (!is_open_syscall(get_sysnum(tracee, ORIGINAL)))
+            return 0;
+
+        config = get_config(extension, true);
+        if (config == NULL || config->final_component[0] != '\0')
+            return 0;
+
+        strcpy(config->final_component, (const char *) data1);
+        return 0;
+    }
     case TRANSLATED_PATH:
-        translated_path(tracee, (char *)data1);
+        translated_path(extension, (char *)data1);
         return 0;
     case STATX_SYSCALL:
         link2symlink_handle_statx((struct statx_syscall_state *)data1);
+        return 0;
+    case READLINK_PROC_FD:
+        readlink_proc_fd((struct readlink_proc_fd_state *)data1);
         return 0;
     case INHERIT_PARENT:
         return 1;

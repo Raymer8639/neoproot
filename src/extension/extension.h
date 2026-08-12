@@ -41,6 +41,15 @@ typedef enum {
 
 	STATX_SYSCALL,
 
+	/* The tracee has read the content of "/proc/<PID>/fd/<FD>" and
+	 * PRoot is about to report it: "(struct readlink_proc_fd_state *)
+	 * data1" -- defined in syscall/syscall.h -- tells which descriptor
+	 * was read and holds the host path the kernel answered with.  An
+	 * extension may replace that path when the kernel names the file
+	 * differently than the tracee does, as link2symlink does for the
+	 * files it hides in the l2s directory.  */
+	READLINK_PROC_FD,
+
 	EXT_EVENT_COUNT  // <--- 只加这一行（事件总数）
 } ExtensionEvent;
 

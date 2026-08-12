@@ -26,6 +26,7 @@
 #include "ptrace/wait.h"
 #include "extension/extension.h"
 #include "arch.h"
+#include <stdio.h>      /* sscanf(3), */
 
 void translate_syscall_exit(Tracee *tracee)
 {
@@ -259,6 +260,12 @@ void translate_syscall_exit(Tracee *tracee)
     case PR_readlinkat: {
         char referee[PATH_MAX];
         char referer[PATH_MAX];
+        /* 上游 7ff389a1：tracee 读 /proc/<pid>/fd/<fd> 时，让扩展
+         * （link2symlink）有机会把内核上报的 .l2s 内部名替换为
+         * tracee 打开该描述符时用的名字。 */
+        struct readlink_proc_fd_state proc_fd = {
+            .pid = 0, .fd = -1, .host_path = referee, .substituted = false,
+        };
         size_t old_size;
         size_t new_size;
         size_t max_size;
@@ -308,6 +315,20 @@ void translate_syscall_exit(Tracee *tracee)
             status = readlink_proc_pid_fd(tracee->pid, dirfd, referer);
             if (status < 0)
                 break;
+            proc_fd.pid = tracee->pid;
+            proc_fd.fd  = (int) dirfd;
+        } else {
+            /* referer 形如 /proc/<pid>/fd/<fd>（"/proc/self" 已在
+             * enter 阶段 canonicalize 成真实 pid）→ 记下描述符编号。 */
+            int fd_pid;
+            int fd_number;
+            char extra;
+
+            if (sscanf(referer, "/proc/%d/fd/%d%c", &fd_pid, &fd_number, &extra) == 2
+                && fd_number >= 0) {
+                proc_fd.pid = (pid_t) fd_pid;
+                proc_fd.fd  = fd_number;
+            }
         }
 
         /* /proc/self/exe（及当前 tracee 的 /proc/<pid>/exe）：内核返回的是
@@ -401,11 +422,23 @@ void translate_syscall_exit(Tracee *tracee)
             }
         }
 
+        /* 让扩展替换内核上报的路径（link2symlink：fd 打开时
+         * 用的名字）；替换后必须写回 tracee。 */
+        if (proc_fd.fd >= 0) {
+            status = notify_extensions(tracee, READLINK_PROC_FD, (intptr_t) &proc_fd, 0);
+            if (status < 0)
+                break;
+        }
+
         status = detranslate_path(tracee, referee, referer);
         if (status < 0)
             break;
-        if (status == 0)
-            goto end;
+        if (status == 0) {
+            /* 路径无需转换……除非上面刚被替换，此时要告知 tracee。 */
+            if (!proc_fd.substituted)
+                goto end;
+            status = strlen(referee) + 1;
+        }
 
 write_back:
         if ((size_t)status < max_size) {
