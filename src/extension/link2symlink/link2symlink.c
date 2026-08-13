@@ -498,6 +498,34 @@ static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *pa
         return 0;
     }
 
+    /* 物化后清理链（2026-08-13 孤儿链 GC 修复）：物化把 path 从链成员
+     * 变成普通副本，相当于该成员退出家族——但 tracer 直接 unlink 不经
+     * decrement_link_count，计数永不归零，家族残骸（intermediate+final）
+     * 永远滞留 /.l2s（容器已积 2.8G 孤儿）。这里补做 decrement：
+     * 计数>0 → final 改名（NNNN-1）+ 重建共享中间链接（其他成员仍可达）；
+     * 计数=0 → 删 intermediate+final（家族除名）。
+     * 必须在复制完成之后：计数=0 会删 final 数据，副本已保存数据无损失。 */
+    size_t final_len = strlen(final_host);
+    int link_count = parse_4digit(final_host + final_len - 4) - 1;
+    if (LIKELY(link_count >= 0)) {
+        if (link_count > 0) {
+            char new_final[PATH_MAX] ALIGNED;
+            strncpy(new_final, final_host, final_len - 4);
+            snprintf(new_final + final_len - 4, 5, "%04d", link_count);
+            if (LIKELY(rename(final_host, new_final) == 0)) {
+                notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t)final_host, (intptr_t)new_final);
+                unlink(inter_host);
+                symlink(new_final, inter_host);
+                VERBOSE(tracee, 1, "link2symlink: materialize 退链：final 改名 %s -> %s", final_host, new_final);
+            }
+        } else {
+            unlink(inter_host);
+            unlink(final_host);
+            notify_extensions(tracee, LINK2SYMLINK_UNLINK, (intptr_t)final_host, 0);
+            VERBOSE(tracee, 1, "link2symlink: materialize 退链：家族除名 %s", final_host);
+        }
+    }
+
     VERBOSE(tracee, 1, "link2symlink: materialized \"%s\" (copied from \"%s\")", path, final_host);
     return 1;
 }
