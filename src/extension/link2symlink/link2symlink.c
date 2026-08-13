@@ -696,7 +696,14 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
          * 对所有 open 触发（不限于 O_PATH）：tsgo 会以多种方式访问类型文件，
          * 全量物化保证一次 tsc 即全部就位；物化是幂等的（普通文件跳过），
          * 数据仍 1 份（rename 移动），store 链由反向 symlink 保持完整。 */
-        if (UNLIKELY(g_sysnum == PR_open || g_sysnum == PR_openat)) {
+        /* node ESM 场景（readlink 物化，2026-08-13 新增）：libuv 的 realpath
+         * 不先 lstat、直接 readlink 循环，链文件 readlink 会返回 /.l2s 中间链
+         * → node 按扩展名 .0002 判定模块格式 → ERR_UNKNOWN_FILE_EXTENSION
+         * （pnpm install 后 pnpm dev/vite 崩溃，8.13 实测）。在 readlink 执行前
+         * 物化：物化后是普通文件，readlink 自然 EINVAL → realpath 停在原路径
+         * （扩展名正确）；非链 symlink 不受影响（materialize 幂等跳过）。 */
+        if (UNLIKELY(g_sysnum == PR_open || g_sysnum == PR_openat
+                     || g_sysnum == PR_readlink || g_sysnum == PR_readlinkat)) {
             char *user_path = (char *)data2;
             if (LIKELY(user_path && user_path[0] == '/')) {
                 char host_path[PATH_MAX] ALIGNED;
