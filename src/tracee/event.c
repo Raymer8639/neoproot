@@ -492,6 +492,12 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
                     break;
                 }
 
+                /* 2026-08-15 修复：after_enter 在函数顶部读取，首次 seccomp
+                 * 事件时仍是初值 false——若首事件恰好是 flags=0 的 syscall
+                 * 且内核为新顺序（通知在 sysenter 之后），会误入断言。
+                 * 用本次事件刚探测出的模式值处理首事件。 */
+                bool after_enter_now = after_enter;
+
                 // 【关键修复2】首次seccomp事件初始化，先判断事件类型再赋值
                 if (!seccomp_found) {
                     const bool is_sysenter = IS_IN_SYSENTER(tracee);
@@ -501,6 +507,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
                     atomic_signal_fence(memory_order_release);
                     atomic_store_explicit(&seccomp_detected, true, memory_order_release);
                     atomic_store_explicit(&seccomp_after_ptrace_enter, new_after_enter, memory_order_release);
+                    after_enter_now = new_after_enter;
                     
                     VERBOSE(tracee, 1, "ptrace acceleration (seccomp mode 2, %s syscall order) enabled",
                             new_after_enter ? "new" : "old");
@@ -509,7 +516,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
                 tracee->skip_next_seccomp_signal = false;
 
                 // 【关键修复3】新seccomp模式下，非sysenter事件直接跳过，不触发断言
-                if (after_enter && !IS_IN_SYSENTER(tracee)) {
+                if (after_enter_now && !IS_IN_SYSENTER(tracee)) {
                     tracee->restart_how = tracee->last_restart_how;
                     VERBOSE(tracee, 6, "skipping PTRACE_EVENT_SECCOMP for already handled sysenter");
                     break;
@@ -527,7 +534,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 
                 // SYSEXIT事件处理
                 if ((flags & FILTER_SYSEXIT) != 0 || sysexit_necessary) {
-                    if (after_enter) {
+                    if (after_enter_now) {
                         tracee->restart_how = PTRACE_SYSCALL;
                         translate_syscall(tracee);
                     }

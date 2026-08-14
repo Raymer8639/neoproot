@@ -324,7 +324,14 @@ void translate_syscall_exit(Tracee *tracee)
             int fd_number;
             char extra;
 
-            if (sscanf(referer, "/proc/%d/fd/%d%c", &fd_pid, &fd_number, &extra) == 2
+            /* fork 的 canon 不把 /proc/self 解析成数字 pid（实测 referer
+             * 原样 = /proc/self/fd/N）——self 形式按本进程处理 */
+            if (sscanf(referer, "/proc/self/fd/%d%c", &fd_number, &extra) == 1
+                && fd_number >= 0) {
+                proc_fd.pid = tracee->pid;
+                proc_fd.fd  = fd_number;
+            }
+            else if (sscanf(referer, "/proc/%d/fd/%d%c", &fd_pid, &fd_number, &extra) == 2
                 && fd_number >= 0) {
                 proc_fd.pid = (pid_t) fd_pid;
                 proc_fd.fd  = fd_number;

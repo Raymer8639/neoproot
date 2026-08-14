@@ -8,7 +8,6 @@
 #include <limits.h>
 #include <ctype.h>
 #include <fcntl.h>
-#include <sys/ptrace.h>  /* PTRACE_SYSCALL, */
 #include <stdbool.h>     /* bool, */
 #include <talloc.h>      /* talloc_*, */
 
@@ -550,6 +549,7 @@ static FORCE_INLINE void readlink_proc_fd(struct readlink_proc_fd_state *state) 
 static FORCE_INLINE void remember_opened_link(Extension *extension, const char host_path[PATH_MAX]) {
 	Tracee *tracee = TRACEE(extension);
 	Link2SymlinkConfig *config;
+	char link_host[PATH_MAX] ALIGNED;
 	char final[PATH_MAX] ALIGNED;
 
 	if (!is_l2s_file(host_path))
@@ -559,17 +559,24 @@ static FORCE_INLINE void remember_opened_link(Extension *extension, const char h
 	if (config == NULL || config->final_component[0] == '\0')
 		return;
 
+	/* final_component 记录的是 tracee 视角的 guest 路径（GUEST_PATH
+	 * 事件采集；HOST_PATH 在 glue_type!=0 时不发，手机 /proc glue 即此）。
+	 * 转成 host 路径后才能 readlink 解析链。 */
+	strcpy(link_host, config->final_component);
+	if (UNLIKELY(substitute_binding(tracee, GUEST, link_host) < 0))
+		return;
+
 	/* tracee 可能直接点名 l2s 内部文件——链解析失败，跳过 */
-	if (resolve_faked_hard_link(config->final_component, final) < 0)
+	if (resolve_faked_hard_link(link_host, final) < 0)
 		return;
 	if (strcmp(final, host_path) != 0)
 		return;
 
-	strcpy(config->pending_link, config->final_component);
-
-	/* fd 号只有 exit 阶段才知，seccomp 默认跳过 exit——强制停靠 */
-	tracee->sysexit_pending = true;
-	tracee->restart_how = PTRACE_SYSCALL;
+	/* 存 host 形态：替换进 referee 后还会经 detranslate 剥前缀 */
+	strcpy(config->pending_link, link_host);
+	/* exit 停靠由 FILTER_SYSEXIT（INITIALIZATION 过滤表）保证——
+	 * 不在此设 sysexit_pending/restart_how：旧 seccomp 模式下会触发
+	 * event.c 的 IS_IN_SYSENTER 断言（2026-08-15 真机复现）。 */
 }
 
 /* open/execve 物化（tsgo/tsc 7.0 兼容，方案 C）：
@@ -734,6 +741,10 @@ static FORCE_INLINE void translated_path(Extension *restrict extension, char *re
             if (LIKELY(l2s_dir && l2s_dir[0] && strcmp(l2s_dir, "/") != 0)) {
                 snprintf(alt, sizeof(alt), "%s/%s", l2s_dir, filename);
                 if (LIKELY(access(alt, F_OK) == 0)) {
+                    /* 上游 7ff389a1：open 重定向到 l2s 数据文件，记原链名
+                     * （供 /proc/<pid>/fd/<fd> readlink 换名） */
+                    if (UNLIKELY(is_open_syscall(sysnum)))
+                        remember_opened_link(extension, alt);
                     strcpy(translated_path, alt);
                     return;
                 }
@@ -741,11 +752,17 @@ static FORCE_INLINE void translated_path(Extension *restrict extension, char *re
             /* PROOT_L2S_DIR=/ 或变量不可见时的常见情况：文件位于 host 根目录 */
             snprintf(alt, sizeof(alt), "/%s", filename);
             if (LIKELY(access(alt, F_OK) == 0)) {
+                if (UNLIKELY(is_open_syscall(sysnum)))
+                    remember_opened_link(extension, alt);
                 strcpy(translated_path, alt);
                 return;
             }
         }
-        /* 翻译路径存在（同目录模式）或映射失败：readlink 返回链接内容，其余继续链解析 */
+        /* 同目录模式（PROOT_L2S_DIR 在 rootfs 内，用户容器即此）：canon 已把
+         * 链解析到内部 final 路径——open 记下原链名（上游 7ff389a1）。
+         * 翻译路径存在或映射失败时：readlink 返回链接内容，其余继续链解析。 */
+        if (UNLIKELY(is_open_syscall(sysnum)))
+            remember_opened_link(extension, translated_path);
         if (is_readlink_syscall) return;
     } else if (is_readlink_syscall) {
         /* 普通路径上的 readlink 不做链解析，返回链接内容本身 */
@@ -877,6 +894,13 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
     }
     case INITIALIZATION: {
         static const FilteredSysnum filtered_sysnums[] = {
+            /* open 家族 FILTER_SYSEXIT（上游 7ff389a1 移植所需）：exit 停靠
+             * 拿 fd 号登记 fd_cache。直接设 sysexit_pending 会在旧 seccomp
+             * 模式触发 event.c IS_IN_SYSENTER 断言（真机复现）——fork 原生
+             * 机制 = FILTER_SYSEXIT（flags 与基础列表按位或合并）。 */
+            { PR_creat,       FILTER_SYSEXIT },
+            { PR_open,        FILTER_SYSEXIT },
+            { PR_openat,      FILTER_SYSEXIT },
             { PR_link,        FILTER_SYSEXIT },
             { PR_linkat,      FILTER_SYSEXIT },
             { PR_unlink,      FILTER_SYSEXIT },
@@ -904,6 +928,34 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
             Link2SymlinkConfig *config = get_config(extension, false);
             if (config != NULL)
                 config->final_component[0] = '\0';
+        }
+        /* 上游 7ff389a1 适配：记录 open 类 syscall 的原始 guest 路径
+         * （= tracee 打开时用的名字）。用 GUEST_PATH 而非 HOST_PATH：
+         * canon 只在 glue_type==0 时发 HOST_PATH（手机 /proc glue 不发）。
+         * 绝对路径时 data1(result) 仅为 "/"，完整路径在 data2(user_path)；
+         * 相对路径时 data1 为 cwd，需拼接。 */
+        {
+            Sysnum r_sysnum = get_sysnum(tracee, ORIGINAL);
+            if (UNLIKELY(is_open_syscall(r_sysnum))) {
+                Link2SymlinkConfig *config = get_config(extension, true);
+                const char *user_path = (const char *)data2;
+                const char *base = (const char *)data1;
+                if (config != NULL && user_path != NULL && base != NULL
+                    && config->final_component[0] == '\0') {
+                    if (user_path[0] == '/') {
+                        strcpy(config->final_component, user_path);
+                    } else {
+                        size_t bl = strlen(base);
+                        if (bl >= PATH_MAX) bl = PATH_MAX - 1;
+                        memcpy(config->final_component, base, bl);
+                        if (bl > 0 && base[bl - 1] != '/')
+                            config->final_component[bl++] = '/';
+                        strncpy(config->final_component + bl, user_path,
+                                PATH_MAX - bl - 1);
+                        config->final_component[PATH_MAX - 1] = '\0';
+                    }
+                }
+            }
         }
         /* execve 物化（方案 C）：canonicalize 解析链之前、翻译前拦截。
          * 此时 user_path 仍是原始 guest 路径（symlink 链状态），
@@ -970,23 +1022,6 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
                 return 1;
             }
         }
-        return 0;
-    }
-    case HOST_PATH: {
-        /* 记录最终组件被解引用前的名字（data2 = 首个通知，即
-         * IS_FINAL && recursion==0）。只有 open 类 syscall 需要。 */
-        Link2SymlinkConfig *config;
-
-        if (!(bool) data2)
-            return 0;
-        if (!is_open_syscall(get_sysnum(tracee, ORIGINAL)))
-            return 0;
-
-        config = get_config(extension, true);
-        if (config == NULL || config->final_component[0] != '\0')
-            return 0;
-
-        strcpy(config->final_component, (const char *) data1);
         return 0;
     }
     case TRANSLATED_PATH:
