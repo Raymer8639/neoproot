@@ -180,7 +180,7 @@ static HOT int handle_sysenter_end(Tracee *restrict tracee, Config *restrict con
             warned = true;
             note(tracee, WARNING, USER,
                  "kompat: this kernel doesn't support private futexes "
-                 "and uproot can't emulate them. Expect some troubles...");
+                 "and neoproot can't emulate them. Expect some troubles...");
         }
         poke_reg(tracee, SYSARG_2, operation & ~FUTEX_PRIVATE_FLAG);
         return 0;

@@ -77,7 +77,7 @@ static inline long arm64_svc_direct(long sysnum, long a1, long a2, long a3, long
 
 // 安全白名单：仅无副作用、只读、无需PRoot处理的系统调用
 // ⚠️ 2026-08-09 审查瘦身（对话十三）：移除以下错误项——
-//   getpid/getppid/gettid：SVC 在 tracer 进程执行，返回的是 uproot 自己的 pid，不是 tracee 的
+//   getpid/getppid/gettid：SVC 在 tracer 进程执行，返回的是 neoproot 自己的 pid，不是 tracee 的
 //   uname：绕过 --kernel-release 虚拟化（tracee 应看到模拟内核版本）
 //   sigpending：返回 tracer 挂起信号，非 tracee 的
 //   times：返回 tracer 进程 CPU 时间
@@ -252,7 +252,7 @@ void translate_syscall(Tracee *tracee)
 					case PR_clock_gettime:
 					case PR_clock_getres: /* struct timespec*（16B，可空） */
 						/* CLOCK_PROCESS/THREAD_CPUTIME_ID 是进程/线程相关时钟：SVC 在 tracer
-						 * 内执行会返回 uproot 的 CPU 时间（2026-08-12 修复后 SVC 真正生效，
+						 * 内执行会返回 neoproot 的 CPU 时间（2026-08-12 修复后 SVC 真正生效，
 						 * 此边角暴露）→ 回退原版路径由 tracee 自己执行。clock_getres 的分辨率
 						 * 是系统级常量与进程无关，无需排除。 */
 						if (sysnum == PR_clock_gettime

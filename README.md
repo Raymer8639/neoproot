@@ -1,4 +1,4 @@
-# neoproot（二进制名：uproot）
+# neoproot（二进制与项目同名；历史名 proot-scicat / uproot）
 
 > 下一代半原生轻量级容器：比官方 PRoot 更快、更稳、更小，专为 **ARM64 / Android (Termux)** 优化。
 
@@ -37,7 +37,7 @@ github.com/termux/proot（活跃维护）  ← 血缘源头 / 跟进目标
 - ✅ 消除进程退出时的 `signal 11` 警告，增加进程存活判断
 - ✅ 最大延迟 ↓ 40%+，更顺滑；线程更公平、抖动更小
 - ✅ C23/C++23 现代精简架构，放弃通用兼容换取 ARMv8.2 满血性能
-- ✅ 内置 `uproot.c` 主程序：自动处理 Termux 环境初始化（wake-lock、fd 上限、LD_* 清理），无需手工加启动参数
+- ✅ 内置 `neoproot.c` 主程序：自动处理 Termux 环境初始化（wake-lock、fd 上限、LD_* 清理），无需手工加启动参数
 - ✅ 移除上游魔改的路径翻译线程池（cond_wait 往返开销）：真机 syscall 处理速度与官方 PRoot 持平（lstat 304us/次 vs 原版 293-312us），修复 nvim 等高频操作卡顿
 - ✅ link2symlink 硬链接模拟全面兼容 pnpm / tsc（tsgo）——物化机制 + /proc/&lt;pid&gt;/fd/&lt;fd&gt; 名字替换（回移自 termux/proot 7ff389a1）解决 tsgo 的 O_PATH+readlink 真实路径探测（TS2307/TS6054/panic 全部解决）
 
@@ -61,11 +61,11 @@ github.com/termux/proot（活跃维护）  ← 血缘源头 / 跟进目标
 
 ### 方式一：使用已发布二进制（推荐）
 
-从 [Releases](https://github.com/Raymer8639/neoproot/releases) 下载 `uproot`，放入 `$PREFIX/bin` 并赋予执行权限：
+从 [Releases](https://github.com/Raymer8639/neoproot/releases) 下载 `neoproot`，放入 `$PREFIX/bin` 并赋予执行权限：
 
 ```sh
-chmod +x uproot
-mv uproot $PREFIX/bin/
+chmod +x neoproot
+mv neoproot $PREFIX/bin/
 ```
 
 ### 方式二：Termux 内源码构建
@@ -78,19 +78,19 @@ sh build.sh install     # 构建并安装到 $PREFIX/bin
 ```
 
 > `upx` 可选：用于压缩二进制减小体积（`--ultra-brute --lzma` 压缩后通常只有 1~2 MB）。
-> 也可用 `make -C src uproot MARCH="-march=native"` 针对你的 CPU 定制指令集。
+> 也可用 `make -C src neoproot MARCH="-march=native"` 针对你的 CPU 定制指令集。
 
 ## 使用容器
 
 ```sh
 # 以 root 身份进入 Debian/Ubuntu 容器（需已准备好 rootfs）
-uproot -0 -r /data/data/com.termux/files/home/rootfs \
+neoproot -0 -r /data/data/com.termux/files/home/rootfs \
     -b /dev -b /proc -b /sys -b /sdcard \
     /usr/bin/env -i HOME=/root TERM=${TERM} PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     /bin/bash --login
 ```
 
-与官方 PRoot 用法完全一致，但 **无需** 手动 `unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW` —— `uproot` 主程序会自动处理。
+与官方 PRoot 用法完全一致，但 **无需** 手动 `unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW` —— `neoproot` 主程序会自动处理。
 
 详细说明与 FAQ（node 报错 13、性能对比、VNC 等）见 [help.md](help.md)。
 

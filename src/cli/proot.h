@@ -70,9 +70,9 @@ static int post_initialize_exe(Tracee *, const Cli *, size_t, char *const *, siz
 
 static Cli proot_cli = {
     .version  = VERSION,
-    .name     = "uproot",
+    .name     = "neoproot",
     .subtitle = "chroot & bind mount without privileges",
-    .synopsis = "uproot [option]... [command]",
+    .synopsis = "neoproot [option]... [command]",
 
     .colophon =
         "Copyright (C) 2026 scicat, GPLv2+\n"

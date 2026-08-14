@@ -58,7 +58,7 @@ syscall/%.o: CFLAGS   := -std=c23 -Wall -Wextra -O3 -flto=thin -ffunction-sectio
 syscall/%.o: CXXFLAGS := -std=c++23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections -fomit-frame-pointer -funroll-loops -fno-stack-protector -fno-strict-overflow -fno-trapping-math $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
 
 OBJECTS += \
-    cli/uproot.o		\
+    cli/neoproot.o		\
 	cli/cli.o		\
 	cli/proot.o		\
 	cli/note.o		\
@@ -132,13 +132,13 @@ endef
 
 ifdef PROOT_UNBUNDLE_LOADER
   CFLAGS += "-DPROOT_UNBUNDLE_LOADER=\"$(PROOT_UNBUNDLE_LOADER)\""
-uproot: | loader/loader
+neoproot: | loader/loader
 else
   OBJECTS += loader/loader-wrapped.o
 endif
 
-.DEFAULT_GOAL = uproot
-all: uproot
+.DEFAULT_GOAL = neoproot
+all: neoproot
 
 ######################################################################
 # Beautified output
@@ -174,7 +174,7 @@ $(USE_BUILD_H): build.h
 # VERSION 可由命令行覆盖（make VERSION="x.y.z-scicat"），
 # 未指定时自动取 git 描述；cli/proot.h 中另有内置默认值兜底。
 
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo uproot-unknown)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo neoproot-unknown)
 
 build.h:
 	@echo "  GEN	$@"
@@ -200,7 +200,7 @@ OBJIFY = $($(quiet)GEN)									\
 		$< $@
 
 #链接 + strip + 自动 upx 压缩（未安装 upx 时跳过压缩）
-uproot: $(OBJECTS)
+neoproot: $(OBJECTS)
 	$(LINK)
 	$(STRIP) --strip-all $@
 ifeq ($(HAVE_UPX),)
@@ -280,16 +280,16 @@ BINDIR ?= $(PREFIX)/bin
 
 .PHONY: clean distclean install uninstall
 clean distclean:
-	-$(RM) -f $(OBJECTS) $(LOADER_OBJECTS) uproot loader/loader $(DEPS) licenses
+	-$(RM) -f $(OBJECTS) $(LOADER_OBJECTS) neoproot loader/loader $(DEPS) licenses
 
-install: uproot
+install: neoproot
 	$($(quiet)INSTALL) -D $< $(DESTDIR)$(BINDIR)/$<
 ifdef PROOT_UNBUNDLE_LOADER
 	$(INSTALL) -D loader/loader $(PROOT_UNBUNDLE_LOADER)/loader
 endif
 
 uninstall:
-	-$(RM) -f $(DESTDIR)$(BINDIR)/uproot
+	-$(RM) -f $(DESTDIR)$(BINDIR)/neoproot
 ifdef PROOT_UNBUNDLE_LOADER
 	-$(RM) -f $(PROOT_UNBUNDLE_LOADER)/loader
 endif

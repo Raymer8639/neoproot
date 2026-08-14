@@ -27,34 +27,34 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang llvm lld libtalloc-dev upx binutils
 
-      - name: Build uproot
+      - name: Build neoproot
         run: |
           if [ "$MODE" = "release" ]; then
             # 默认 ARMv8.2 满血优化（与作者默认一致），makefile 自动选用 lld
-            make -C src uproot CC=clang CXX=clang++
+            make -C src neoproot CC=clang CXX=clang++
           else
             # 通用构建（例如老设备可降级指令集），验证 MARCH 可覆盖性
-            make -C src uproot CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
+            make -C src neoproot CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
           fi
 
       - name: Check binary
         run: |
-          file src/uproot
-          ls -lh src/uproot
-          test -x src/uproot
+          file src/neoproot
+          ls -lh src/neoproot
+          test -x src/neoproot
 
       - name: Run test suite
         run: |
           cd tests
           make -s all
-          PROOT=../src/uproot sh basic_test.sh
-          PROOT=../src/uproot sh advanced_test.sh
+          PROOT=../src/neoproot sh basic_test.sh
+          PROOT=../src/neoproot sh advanced_test.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: uproot-${{ matrix.mode }}-${{ github.sha }}
-          path: src/uproot
+          name: neoproot-${{ matrix.mode }}-${{ github.sha }}
+          path: src/neoproot
           if-no-files-found: error
 
   release:
@@ -67,15 +67,15 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      # 注意：不能用 merge-multiple——两个 artifact 的文件内容同名（都是 uproot），
+      # 注意：不能用 merge-multiple——两个 artifact 的文件内容同名（都是 neoproot），
       # 合并会互相覆盖，导致 dist 为空、Release 无资产。
       - name: Rename artifacts
         run: |
           mkdir -p dist
-          for d in artifacts/uproot-*; do
+          for d in artifacts/neoproot-*; do
             case "$d" in
-              *-release-*) cp "$d/uproot" dist/uproot ;;
-              *-portable-*) cp "$d/uproot" dist/uproot-portable ;;
+              *-release-*) cp "$d/neoproot" dist/neoproot ;;
+              *-portable-*) cp "$d/neoproot" dist/neoproot-portable ;;
             esac
           done
           ls -lh dist

@@ -1,5 +1,5 @@
 # 什么是 proot-scicat？
-proot-scicat（又名 uproot）是基于 proot 深度增强的容器运行工具，核心目标是彻底解决 Termux 环境下 proot 启动干扰、权限限制、兼容性问题，同时保留 proot 原生核心能力，整合 GitHub 社区补丁与优化补丁，提供更稳定、更易用的容器运行体验。
+neoproot（历史名 proot-scicat/neoproot）是基于 proot 深度增强的容器运行工具，核心目标是彻底解决 Termux 环境下 proot 启动干扰、权限限制、兼容性问题，同时保留 proot 原生核心能力，整合 GitHub 社区补丁与优化补丁，提供更稳定、更易用的容器运行体验。
 
 # 性能有什么提升？
 大幅度提升了系统调用效率，更合理的调度策略提大约相当于两个原版，cpu和内存提升对比原版大约提升4~9％。注意这个数据是高负载下测试的，轻度使用时平衡性相比较差。
@@ -13,13 +13,13 @@ proot-scicat（又名 uproot）是基于 proot 深度增强的容器运行工具
 node 一般不会报错 13，除非你使用了特权端口（如 80 等），你尝试绑定特权端口（如 80），会因系统禁止非 root 用户使用低端口而报错 13。其他端口（≥1024）无此问题。
 node -e "console.log(os.networkInterfaces())"也不会报错13可以获取正确的参数。
 
-# 哪些命令使用 uproot 启动容器可以不加？
-以下命令使用 uproot 启动容器可以不加：
+# 哪些命令使用 neoproot 启动容器可以不加？
+以下命令使用 neoproot 启动容器可以不加：
 - unset LD_PRELOAD
 - unset LD_LIBRARY_PATH
 - unset LD_BIND_NOW
 
-这些命令我单独弄了一个文件名为 uproot.c，它现在是 uproot 的主程序，会先向 termux 执行一些必要的命令，然后启动 uproot 环境。也就是说，一般不需要增加额外的东西在启动脚本修复启动问题。
+这些命令我单独弄了一个文件名为 neoproot.c，它现在是 neoproot 的主程序，会先向 termux 执行一些必要的命令，然后启动 neoproot 环境。也就是说，一般不需要增加额外的东西在启动脚本修复启动问题。
 
-# uproot 执行的这些命令会影响 termux 吗？
+# neoproot 执行的这些命令会影响 termux 吗？
 会，临时屏蔽当前终端进程的环境变量，手动重新打开 termux 或切换会话也可以输入命令恢复。不过一般并不会影响正常使用。

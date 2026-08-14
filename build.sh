@@ -1,11 +1,11 @@
 #!/bin/sh
-# uproot (proot-scicat) Termux 一键构建脚本
+# neoproot (proot-scicat) Termux 一键构建脚本
 # 用法: sh build.sh [install]
 #   install 参数: 构建并安装到 $PREFIX/bin
 
 set -e
 
-echo "==> uproot 构建脚本"
+echo "==> neoproot 构建脚本"
 echo "    平台: $(uname -m) / $(uname -s)"
 
 # 仅支持 64 位 ARM
@@ -43,16 +43,16 @@ if [ -n "$MISSING" ]; then
 fi
 
 echo "==> 开始编译（多线程）..."
-make -C src uproot -j"$(nproc 2>/dev/null || echo 4)" V=1
+make -C src neoproot -j"$(nproc 2>/dev/null || echo 4)" V=1
 
 echo ""
-echo "==> 构建完成: $(pwd)/src/uproot"
-ls -lh src/uproot
+echo "==> 构建完成: $(pwd)/src/neoproot"
+ls -lh src/neoproot
 
 if [ "$1" = "install" ]; then
     echo ""
-    echo "==> 安装到 $PREFIX/bin/uproot ..."
-    cp src/uproot "$PREFIX/bin/uproot"
-    chmod 755 "$PREFIX/bin/uproot"
-    echo "==> 安装完成！使用 uproot 命令启动容器。"
+    echo "==> 安装到 $PREFIX/bin/neoproot ..."
+    cp src/neoproot "$PREFIX/bin/neoproot"
+    chmod 755 "$PREFIX/bin/neoproot"
+    echo "==> 安装完成！使用 neoproot 命令启动容器。"
 fi

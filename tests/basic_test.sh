@@ -6,7 +6,7 @@ echo "开始 SciCat PRoot 基本功能测试..."
 
 # 检查是否提供了 proot 命令路径
 if [ -z "$PROOT" ]; then
-    PROOT="../src/uproot"
+    PROOT="../src/neoproot"
 fi
 
 # 创建测试目录

@@ -119,7 +119,7 @@ static int sysvipc_shm_launch_helper(void) {
         pid_t child = fork();
         if (child < 0) _exit(1);
         if (child == 0) {
-            execl("/proc/self/exe", "uproot", "--shm-helper", NULL);
+            execl("/proc/self/exe", "neoproot", "--shm-helper", NULL);
             _exit(1);
         }
         _exit(0);

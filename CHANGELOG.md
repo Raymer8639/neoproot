@@ -9,7 +9,7 @@
 
 - 魔改 uproot：C++23 极致性能版
 - 裁剪兼容：放弃通用架构，换取 ARMv8.2 满血性能（含 NEON/dotprod/lse 优化）
-- 引入 `uproot` 主程序：自动执行 Termux 环境初始化（wake-lock、`ulimit -n`、清理 `LD_*`）
+- 引入 `neoproot` 主程序（历史名 uproot）：自动执行 Termux 环境初始化（wake-lock、`ulimit -n`、清理 `LD_*`）
 - 系统调用路径高性能优化（`-fomit-frame-pointer`、`-funroll-loops`、去栈保护）
 - 进程退出 `signal 11` 警告消除、进程存活判断
 - 中文 VNC 退出卡死修复

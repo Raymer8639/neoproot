@@ -613,7 +613,7 @@ static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *pa
     if (UNLIKELY(!is_l2s_internal_name(filename))) return 0;
 
     /* 链内容可能是 guest 路径（/.l2s/.l2s.<name>，proot-distro 时代造的旧链）
-     * 或 host 绝对路径（uproot 容器会话造的链）。uproot 进程运行在 host（Termux）
+     * 或 host 绝对路径（neoproot 容器会话造的链）。neoproot 进程运行在 host（Termux）
      * 侧，guest 路径 /.l2s/... 不可见，必须用 PROOT_L2S_DIR（host 绝对路径）定位。 */
     const char *l2s_dir = getenv("PROOT_L2S_DIR");
     char inter_host[PATH_MAX] ALIGNED, final_host[PATH_MAX] ALIGNED;
@@ -972,7 +972,7 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
             }
         }
         /* tsgo 场景（open 物化）：tsgo 用 open(path, O_PATH) + readlink(/proc/self/fd/N)
-         * 解析真实路径，readlink(fd) 由内核直接返回（uproot 无法拦截），若 fd 指向
+         * 解析真实路径，readlink(fd) 由内核直接返回（neoproot 无法拦截），若 fd 指向
          * .l2s 链（symlink），readlink 返回链内容（/.l2s/.l2s.<hash>.0001.0002）→
          * 当 TS 文件处理报 TS6054/TS2307/TS7006（类型库解析失败）。必须在 open 之前
          * 把链物化为普通文件（此时 user_path 还是原始 guest 路径，链状态完好；

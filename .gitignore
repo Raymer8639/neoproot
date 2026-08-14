@@ -7,6 +7,7 @@
 /src/loader/loader-info.c
 /src/proot
 /src/uproot
+/src/neoproot
 /src/loader.exe
 /tests/test_argv
 /tests/test_echo
