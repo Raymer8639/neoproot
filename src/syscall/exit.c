@@ -467,6 +467,20 @@ write_back:
         translate_execve_exit(tracee);
         goto end;
 
+    case PR_prctl: {
+        /* 上游 571a6c0：记录 guest 自发的 no_new_privs 请求（成功且
+         * guest 已跑起来时；内核只接受 arg2==1）。neoproot 自身在初始
+         * execve 前设的真实标志不算（seen_execve 守卫）。单向闩锁，
+         * 永不清除，与内核 fork/execve 语义一致。 */
+        word_t option = peek_reg(tracee, ORIGINAL, SYSARG_1);
+        if (option == PR_SET_NO_NEW_PRIVS) {
+            if (tracee->seen_execve && (int) syscall_result == 0)
+                tracee->no_new_privs = true;
+            goto end;
+        }
+        break;
+    }
+
     case PR_ptrace:
         status = translate_ptrace_exit(tracee);
         break;

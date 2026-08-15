@@ -672,6 +672,18 @@ int translate_syscall_enter(Tracee *tracee)
             set_sysnum(tracee, PR_void);
             status = 0;
         }
+        /* 上游 571a6c0：neoproot 在 execve 前必设 PR_SET_NO_NEW_PRIVS
+         * （seccomp 过滤器前提），真实标志恒为 1——按 guest 自身意图
+         * 回答 PR_GET_NO_NEW_PRIVS，并观察 guest 自发的 SET。 */
+        if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_GET_NO_NEW_PRIVS) {
+            poke_reg(tracee, SYSARG_RESULT, tracee->no_new_privs ? 1 : 0);
+            set_sysnum(tracee, PR_void);
+            status = 0;
+        }
+        if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_SET_NO_NEW_PRIVS) {
+            tracee->sysexit_pending = true;
+            tracee->restart_how = PTRACE_SYSCALL;
+        }
         break;
 
 #ifdef __ANDROID__

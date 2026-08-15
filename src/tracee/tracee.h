@@ -155,6 +155,16 @@ typedef struct tracee {
 	bool sysexit_pending;
 	bool seccomp_already_handled_enter;
 
+	/* 上游 571a6c0：guest 是否自己请求过 no_new_privs。neoproot 在
+	 * execve 前必设真实标志（seccomp 过滤器前提），PR_GET_NO_NEW_PRIVS
+	 * 会恒报 1——本字段让 neoproot 按 guest 自身意图回答（sudo-rs
+	 * 等工具见标志置位会拒绝运行）。 */
+	bool no_new_privs;
+
+	/* 初始 execve 已过 = guest 程序真正在跑。用于忽略 neoproot 自身
+	 * 在启动子进程里设的那次 PR_SET_NO_NEW_PRIVS。 */
+	bool seen_execve;
+
 	FileSystemNameSpace *fs;
 	Heap *heap;
 

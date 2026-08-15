@@ -253,6 +253,7 @@ void translate_execve_exit(Tracee *tr)
 
     if (tr->skip_proot_loader) {
         tr->restore_original_regs = false;
+        tr->seen_execve = true;
         return;
     }
 
@@ -284,6 +285,10 @@ void translate_execve_exit(Tracee *tr)
     res = peek_reg(tr, CURRENT, SYSARG_RESULT);
     if ((int)res < 0)
         return;
+
+    /* 上游 571a6c0：guest 程序已在跑——此后的 PR_SET_NO_NEW_PRIVS
+     * 调用属于 guest，不属于 neoproot 自身的 pre-execve 设置。 */
+    tr->seen_execve = true;
 
     if (tr->new_exe) {
         talloc_unlink(tr, tr->exe);
