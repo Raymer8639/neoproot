@@ -79,7 +79,7 @@ static int fill_file_with_auxv(const Tracee *tr, const char *path, const ElfAuxV
     return 0;
 }
 
-static int bind_proc_pid_auxv(const Tracee *tr)
+static int bind_proc_pid_auxv(Tracee *tr)
 {
     word_t vec_addr;
     ElfAuxVector *vectors;
@@ -126,6 +126,12 @@ static int bind_proc_pid_auxv(const Tracee *tr)
 
     if (fill_file_with_auxv(tr, host_path, vectors) < 0)
         return -1;
+
+    /* 记下临时文件路径：enter 侧把 guest 的 open(/proc/self/auxv)
+     * 直接改写为它（auxv 通道 2 修复，绕过 -b /proc 绑定优先级）。 */
+    if (tr->auxv_host_path != NULL)
+        talloc_free(tr->auxv_host_path);
+    tr->auxv_host_path = talloc_strdup(tr, host_path);
 
     binding = insort_binding3((Tracee *)tr, tr->life_context, host_path, guest_path);
     if (!binding)
@@ -326,11 +332,12 @@ void translate_execve_exit(Tracee *tr)
      * 调用属于 guest，不属于 neoproot 自身的 pre-execve 设置。 */
     tr->seen_execve = true;
 
-    /* 抓 argv[0] 指针（供 PR_GET_AUXV 出口补丁使用）。
-     * 注：/proc/<pid>/auxv 的绑定在 -b /proc 场景不生效（用户绑定
-     * 优先级更高，guest 读 /proc/self/auxv 走宿主内核视图）——该通道
-     * 留待 read 出口补丁方案（需 read 入过滤表，暂缓）。 */
+    /* 抓 argv[0] 指针（供 PR_GET_AUXV 出口补丁使用）+ 重建 auxv
+     * 正确内容临时文件（auxv_host_path 填充）。enter 侧把 guest 的
+     * open(/proc/self/auxv) 改写为该文件（auxv 通道 2 修复）——绑定
+     * 本身在 -b /proc 下不生效，但文件生成是必需的。 */
     capture_execfn_addr(tr);
+    (void)bind_proc_pid_auxv(tr);
 
     if (tr->new_exe) {
         talloc_unlink(tr, tr->exe);

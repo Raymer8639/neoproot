@@ -33,6 +33,16 @@
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
+/* guest 路径是否为 /proc/self/auxv 或 /proc/<自身pid>/auxv */
+static inline bool is_proc_self_auxv(const Tracee *tracee, const char *path)
+{
+    char prefix[64];
+    if (strcmp(path, "/proc/self/auxv") == 0)
+        return true;
+    snprintf(prefix, sizeof(prefix), "/proc/%d/auxv", tracee->pid);
+    return strcmp(path, prefix) == 0;
+}
+
 static int translate_path2(Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg reg, Type type);
 static int translate_sysarg(Tracee *tracee, Reg reg, Type type);
 
@@ -352,10 +362,20 @@ int translate_syscall_enter(Tracee *tracee)
     case PR_open:
         flags = peek_reg(tracee, CURRENT, SYSARG_2);
 
-        if ((flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) != 0) {
-            status = get_sysarg_path(tracee, path, SYSARG_1);
+        /* auxv 通道 2 修复：open(/proc/self/auxv) → 改写为生成的
+         * 正确内容临时文件（绕过 -b /proc 绑定优先级；文件由
+         * bind_proc_pid_auxv 在 execve 出口重建）。 */
+        status = get_sysarg_path(tracee, path, SYSARG_1);
+        if (status < 0)
+            break;
+        if (is_proc_self_auxv(tracee, path) && tracee->auxv_host_path != NULL) {
+            status = set_sysarg_path(tracee, tracee->auxv_host_path, SYSARG_1);
             if (status < 0)
                 break;
+            break;
+        }
+
+        if ((flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) != 0) {
             status = check_bind_readonly(tracee, path);
             if (status < 0)
                 break;
@@ -542,6 +562,15 @@ int translate_syscall_enter(Tracee *tracee)
         status = get_sysarg_path(tracee, path, SYSARG_2);
         if (status < 0)
             break;
+
+        /* auxv 通道 2 修复：同 PR_open（openat2 已改写为 openat，
+         * 也走这里） */
+        if (is_proc_self_auxv(tracee, path) && tracee->auxv_host_path != NULL) {
+            status = set_sysarg_path(tracee, tracee->auxv_host_path, SYSARG_2);
+            if (status < 0)
+                break;
+            break;
+        }
 
         if ((flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) != 0) {
             status = check_bind_readonly(tracee, path);
