@@ -18,6 +18,7 @@
 #include "ptrace/wait.h"
 #include "syscall/heap.h"
 #include "extension/extension.h"
+#include "compat.h"
 #include "execve/execve.h"
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
@@ -516,6 +517,24 @@ int translate_syscall_enter(Tracee *tracee)
         status = translate_sysarg(tracee, SYSARG_2, REGULAR);
         break;
 
+    case PR_openat2: {
+        /* openat2(dirfd, pathname, open_how*, size) → 改写为 openat 再翻译
+         * （上游 114a7c6 移植）：路径在 SYSARG_2 同 openat，flags/mode 在
+         * open_how 结构里 → 搬进 SYSARG_3/4。how.resolve 标志丢弃：
+         * RESOLVE_BENEATH 等会拒绝 neoproot 生成的绝对 host 路径，且
+         * 路径限制本就由 rootfs 翻译保证。 */
+        struct proot_open_how how = {};
+        word_t how_size = peek_reg(tracee, CURRENT, SYSARG_4);
+        if (how_size > sizeof(how))
+            how_size = sizeof(how);
+        status = read_data(tracee, &how, peek_reg(tracee, CURRENT, SYSARG_3), how_size);
+        if (status < 0)
+            break;
+        set_sysnum(tracee, PR_openat);
+        poke_reg(tracee, SYSARG_3, how.flags);
+        poke_reg(tracee, SYSARG_4, how.mode);
+    }
+        /* fall through */
     case PR_openat:
         dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
         flags = peek_reg(tracee, CURRENT, SYSARG_3);

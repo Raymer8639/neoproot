@@ -243,4 +243,12 @@
  * 会与枚举声明冲突。唯一使用处 tracee/event.c 已保证先 include <signal.h>，
  * 兜底定义放在该文件内。 */
 
+/* openat2(2) "how" 参数。镜像 <linux/openat2.h> 的 struct open_how，
+ * 用私有名避免依赖内核头（部分构建平台有、部分没有）。 */
+struct proot_open_how {
+	unsigned long long flags;
+	unsigned long long mode;
+	unsigned long long resolve;
+};
+
 #endif /* COMPAT_H */

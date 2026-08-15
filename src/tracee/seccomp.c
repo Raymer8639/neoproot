@@ -16,6 +16,7 @@
 #include "tracee/mem.h"
 #include "tracee/statx.h"
 #include "path/path.h"
+#include "compat.h"
 
 #define LIKELY(x)   __builtin_expect(!!(x), 1)
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
@@ -146,6 +147,24 @@ static int handle_seccomp_event_common(Tracee *restrict tracee) {
         case PR_accept:
             transform_simple_syscall(tracee, PR_accept4, 0, -1, -1);
             break;
+        case PR_openat2: {
+            /* 外层 seccomp 拒绝 openat2 时转 openat（上游 114a7c6 移植）：
+             * 这样调用能在外层策略下存活，且重启动后路径会被翻译。 */
+            struct proot_open_how how = {};
+            word_t how_size = peek_reg(tracee, CURRENT, SYSARG_4);
+            if (how_size > sizeof(how))
+                how_size = sizeof(how);
+            status = read_data(tracee, &how, peek_reg(tracee, CURRENT, SYSARG_3), how_size);
+            if (status < 0) {
+                set_result_after_seccomp(tracee, status);
+                break;
+            }
+            set_sysnum(tracee, PR_openat);
+            poke_reg(tracee, SYSARG_3, how.flags);
+            poke_reg(tracee, SYSARG_4, how.mode);
+            restart_syscall_after_seccomp(tracee);
+            break;
+        }
         case PR_send:
             transform_simple_syscall(tracee, PR_sendto, -1, 0, 0);
             break;

@@ -433,8 +433,9 @@ static FORCE_INLINE bool is_open_syscall(Sysnum sysnum) {
 	case PR_creat:
 	case PR_open:
 	case PR_openat:
-		/* 注：本 fork 无 PR_openat2 sysnum（scicat 基线早于 openat2），
-		 * 上游含之；openat2 场景不做 fd 换名，其余一致。 */
+	case PR_openat2:
+		/* openat2 在 enter 阶段已改写为 openat，ORIGINAL 仍为
+		 * openat2——exit 阶段的 fd 换名同样适用。 */
 		return true;
 	default:
 		return false;
@@ -901,6 +902,7 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
             { PR_creat,       FILTER_SYSEXIT },
             { PR_open,        FILTER_SYSEXIT },
             { PR_openat,      FILTER_SYSEXIT },
+            { PR_openat2,     FILTER_SYSEXIT },
             { PR_link,        FILTER_SYSEXIT },
             { PR_linkat,      FILTER_SYSEXIT },
             { PR_unlink,      FILTER_SYSEXIT },

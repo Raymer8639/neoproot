@@ -6,7 +6,7 @@ CFLAGS ?= -Wall -O2 -g
 PROOT ?= ../src/neoproot
 
 # 测试程序列表
-TEST_PROGS = test_argv test_echo test_file_ops test_dir_ops
+TEST_PROGS = test_argv test_echo test_file_ops test_dir_ops test-openat2
 
 # 测试脚本列表
 TEST_SCRIPTS = basic_test.sh advanced_test.sh
@@ -25,6 +25,9 @@ test_file_ops: test_file_ops.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 test_dir_ops: test_dir_ops.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+test-openat2: test-openat2.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 # 运行所有测试
