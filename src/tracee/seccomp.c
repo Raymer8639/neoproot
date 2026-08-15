@@ -55,8 +55,22 @@ static int handle_seccomp_event_common(Tracee *restrict tracee);
 
 int handle_seccomp_event(Tracee* restrict tracee) {
     if (UNLIKELY(fetch_regs(tracee) < 0)) {
+        tracee->restore_sysarg1_after_sigsys = false;
         return SIGSYS;
     }
+
+#if defined(ARCH_ARM_EABI) || defined(ARCH_ARM64)
+    /* 上游 cd02c79：本次 SIGSYS 前跑过合成 sysexit 并 poke 了
+     * SYSARG_RESULT（ARM/ARM64 上即 SYSARG_1）。被拦截 syscall 的
+     * 首参数（路径指针、setresgid 的 rgid 等）已被伪结果覆盖——从
+     * 入口快照恢复，保证 SIGSYS 模拟与 *at 风格重启读到真参数。
+     * sysnum 相等守卫防止无关旧 syscall 的 ORIGINAL 泄漏进来。 */
+    if (tracee->restore_sysarg1_after_sigsys
+        && get_sysnum(tracee, ORIGINAL) == get_sysnum(tracee, CURRENT))
+        poke_reg(tracee, SYSARG_1, peek_reg(tracee, ORIGINAL, SYSARG_1));
+#endif
+    tracee->restore_sysarg1_after_sigsys = false;
+
     tracee->status = 0;
     tracee->restore_original_regs = false;
     save_current_regs(tracee, ORIGINAL_SECCOMP_REWRITE);

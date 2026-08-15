@@ -591,12 +591,20 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
                     if (!IS_IN_SYSENTER(tracee)) {
                         VERBOSE(tracee, 1, "Handling syscall exit from SIGSYS");
                         translate_syscall(tracee);
+                        /* 上游 cd02c79：上面的合成 sysexit 跑了常规出口
+                         * 处理器；完全模拟的调用（如 setresgid）会 poke
+                         * SYSARG_RESULT。ARM/ARM64 上 SYSARG_RESULT 与
+                         * SYSARG_1 同寄存器——被拦截 syscall 的首参数
+                         * 被伪结果覆盖，交给 handle_seccomp_event 从
+                         * 入口快照恢复。 */
+                        tracee->restore_sysarg1_after_sigsys = true;
                     }
                     const bool skip_signal = tracee->skip_next_seccomp_signal ||
                         (word_t)siginfo.si_syscall == SYSCALL_AVOIDER;
                     if (skip_signal) {
                         VERBOSE(tracee, 4, "suppressed SIGSYS after void syscall");
                         tracee->skip_next_seccomp_signal = false;
+                        tracee->restore_sysarg1_after_sigsys = false;
                         signal = 0;
                     } else {
                         signal = handle_seccomp_event(tracee);
