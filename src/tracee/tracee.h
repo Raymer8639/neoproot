@@ -107,6 +107,12 @@ typedef struct tracee {
 
 	bool skip_next_seccomp_signal;
 
+	/* 上游 cd02c79：外层 seccomp SIGSYS 前若有合成的 sysexit
+	 * （translate_syscall）poke 过 SYSARG_RESULT——ARM/ARM64 上
+	 * SYSARG_RESULT 与 SYSARG_1 同一寄存器，被拦截 syscall 的首参数
+	 * 会被伪结果覆盖，须在模拟/重启前从入口快照恢复。 */
+	bool restore_sysarg1_after_sigsys;
+
 	TALLOC_CTX *ctx;
 	TALLOC_CTX *life_context;
 
