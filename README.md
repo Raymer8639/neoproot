@@ -98,7 +98,7 @@ See [help.md](help.md) for details and FAQs (node error 13, performance comparis
 
 ## Versioning
 
-Version numbers follow the termux/proot style (e.g. `5.1.107.90`); releases of this project keep the historical `-scicat` suffix (e.g. `v5.7.2-scicat`, 2026-08-08). See [CHANGELOG.md](CHANGELOG.md) for the change history.
+Version numbers follow the termux/proot style (e.g. `5.1.107.90`). Releases before 2026-08-15 kept the historical `-scicat` suffix (e.g. `v5.7.2-scicat`); starting with `v5.7.3` (2026-08-15) the suffix is dropped. See [CHANGELOG.md](CHANGELOG.md) for the change history.
 
 ## Build notes
 
