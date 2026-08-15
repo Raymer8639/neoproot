@@ -98,7 +98,7 @@ neoproot -0 -r /data/data/com.termux/files/home/rootfs \
 
 ## 版本命名
 
-版本号沿用 termux/proot 风格（如 `5.1.107.90`）；本项目 Release 沿用历史后缀 `-scicat`（如 `v5.7.2-scicat`，2026-08-08）。变更历史见 [CHANGELOG.md](CHANGELOG.md)。
+版本号沿用 termux/proot 风格（如 `5.1.107.90`）；2026-08-15 前的 Release 保留历史后缀 `-scicat`（如 `v5.7.2-scicat`），**v5.7.3 起停用后缀**。变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 构建产物说明
 
