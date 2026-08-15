@@ -72,6 +72,59 @@ static int translate_path2(Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg 
     return set_sysarg_path(tracee, new_path, reg);
 }
 
+/* 上游 100dd09fb（适配）：只翻译父目录、保留最终组件。用于
+ * mkdir/symlink/link 这类“目标由内核创建”的 syscall：PRoot 提前
+ * 探测尚不存在的最终名字会扰动老 Android 内核/文件系统。 */
+static int translate_path2_parent(Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg reg)
+{
+    char parent[PATH_MAX];
+    char translated_parent[PATH_MAX];
+    char translated_path[PATH_MAX];
+    char *last_slash;
+    char *leaf;
+    size_t length;
+    int status;
+
+    if (path[0] == '\0')
+        return 0;
+
+    length = strlen(path);
+    if (path[length - 1] == '/')
+        return translate_path2(tracee, dir_fd, path, reg, SYMLINK);
+
+    last_slash = strrchr(path, '/');
+    if (last_slash == NULL) {
+        strcpy(parent, ".");
+        leaf = path;
+    }
+    else if (last_slash == path) {
+        strcpy(parent, "/");
+        leaf = last_slash + 1;
+    }
+    else {
+        size_t parent_length = (size_t)(last_slash - path);
+
+        if (parent_length >= sizeof(parent))
+            return -ENAMETOOLONG;
+        memcpy(parent, path, parent_length);
+        parent[parent_length] = '\0';
+        leaf = last_slash + 1;
+    }
+
+    if (leaf[0] == '\0' || strcmp(leaf, ".") == 0 || strcmp(leaf, "..") == 0)
+        return translate_path2(tracee, dir_fd, path, reg, SYMLINK);
+
+    status = translate_path(tracee, translated_parent, dir_fd, parent, true);
+    if (status < 0)
+        return status;
+
+    status = join_paths(2, translated_path, translated_parent, leaf);
+    if (status < 0)
+        return status;
+
+    return set_sysarg_path(tracee, translated_path, reg);
+}
+
 static int translate_sysarg(Tracee *tracee, Reg reg, Type type)
 {
     char old_path[PATH_MAX];
@@ -479,7 +532,6 @@ int translate_syscall_enter(Tracee *tracee)
     case PR_lsetxattr:
     case PR_unlink:
     case PR_rmdir:
-    case PR_mkdir:
         status = get_sysarg_path(tracee, path, SYSARG_1);
         if (status < 0)
             break;
@@ -487,6 +539,17 @@ int translate_syscall_enter(Tracee *tracee)
         if (status < 0)
             break;
         status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
+        break;
+
+    case PR_mkdir:
+        status = get_sysarg_path(tracee, path, SYSARG_1);
+        if (status < 0)
+            break;
+        status = check_bind_readonly(tracee, path);
+        if (status < 0)
+            break;
+        /* 上游 c48312521：目标由内核创建，只翻译父目录。 */
+        status = translate_path2_parent(tracee, AT_FDCWD, path, SYSARG_1);
         break;
 
     case PR_pivot_root:
@@ -520,7 +583,9 @@ int translate_syscall_enter(Tracee *tracee)
         if (status < 0)
             break;
 
-        status = translate_path2(tracee, newdirfd, newpath, SYSARG_4, SYMLINK);
+        /* 上游 100dd09fb/c48312521：linkat 的 newpath 由内核创建，
+         * 只翻译父目录。 */
+        status = translate_path2_parent(tracee, newdirfd, newpath, SYSARG_4);
         break;
 
     case PR_mount:
@@ -595,7 +660,6 @@ int translate_syscall_enter(Tracee *tracee)
 
     /* 写操作：先做 ro bind 只读检查 */
     case PR_unlinkat:
-    case PR_mkdirat:
         dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
 
         status = get_sysarg_path(tracee, path, SYSARG_2);
@@ -608,7 +672,43 @@ int translate_syscall_enter(Tracee *tracee)
         status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
         break;
 
+    case PR_mkdirat:
+        dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
+
+        status = get_sysarg_path(tracee, path, SYSARG_2);
+        if (status < 0)
+            break;
+        status = check_bind_readonly(tracee, path);
+        if (status < 0)
+            break;
+
+        /* 上游 c48312521：目标由内核创建，只翻译父目录。 */
+        status = translate_path2_parent(tracee, dirfd, path, SYSARG_2);
+        break;
+
     case PR_link:
+        status = get_sysarg_path(tracee, path, SYSARG_1);
+        if (status < 0)
+            break;
+        status = check_bind_readonly(tracee, path);
+        if (status < 0)
+            break;
+
+        status = get_sysarg_path(tracee, newpath, SYSARG_2);
+        if (status < 0)
+            break;
+        status = check_bind_readonly(tracee, newpath);
+        if (status < 0)
+            break;
+
+        status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
+        if (status < 0)
+            break;
+
+        /* 上游 100dd09fb：link 的 newpath 由内核创建，只翻译父目录。 */
+        status = translate_path2_parent(tracee, AT_FDCWD, newpath, SYSARG_2);
+        break;
+
     case PR_rename:
         status = get_sysarg_path(tracee, path, SYSARG_1);
         if (status < 0)
@@ -664,7 +764,9 @@ int translate_syscall_enter(Tracee *tracee)
         status = check_bind_readonly(tracee, newpath);
         if (status < 0)
             break;
-        status = translate_sysarg(tracee, SYSARG_2, SYMLINK);
+        /* 上游 c48312521：SYSARG_1 是链接内容不是路径；只翻译
+         * linkpath（SYSARG_2）的父目录。 */
+        status = translate_path2_parent(tracee, AT_FDCWD, newpath, SYSARG_2);
         break;
 
     case PR_symlinkat:
@@ -677,7 +779,8 @@ int translate_syscall_enter(Tracee *tracee)
         if (status < 0)
             break;
 
-        status = translate_path2(tracee, newdirfd, newpath, SYSARG_3, SYMLINK);
+        /* 上游 c48312521：目标由内核创建，只翻译父目录。 */
+        status = translate_path2_parent(tracee, newdirfd, newpath, SYSARG_3);
         break;
 
     case PR_statx:
@@ -740,7 +843,10 @@ int translate_syscall_enter(Tracee *tracee)
         }
 
         if (peek_reg(tracee, CURRENT, SYSARG_2) == TCSETSF2) {
-            poke_reg(tracee, SYSARG_2, TCSETSF);
+            /* 上游 b2c194db6：部分 Android 版本上 TCSETSF2 直通会
+             * EACCES（apt tcsetattr 报 Permission denied），统一映射到
+             * TCSETS。 */
+            poke_reg(tracee, SYSARG_2, TCSETS);
         }
         break;
 #endif

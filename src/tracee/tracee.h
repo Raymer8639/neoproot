@@ -165,6 +165,13 @@ typedef struct tracee {
 	bool sysexit_pending;
 	bool seccomp_already_handled_enter;
 
+	/* 上游 61681c648（适配）：sysenter 阶段把 syscall 改成了会被
+	 * 内核直接取消的负 AVOIDER。此类 syscall 在旧顺序内核
+	 * （seccomp 先于 ptrace sysenter，arm64 <5.3）上没有后续
+	 * sysenter stop，事件循环不能用 seccomp_already_handled_enter
+	 * 吞掉紧接着到来的 sysexit stop。每个 sysenter 阶段开始时重置。 */
+	bool voided_syscall_cancelled;
+
 	/* 上游 571a6c0：guest 是否自己请求过 no_new_privs。neoproot 在
 	 * execve 前必设真实标志（seccomp 过滤器前提），PR_GET_NO_NEW_PRIVS
 	 * 会恒报 1——本字段让 neoproot 按 guest 自身意图回答（sudo-rs

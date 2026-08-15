@@ -180,6 +180,21 @@ int set_sysarg_path(Tracee *tracee, const char path[PATH_MAX], Reg reg)
 	return set_sysarg_data(tracee, path, strlen(path) + 1, reg);
 }
 
+/* 上游 61681c648（适配）：判断 tracee 当前 syscall 是否已被 PRoot
+ * 替换为 AVOIDER（PR_void）并自行回答。 */
+static bool is_voided_syscall(const Tracee *tracee, RegVersion version)
+{
+	return peek_reg(tracee, version, SYSARG_NUM) == SYSCALL_AVOIDER
+	    && peek_reg(tracee, ORIGINAL, SYSARG_NUM) != SYSCALL_AVOIDER;
+}
+
+/* 负 AVOIDER 会被内核直接取消（不执行、不产生 sysenter stop）；
+ * ARM 的 tuxcall(222) 则会真正进内核。本 fork 仅 ARM64，AVOIDER = -1。 */
+static bool kernel_cancels_voided_syscall(void)
+{
+	return (long) SYSCALL_AVOIDER < 0;
+}
+
 void translate_syscall(Tracee *tracee)
 {
 	const bool is_enter_stage = IS_IN_SYSENTER(tracee);
@@ -197,6 +212,7 @@ void translate_syscall(Tracee *tracee)
 		/* Never restore original register values at the end
 		 * of this stage.  */
 		tracee->restore_original_regs = false;
+		tracee->voided_syscall_cancelled = false;
 
 		print_current_regs(tracee, 3, "sysenter start");
 
@@ -405,6 +421,10 @@ svc_direct_done:
 	bool override_sysnum = is_enter_stage && tracee->chain.syscalls == NULL;
 	int push_regs_status = push_specific_regs(tracee, override_sysnum);
 
+	/* sysnum 是否真正写入 tracee：写失败时上面的 fallback 会让原始
+	 * syscall 以非法参数继续执行，此时内核不会取消 syscall。 */
+	const bool sysnum_pushed = override_sysnum && push_regs_status == 0;
+
 	/* Handle inability to change syscall number */
 	if (push_regs_status < 0 && override_sysnum) {
 		word_t orig_sysnum = peek_reg(tracee, ORIGINAL, SYSARG_NUM);
@@ -447,8 +467,13 @@ svc_direct_done:
 		}
 	}
 
-	if (is_enter_stage)
+	if (is_enter_stage) {
+		tracee->voided_syscall_cancelled = sysnum_pushed
+						&& kernel_cancels_voided_syscall()
+						&& is_voided_syscall(tracee, CURRENT);
+
 		print_current_regs(tracee, 5, "sysenter end" );
+	}
 	else
 		print_current_regs(tracee, 4, "sysexit end");
 }
