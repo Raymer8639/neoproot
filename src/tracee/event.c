@@ -230,6 +230,11 @@ int launch_process(Tracee *tracee, char *const argv[])
             note(tracee, ERROR, SYSTEM, "fork()");
             return -errno;
         case 0:
+            /* 上游 6c8b9ad1d：Android zygote/部分启动器会把 SIGPIPE 置为
+             * SIG_IGN，且 ignore 会跨 fork/exec 传入 guest。恢复为默认
+             * 处置，保证 `yes | head` 等管道行为与普通系统一致。 */
+            signal(SIGPIPE, SIG_DFL);
+
             status = ptrace(PTRACE_TRACEME, 0, NULL, NULL);
             if (status < 0) {
                 note(tracee, ERROR, SYSTEM, "ptrace(TRACEME)");
@@ -553,7 +558,8 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
                     tracee->skip_next_seccomp_signal = true;
                 if (tracee->seccomp == DISABLING)
                     tracee->restart_how = PTRACE_SYSCALL;
-                if (!after_enter && tracee->restart_how == PTRACE_SYSCALL)
+                if (!after_enter && tracee->restart_how == PTRACE_SYSCALL
+                    && !tracee->voided_syscall_cancelled)
                     tracee->seccomp_already_handled_enter = true;
                 break;
             }
@@ -588,6 +594,12 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
                 siginfo_t siginfo = {0};
                 ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
                 if (siginfo.si_code == SYS_SECCOMP) {
+                    /* 上游 61681c648（适配）：外层 seccomp 返回
+                     * SECCOMP_RET_TRAP 时内核会取消该 syscall，旧顺序
+                     * 内核上随后没有 sysenter stop——不能继续等待并吞掉
+                     * 下一个（实际是 sysexit）stop。 */
+                    tracee->seccomp_already_handled_enter = false;
+
                     if (!IS_IN_SYSENTER(tracee)) {
                         VERBOSE(tracee, 1, "Handling syscall exit from SIGSYS");
                         translate_syscall(tracee);
