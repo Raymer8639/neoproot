@@ -1,6 +1,8 @@
-# neoproot（二进制与项目同名；历史名 proot-scicat / uproot）
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-> 下一代半原生轻量级容器：比官方 PRoot 更快、更稳、更小，专为 **ARM64 / Android (Termux)** 优化。
+# neoproot (binary and project share the name; formerly proot-scicat / uproot)
+
+> A next-generation semi-native lightweight container: faster, more stable and smaller than the official PRoot, optimized for **ARM64 / Android (Termux)**.
 
 [![CI](https://github.com/Raymer8639/neoproot/actions/workflows/ci.yml/badge.svg)](https://github.com/Raymer8639/neoproot/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-ARM64%20%2F%20Android-blue)
@@ -8,110 +10,110 @@
 ![License](https://img.shields.io/badge/license-GPLv2-green)
 ![AI](https://img.shields.io/badge/AI-assisted-100%25-purple)
 
-> **🤖 AI 声明：本项目的全部代码（含维护过程中的所有修改、修复与优化）均使用 AI 辅助编写/审查完成。**
+> **🤖 AI statement: all code in this project (including every modification, fix and optimization made during maintenance) was written/reviewed with AI assistance.**
 
-## 上游关系（本项目 = 三方血缘）
+## Upstream relationship (three-way lineage)
 
 ```
-proot-me/proot（原始 PRoot，停更）
+proot-me/proot (original PRoot, unmaintained)
         │
-        ▼ 魔改：C23/C++23 + ARMv8.2 满血 + 裁剪兼容
-gitee.com/scicat-team/proot-scicat（uproot，2026-05 停更）  ← 直接祖先（fork 起点）
+        ▼ fork: C23/C++23 + full ARMv8.2 performance + trimmed compatibility
+gitee.com/scicat-team/proot-scicat (uproot, stale since 2026-05)  ← direct ancestor (fork base)
         │
-        ▼ 接管维护：修复 + 性能 + 兼容（本项目 42+ 提交）
-Raymer8639/neoproot（本项目）
+        ▼ took over maintenance: fixes + performance + compatibility (42+ commits)
+Raymer8639/neoproot (this project)
         ▲
-        │ 持续跟进、回移修复（如 link2symlink proc-fd 名字替换 7ff389a1）
-github.com/termux/proot（活跃维护）  ← 血缘源头 / 跟进目标
+        │ keeps tracking & backporting fixes (e.g. link2symlink proc-fd name substitution, 7ff389a1)
+github.com/termux/proot (actively maintained)  ← lineage origin / tracking target
 ```
 
-- **原始 PRoot**：[proot-me/proot](https://github.com/proot-me/proot)（上游已基本停更）
-- **直接祖先（原上游）**：[gitee.com/scicat-team/proot-scicat](https://gitee.com/scicat-team/proot-scicat)（**uproot**，C23/C++23 极致性能魔改版；2026-05 起停更）
-- **血缘源头 / 跟进目标**：[github.com/termux/proot](https://github.com/termux/proot)（Termux 团队活跃维护；本项目为 ARM64/Termux 场景，与其同源同生态）
-- **本项目**：自 2026 年 2 月起在 uproot 基础上接手维护，**持续迭代中**；修复与性能优化为本项目原创，同时按需从 termux/proot 回移修复
+- **Original PRoot**: [proot-me/proot](https://github.com/proot-me/proot) (effectively unmaintained upstream)
+- **Direct ancestor (former upstream)**: [gitee.com/scicat-team/proot-scicat](https://gitee.com/scicat-team/proot-scicat) (**uproot**, extreme-performance C23/C++23 fork; stale since 2026-05)
+- **Lineage origin / tracking target**: [github.com/termux/proot](https://github.com/termux/proot) (actively maintained by the Termux team; this project targets the ARM64/Termux use case and shares its origin and ecosystem)
+- **This project**: maintained since 2026-02 on top of uproot, **under active development**; fixes and optimizations are original to this project, with fixes backported from termux/proot as needed
 
-## 核心特性
+## Key features
 
-- ✅ 内置自动高优先级调度 `setpriority(-20)`，无需 ROOT 即可获得更强 CPU 资源倾向
-- ✅ 修复中文 VNC 退出卡死、注销需切后台等"祖传 bug"
-- ✅ 消除进程退出时的 `signal 11` 警告，增加进程存活判断
-- ✅ 最大延迟 ↓ 40%+，更顺滑；线程更公平、抖动更小
-- ✅ C23/C++23 现代精简架构，放弃通用兼容换取 ARMv8.2 满血性能
-- ✅ 内置 `neoproot.c` 主程序：自动处理 Termux 环境初始化（wake-lock、fd 上限、LD_* 清理），无需手工加启动参数
-- ✅ 移除上游魔改的路径翻译线程池（cond_wait 往返开销）：真机 syscall 处理速度与官方 PRoot 持平（lstat 304us/次 vs 原版 293-312us），修复 nvim 等高频操作卡顿
-- ✅ link2symlink 硬链接模拟全面兼容 pnpm / tsc（tsgo）——物化机制 + /proc/&lt;pid&gt;/fd/&lt;fd&gt; 名字替换（回移自 termux/proot 7ff389a1）解决 tsgo 的 O_PATH+readlink 真实路径探测（TS2307/TS6054/panic 全部解决）
+- ✅ Built-in automatic high-priority scheduling (`setpriority(-20)`) — stronger CPU resource affinity without ROOT
+- ✅ Fixes "legacy bugs" such as Chinese VNC exit hangs and logout requiring background switching
+- ✅ Eliminates the `signal 11` warning on process exit; adds process liveness checks
+- ✅ Max latency down 40%+, smoother; fairer threads, less jitter
+- ✅ Modern lean C23/C++23 architecture, trading generic compatibility for full ARMv8.2 performance
+- ✅ Built-in `neoproot.c` main program: automatic Termux environment initialization (wake-lock, fd limit, LD_* cleanup) — no manual startup flags needed
+- ✅ Removed the upstream-forked path translation thread pool (cond_wait round-trip overhead): on-device syscall handling now matches the official PRoot (lstat 304µs/call vs original 293–312µs), fixing jank in high-frequency operations like nvim
+- ✅ link2symlink hard-link emulation fully compatible with pnpm / tsc (tsgo) — the materialization mechanism plus /proc/&lt;pid&gt;/fd/&lt;fd&gt; name substitution (backported from termux/proot 7ff389a1) resolves tsgo's O_PATH+readlink real-path probing (TS2307/TS6054/panic all solved)
 
-## 性能数据
+## Performance
 
-来自 sysbench 高负载测试（低负载下与官方持平，无额外开销）：
+From sysbench high-load tests (on par with the official PRoot at low load, no extra overhead):
 
-| 负载 | 对比官方 PRoot |
-|------|---------------|
-| 低负载（素数 ≤ 10000） | 持平（误差范围内） |
-| 中高负载（50000） | **领先 2.9%** |
-| 极重负载（100000） | **领先 7.2%** |
+| Load | vs official PRoot |
+|------|-------------------|
+| Low (primes ≤ 10000) | On par (within noise) |
+| Medium-high (50000) | **Ahead by 2.9%** |
+| Extreme (100000) | **Ahead by 7.2%** |
 
-## 环境要求
+## Requirements
 
-- 64 位 ARM 设备（aarch64 / ARMv8.2+ 指令集，覆盖绝大多数 Android 手机）
-- Termux（或等效 Android Linux 环境）
-- **不适用于 x86_64**（代码刻意裁剪掉通用架构支持）
+- 64-bit ARM device (aarch64 / ARMv8.2+ instruction set, covering the vast majority of Android phones)
+- Termux (or an equivalent Android Linux environment)
+- **Not for x86_64** (generic architecture support is deliberately trimmed)
 
-## 快速开始
+## Quick start
 
-### 方式一：使用已发布二进制（推荐）
+### Option 1: use a released binary (recommended)
 
-从 [Releases](https://github.com/Raymer8639/neoproot/releases) 下载 `neoproot`，放入 `$PREFIX/bin` 并赋予执行权限：
+Download `neoproot` from [Releases](https://github.com/Raymer8639/neoproot/releases), put it in `$PREFIX/bin` and make it executable:
 
 ```sh
 chmod +x neoproot
 mv neoproot $PREFIX/bin/
 ```
 
-### 方式二：Termux 内源码构建
+### Option 2: build from source inside Termux
 
 ```sh
 pkg install clang make llvm binutils talloc upx
 git clone https://github.com/Raymer8639/neoproot.git
 cd neoproot
-sh build.sh install     # 构建并安装到 $PREFIX/bin
+sh build.sh install     # builds and installs to $PREFIX/bin
 ```
 
-> `upx` 可选：用于压缩二进制减小体积（`--ultra-brute --lzma` 压缩后通常只有 1~2 MB）。
-> 也可用 `make -C src neoproot MARCH="-march=native"` 针对你的 CPU 定制指令集。
+> `upx` is optional: it shrinks the binary (usually to 1–2 MB with `--ultra-brute --lzma`).
+> You can also use `make -C src neoproot MARCH="-march=native"` to target your CPU's instruction set.
 
-## 使用容器
+## Using a container
 
 ```sh
-# 以 root 身份进入 Debian/Ubuntu 容器（需已准备好 rootfs）
+# Enter a Debian/Ubuntu container as root (requires a prepared rootfs)
 neoproot -0 -r /data/data/com.termux/files/home/rootfs \
     -b /dev -b /proc -b /sys -b /sdcard \
     /usr/bin/env -i HOME=/root TERM=${TERM} PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     /bin/bash --login
 ```
 
-与官方 PRoot 用法完全一致，但 **无需** 手动 `unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW` —— `neoproot` 主程序会自动处理。
+Usage is identical to the official PRoot, but **no** manual `unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW` is needed — the `neoproot` main program handles it automatically.
 
-详细说明与 FAQ（node 报错 13、性能对比、VNC 等）见 [help.md](help.md)。
+See [help.md](help.md) for details and FAQs (node error 13, performance comparisons, VNC, etc.).
 
-## 版本命名
+## Versioning
 
-版本号沿用 termux/proot 风格（如 `5.1.107.90`）；本项目 Release 沿用历史后缀 `-scicat`（如 `v5.7.2-scicat`，2026-08-08）。变更历史见 [CHANGELOG.md](CHANGELOG.md)。
+Version numbers follow the termux/proot style (e.g. `5.1.107.90`); releases of this project keep the historical `-scicat` suffix (e.g. `v5.7.2-scicat`, 2026-08-08). See [CHANGELOG.md](CHANGELOG.md) for the change history.
 
-## 构建产物说明
+## Build notes
 
-- 编译目标默认 `-march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto`（可用 `MARCH=` 覆盖）
-- 链接选项：`-flto=thin`、`--gc-sections`、`--icf=all`、RELRO/NOW、去符号
-- 依赖：`libtalloc`（Termux 包名 `talloc`）
+- Default compile target: `-march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto` (overridable via `MARCH=`)
+- Link options: `-flto=thin`, `--gc-sections`, `--icf=all`, RELRO/NOW, stripped
+- Dependency: `libtalloc` (Termux package name `talloc`)
 
-## 维护
+## Maintenance
 
-本项目由社区接手维护，欢迎：
+This project is community-maintained. Welcome to:
 
-- 提交 [Issue](https://github.com/Raymer8639/neoproot/issues) 报告问题
-- 提交 PR 修复 bug、优化性能
-- 在 [Discussions](https://github.com/Raymer8639/neoproot/discussions) 交流使用心得
+- Report issues via [Issue](https://github.com/Raymer8639/neoproot/issues)
+- Submit PRs for bug fixes and performance improvements
+- Discuss at [Discussions](https://github.com/Raymer8639/neoproot/discussions)
 
-## 许可证
+## License
 
-GPLv2，详见 [COPYING](COPYING)。
+GPLv2, see [COPYING](COPYING).
