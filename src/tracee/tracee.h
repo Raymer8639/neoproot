@@ -118,6 +118,11 @@ typedef struct tracee {
 	 * GKI 5.15 上为死代码，仅远期兼容）。0 = 未捕获。 */
 	word_t execfn_addr;
 
+	/* 生成的 auxv 正确内容临时文件的 host 路径（bind_proc_pid_auxv
+	 * 每次 exec 重建时填充）。guest open /proc/self/auxv 时 enter 侧
+	 * 直接改写为它——绕过 -b /proc 绑定优先级问题（auxv 通道 2）。 */
+	char *auxv_host_path;
+
 	TALLOC_CTX *ctx;
 	TALLOC_CTX *life_context;
 

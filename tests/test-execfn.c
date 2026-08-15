@@ -27,10 +27,9 @@ int main(int argc, char **argv)
     if (!ef || strcmp(ef, argv[0]) != 0)
         fail++;
 
-    /* 通道 2：/proc/self/auxv 读（已知限制，不计失败）
-     * -b /proc 场景下用户绑定优先级高于内部 auxv 绑定，读到的仍是
-     * 内核视图（loader 临时路径）。修复需 read 出口补丁 + read 入
-     * seccomp 过滤表，成本与风险不匹配，暂缓（见 PR 描述）。 */
+    /* 通道 2：/proc/self/auxv 读
+     * 修复方式：enter 侧把 open(/proc/self/auxv) 路径改写为生成的
+     * 正确内容临时文件（绕过 -b /proc 绑定优先级）。 */
     FILE *f = fopen("/proc/self/auxv", "rb");
     if (f) {
         unsigned long type, value;
@@ -41,13 +40,18 @@ int main(int argc, char **argv)
                 break;
             if (type == AT_EXECFN) {
                 const char *p = (const char *)value;
-                printf("proc/self/auxv AT_EXECFN: %s (known-limitation, not fatal)\n", p);
+                printf("proc/self/auxv AT_EXECFN: %s\n", p);
+                if (strcmp(p, argv[0]) != 0)
+                    fail++;
                 found = 1;
                 break;
             }
         }
         fclose(f);
-        (void)found;
+        if (!found)
+            fail++;
+    } else {
+        fail++;
     }
 
     printf(fail ? "RESULT: FAIL (%d)\n" : "RESULT: ALL PASS\n", fail);
