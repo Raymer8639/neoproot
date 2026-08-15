@@ -261,6 +261,7 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
     Finality fin;
     const char *cursor;
     int res;
+    unsigned int symlinks_followed = 0; /* 上游 d86f355：跨顺序链计数 */
     if (UNLIKELY(recursion_level > MAXSYMLINKS)) return -ELOOP;
     if (UNLIKELY(!user_path || !guest_path)) return -EINVAL;
     if (UNLIKELY(neon_strlen_fast(user_path) >= PATH_MAX)) return -ENAMETOOLONG;
@@ -331,7 +332,9 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
         res = detranslate_path(tracee, scratch_path, host_path);
         if (UNLIKELY(res < 0)) return res;
 canon_symlink:
-        res = canonicalize(tracee, scratch_path, true, guest_path, recursion_level + 1);
+        /* 上游 d86f355：顺序符号链接也计入 MAXSYMLINKS（单路径内多条
+         * 不同的链逐个解引用时同样受限，不只深层嵌套） */
+        res = canonicalize(tracee, scratch_path, true, guest_path, recursion_level + (++symlinks_followed));
         if (UNLIKELY(res < 0)) return res;
         res = substitute_binding_stat(tracee, fin, recursion_level, guest_path, host_path);
         if (UNLIKELY(res < 0)) return res;
