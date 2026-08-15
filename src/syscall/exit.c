@@ -468,14 +468,39 @@ write_back:
         goto end;
 
     case PR_prctl: {
-        /* 上游 571a6c0：记录 guest 自发的 no_new_privs 请求（成功且
-         * guest 已跑起来时；内核只接受 arg2==1）。neoproot 自身在初始
-         * execve 前设的真实标志不算（seen_execve 守卫）。单向闩锁，
-         * 永不清除，与内核 fork/execve 语义一致。 */
         word_t option = peek_reg(tracee, ORIGINAL, SYSARG_1);
-        if (option == PR_SET_NO_NEW_PRIVS) {
-            if (tracee->seen_execve && (int) syscall_result == 0)
-                tracee->no_new_privs = true;
+#ifndef PR_GET_AUXV
+#define PR_GET_AUXV 0x41555856
+#endif
+        /* PR_GET_AUXV（内核 6.4+）：内核返回的 auxv 里 AT_EXECFN 仍指向
+         * loader 临时路径（loader BRANCH 不进内核，补不了）——出口侧
+         * 扫描返回缓冲区，把 AT_EXECFN 的值改成 execfn_addr（= guest
+         * 栈上 argv[0] 指针，execve 出口已捕获）。本机 GKI 5.15 无此
+         * syscall，属远期兼容死代码；纯缓冲区后处理，无寄存器 poke。 */
+        if (option == PR_GET_AUXV) {
+            word_t buf_addr, buf_max, offset, entry_size, type;
+            if ((int) syscall_result < 0)
+                goto end;
+            if (tracee->execfn_addr == 0)
+                goto end;
+            buf_max = peek_reg(tracee, ORIGINAL, SYSARG_3);
+            if (syscall_result > buf_max)
+                goto end;
+            buf_addr   = peek_reg(tracee, ORIGINAL, SYSARG_2);
+            entry_size = 2 * sizeof_word(tracee);
+            for (offset = 0; offset + entry_size <= syscall_result; offset += entry_size) {
+                errno = 0;
+                type = peek_word(tracee, buf_addr + offset);
+                if (errno != 0)
+                    break;
+                if (type == AT_NULL)
+                    break;
+                if (type == AT_EXECFN) {
+                    poke_word(tracee, buf_addr + offset + sizeof_word(tracee),
+                              tracee->execfn_addr);
+                    break;
+                }
+            }
             goto end;
         }
         break;

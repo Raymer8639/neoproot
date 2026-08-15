@@ -353,6 +353,7 @@ int new_child(Tracee *parent, word_t clone_flags) {
     child->sysexit_pending = parent->sysexit_pending;
     child->no_new_privs = parent->no_new_privs;
     child->seen_execve = parent->seen_execve;
+    child->execfn_addr = parent->execfn_addr;
 #ifdef HAS_POKEDATA_WORKAROUND
     child->pokedata_workaround_stub_addr = parent->pokedata_workaround_stub_addr;
 #endif

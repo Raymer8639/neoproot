@@ -167,13 +167,17 @@ extern "C" void _start(void *cursor)
                     case AT_PHNUM:   sp[1] = stmt->start.at_phnum;   break;
                     case AT_ENTRY:   sp[1] = stmt->start.at_entry;   break;
                     case AT_BASE:    sp[1] = at_base;                break;
-                    // 关键修复：不再覆写 AT_EXECFN
+                    // 2026-08-15：AT_EXECFN 覆写为 argv[0] 指针（= 上方
+                    // 捕获的 at_execfn，guest 程序的真实名字）。历史教训：
+                    // stmt->start.at_execfn 指向 raw host 路径（addr3），
+                    // 会把 host 路径暴露给 guest——必须用栈上 argv[0] 指针。
+                    case AT_EXECFN:  sp[1] = at_execfn;              break;
                     default: break;
                 }
                 sp += 2;
             } while (sp[0] != AT_NULL);
 
-            // 关键修复：使用栈上原始 at_execfn，不使用 stmt->start.at_execfn
+            // 使用栈上原始 at_execfn（argv[0] 指针），不用 stmt->start.at_execfn
             WordType name = basename(at_execfn);
             SYSCALL(PRCTL, 3, PR_SET_NAME, name, 0);
 
