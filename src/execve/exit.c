@@ -154,7 +154,9 @@ static int transfer_load_script(Tracee *tr)
     str2 = (info->interp) ? strlen(info->interp->user_path) + 1 : 0;
     str3 = (info->raw_path == info->user_path) ? 0 : strlen(info->raw_path) + 1;
 
-    align     = sizeof_word(tr);
+    /* 上游 28baec5：AArch64 要求 SP 16 字节对齐（AAPCS64），
+     * 本 fork 仅 arm64，直接按 16 对齐 */
+    align     = 16;
     pad       = (align - ((sp - str1 - str2 - str3) % align)) % align;
     total_str = str1 + str2 + str3 + pad;
 
