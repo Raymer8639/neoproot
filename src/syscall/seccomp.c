@@ -276,6 +276,7 @@ static FilteredSysnum proot_sysnums[] = {
     { PR_oldstat,       0 },
     { PR_open,          0 },
     { PR_openat,        0 },
+    { PR_openat2,       0 },
     { PR_pivot_root,    0 },
     { PR_prctl,         0 },
     { PR_prlimit64,     FILTER_SYSEXIT },
