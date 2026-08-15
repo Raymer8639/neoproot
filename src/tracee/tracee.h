@@ -113,6 +113,11 @@ typedef struct tracee {
 	 * 会被伪结果覆盖，须在模拟/重启前从入口快照恢复。 */
 	bool restore_sysarg1_after_sigsys;
 
+	/* guest 最终栈上 argv[0] 的地址（execve 出口从栈上抓取，只读）。
+	 * 用于 PR_GET_AUXV 出口补丁（内核 6.4+ 才有该 syscall；本机
+	 * GKI 5.15 上为死代码，仅远期兼容）。0 = 未捕获。 */
+	word_t execfn_addr;
+
 	TALLOC_CTX *ctx;
 	TALLOC_CTX *life_context;
 

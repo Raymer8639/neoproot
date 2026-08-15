@@ -681,8 +681,14 @@ int translate_syscall_enter(Tracee *tracee)
             status = 0;
         }
         if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_SET_NO_NEW_PRIVS) {
-            tracee->sysexit_pending = true;
-            tracee->restart_how = PTRACE_SYSCALL;
+            /* 真实标志已被 neoproot 提前设置（seccomp 过滤器前提），
+             * guest 的 SET 必然成功——enter 侧直接标记，无需 exit 停靠。
+             * （原 571a6c0 移植用 sysexit_pending+PTRACE_SYSCALL 强制
+             * 停靠：旧 seccomp 模式下会触发 IS_IN_SYSENTER 断言，改此
+             * 安全写法。）seen_execve 守卫：loader 在初始 execve 前也调
+             * SET，那次不算 guest 意图。 */
+            if (tracee->seen_execve)
+                tracee->no_new_privs = true;
         }
         break;
 

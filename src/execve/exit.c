@@ -21,6 +21,24 @@
 #include "cli/note.h"
 #include "attribute.h"
 
+/* 从当前栈抓取 argv[0] 指针（只读 peek，errno 守卫）：
+ * 栈布局 sp[0]=argc、sp[1]=argv[0] 指针。execve 出口时栈 = aoxp
+ * 推入的 guest 栈（loader 复用同一 sp）。 */
+static void capture_execfn_addr(Tracee *tr)
+{
+    word_t sp0 = peek_reg(tr, CURRENT, STACK_POINTER);
+    word_t argc0 = 0;
+    errno = 0;
+    if (sp0 != 0)
+        argc0 = peek_word(tr, sp0);
+    if (errno == 0 && argc0 > 0 && argc0 < 4096) {
+        errno = 0;
+        tr->execfn_addr = peek_word(tr, sp0 + sizeof_word(tr));
+        if (errno != 0)
+            tr->execfn_addr = 0;
+    }
+}
+
 static int fill_file_with_auxv(const Tracee *tr, const char *path, const ElfAuxVector *vectors)
 {
     const ssize_t word_size = sizeof_word(tr);
@@ -76,6 +94,21 @@ static int bind_proc_pid_auxv(const Tracee *tr)
     vectors = fetch_elf_aux_vectors(tr, vec_addr);
     if (!vectors)
         return -1;
+
+    /* AT_EXECFN 修补（2026-08-15）：bind 发生在 loader 运行之前，
+     * 此时栈上 auxv 还是内核原版（AT_EXECFN = loader 临时路径）。
+     * loader 稍后会修补栈，但本文件内容已固化——这里把数组里
+     * AT_EXECFN 的值改成 execfn_addr（guest 栈上 argv[0] 指针，
+     * 通知分支已捕获）。纯数据结构改写，无寄存器 poke。 */
+    if (tr->execfn_addr != 0) {
+        size_t j;
+        for (j = 0; vectors[j].type != AT_NULL; j++) {
+            if (vectors[j].type == AT_EXECFN) {
+                vectors[j].value = tr->execfn_addr;
+                break;
+            }
+        }
+    }
 
     guest_path = talloc_asprintf(tr->ctx, "/proc/%d/auxv", tr->pid);
     if (!guest_path)
@@ -260,6 +293,9 @@ void translate_execve_exit(Tracee *tr)
     if (IS_NOTIFICATION_PTRACED_LOAD_DONE(tr)) {
         word_t orig_sp, orig_ip;
 
+        /* 抓取 argv[0] 指针（供 auxv 绑定文件 + PR_GET_AUXV 补丁） */
+        capture_execfn_addr(tr);
+
         poke_reg(tr, SYSARG_RESULT, 0);
         set_sysnum(tr, PR_execve);
 
@@ -289,6 +325,12 @@ void translate_execve_exit(Tracee *tr)
     /* 上游 571a6c0：guest 程序已在跑——此后的 PR_SET_NO_NEW_PRIVS
      * 调用属于 guest，不属于 neoproot 自身的 pre-execve 设置。 */
     tr->seen_execve = true;
+
+    /* 抓 argv[0] 指针（供 PR_GET_AUXV 出口补丁使用）。
+     * 注：/proc/<pid>/auxv 的绑定在 -b /proc 场景不生效（用户绑定
+     * 优先级更高，guest 读 /proc/self/auxv 走宿主内核视图）——该通道
+     * 留待 read 出口补丁方案（需 read 入过滤表，暂缓）。 */
+    capture_execfn_addr(tr);
 
     if (tr->new_exe) {
         talloc_unlink(tr, tr->exe);
