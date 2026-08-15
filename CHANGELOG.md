@@ -3,6 +3,23 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.7.3] - 2026-08-15
+
+**neoproot 时代首个正式版（项目/二进制改名后）**
+
+- 上游 termux/proot 跟进（选择性回移）：
+  - link2symlink `/proc/<pid>/fd/<fd>` 名字替换（7ff389a1，fork 适配：FILTER_SYSEXIT open 家族 / GUEST_PATH 链名采集 / self-fd 解析 / 同目录模式补记）
+  - openat2 支持（114a7c6，现代 tar/coreutils 解包）
+  - canon 顺序符号链接计入 MAXSYMLINKS（d86f355）
+  - AArch64 SP 16 字节对齐（28baec5）——**容器启动体感加速**
+  - seccomp 合成 sysexit 后恢复 SYSARG_1（cd02c79，ARM 寄存器别名）
+  - no_new_privs 按 guest 意图报告（571a6c0，enter 侧标记版，sudo-rs 兼容）
+- AT_EXECFN 三通道闭环：getauxval（loader 栈上 auxv 修补）+ /proc/self/auxv（open enter 改写）+ PR_GET_AUXV（出口后处理，内核 6.4+ 远期）
+- 修复首次 seccomp 事件模式探测竞态（flags=0 首事件误入断言，fork 既有隐患）
+- 项目改名 neoproot（GitHub 仓库 Raymer8639/neoproot；二进制 neoproot，uproot 软链兼容）
+- README 双语化（英文默认 + README.zh-CN.md）
+
+
 ## [5.6.0-scicat] - 2026-05-01
 
 **（当前版本，上游最后一次提交）**
