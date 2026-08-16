@@ -317,6 +317,7 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
              * 链路径变成普通文件，而 cache 仍记录为 symlink → readlink 失败
              * （EINVAL/ENOTDIR），导致 execve 翻译返回 -EPERM。
              * 重新 lstat 验证：已非符号链接则更新 cache 并按普通文件继续。 */
+            const int saved_errno = errno;
             struct stat st_now;
             if (LIKELY(lstat(host_path, &st_now) == 0 && !S_ISLNK(st_now.st_mode))) {
                 stat_cache_insert(host_path, &st_now);
@@ -325,7 +326,7 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
                 if (UNLIKELY(res < 0)) return res;
                 continue;
             }
-            return res;
+            return -saved_errno;
         }
         if (UNLIKELY((size_t)res >= PATH_MAX)) return -ENAMETOOLONG;
         scratch_path[res] = '\0';

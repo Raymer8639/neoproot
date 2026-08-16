@@ -307,10 +307,25 @@ Binding *new_binding(Tracee *restrict tracee, const char *host, const char *gues
 	Binding *b = talloc_zero(tracee->ctx, Binding);
 	if (UNLIKELY(!b))
 		return NULL;
-	int st = realpath2(tracee->reconf.tracee, b->host.path, host, true);
-	if (st < 0 && must_exist && getenv("PROOT_IGNORE_MISSING_BINDINGS") == NULL) {
-		note(tracee, WARNING, INTERNAL, "bad binding: %s", host);
-		goto fail;
+	int st;
+	/* /proc/self/... 必须在 syscall 时按 tracee 自己的 pid 解析，
+	 * 不能在初始化时用 realpath() 解析成 proot 的 pid。 */
+	if (strncmp(host, "/proc/self", strlen("/proc/self")) == 0
+	    && (host[strlen("/proc/self")] == '/' || host[strlen("/proc/self")] == '\0')) {
+		if (strnlen(host, PATH_MAX) >= PATH_MAX) {
+			if (must_exist && getenv("PROOT_IGNORE_MISSING_BINDINGS") == NULL)
+				note(tracee, WARNING, INTERNAL, "can't sanitize binding \"%s\": %s",
+					host, strerror(ENAMETOOLONG));
+			goto fail;
+		}
+		strcpy(b->host.path, host);
+		st = 0;
+	} else {
+		st = realpath2(tracee->reconf.tracee, b->host.path, host, true);
+		if (st < 0 && must_exist && getenv("PROOT_IGNORE_MISSING_BINDINGS") == NULL) {
+			note(tracee, WARNING, INTERNAL, "bad binding: %s", host);
+			goto fail;
+		}
 	}
 	b->host.length = fast_strlen(b->host.path);
 	if (!guest)
@@ -340,9 +355,16 @@ static void initialize_binding(Tracee *restrict tracee, Binding *restrict b) {
 			path[len-1] = 0;
 		fast_memcpy(b->guest.path, "/", 2);
 		struct stat st;
-		if (lstat(b->host.path, &st) == 0)
-			tracee->glue_type = (S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode))
-				? S_IFREG : (st.st_mode & S_IFMT);
+		int bst = lstat(b->host.path, &st);
+		/* /dev/std* 这类 host 是 symlink/magic link 时，build_glue()
+		 * 无法用 mknod 复现符号链接，统一降级为普通文件占位。 */
+		tracee->glue_type = (bst < 0 || S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode)
+				     || S_ISLNK(st.st_mode))
+			? S_IFREG : (st.st_mode & S_IFMT);
+		/* host 源是目录但 guest 目标是符号链接时，保留字面目标路径，
+		 * 否则绑定会注册到链接指向的真实路径，stat 字面目标仍是链接。 */
+		if (bst >= 0 && S_ISDIR(st.st_mode))
+			deref = false;
 		if (canonicalize(tracee, path, deref, b->guest.path, 0) < 0)
 			return;
 		chop_finality(b->guest.path);

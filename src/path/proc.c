@@ -54,6 +54,21 @@ Action readlink_proc(const Tracee *tracee, char result[PATH_MAX],
 		return DEFAULT;
 	}
 
+	/* 当 -b /proc/self/fd:/dev/fd 这类绑定把 /proc/self 映射到 guest
+	 * 路径时，canonicalize() 可能以 base="/proc/self/fd" 进入这里。
+	 * 先把 self 归一化为 tracee 自身 pid，否则 atoi("self/fd")==0
+	 * 会提前 DEFAULT，落到 proot 自己命名空间里 readlink。 */
+	char normalized_base[PATH_MAX];
+	if (strncmp(base + strlen("/proc/"), "self", 4) == 0
+	    && (base[strlen("/proc/self")] == '/' || base[strlen("/proc/self")] == '\0')) {
+		status = snprintf(normalized_base, sizeof(normalized_base),
+				  "/proc/%d%s", tracee->pid,
+				  base + strlen("/proc/self"));
+		if (status < 0 || (size_t) status >= sizeof(normalized_base))
+			return -EPERM;
+		base = normalized_base;
+	}
+
 	pid = atoi(base + strlen("/proc/"));
 	if (pid == 0)
 		return DEFAULT;
