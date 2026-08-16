@@ -259,8 +259,9 @@ static FORCE_INLINE void handle_socketcall_exit(Tracee *tracee, Config *config) 
     if (domain == AF_NETLINK) remember_fd(config, fd, protocol);
 }
 
-static FORCE_INLINE void handle_close_exit(Tracee *tracee, Config *config) {
-    if ((int)peek_reg(tracee, CURRENT, SYSARG_RESULT) < 0) return;
+/* close 在 seccomp 下改走 sysenter 停靠（pipe shadow 需要），
+ * 这里在 enter 阶段清除 netlink 跟踪即可。 */
+static FORCE_INLINE void handle_close_enter(Tracee *tracee, Config *config) {
     int fd = (int)peek_reg(tracee, ORIGINAL, SYSARG_1);
     struct PendingReply *p = get_pending(config, fd, false);
     if (p) clear_pending(p);
@@ -389,7 +390,7 @@ int netlink_route_callback(Extension *extension, ExtensionEvent event, intptr_t 
                 { PR_sendto,     FILTER_SYSEXIT },
                 { PR_recvfrom,   FILTER_SYSEXIT },
                 { PR_recvmsg,    FILTER_SYSEXIT },
-                { PR_close,      FILTER_SYSEXIT },
+                { PR_close,      0 },
                 FILTERED_SYSNUM_END
             };
             Config *config = talloc_zero(extension, Config);
@@ -429,6 +430,9 @@ int netlink_route_callback(Extension *extension, ExtensionEvent event, intptr_t 
                     }
                     return 0;
                 }
+                case PR_close:
+                    handle_close_enter(tracee, config);
+                    return 0;
                 default: return 0;
             }
         }
@@ -441,7 +445,6 @@ int netlink_route_callback(Extension *extension, ExtensionEvent event, intptr_t 
                 case PR_socketcall:  handle_socketcall_exit(tracee, config); return 0;
                 case PR_bind:        handle_bind_exit(tracee, config); return 0;
                 case PR_sendto:      handle_sendto_exit(tracee, config); return 0;
-                case PR_close:       handle_close_exit(tracee, config); return 0;
                 default: return 0;
             }
         }
