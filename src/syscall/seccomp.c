@@ -36,7 +36,7 @@ static_assert(offsetof(struct seccomp_data, nr) < UINT32_MAX, "nr offset too lar
 #define DEBUG_FILTER(...)
 
 /* ioctl args1 过滤版指令数（1 JEQ nr + 1 LD args1 + 6 对 JEQ+RET = 14） */
-#define IOCTL_ARGS1_STMTS 14
+#define IOCTL_ARGS1_STMTS 16
 
 static ALWAYS_INLINE int new_program_filter(struct sock_fprog *restrict program) {
     program->filter = talloc_array(NULL, struct sock_filter, 0);
@@ -188,9 +188,10 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums) {
                         0x402c542c,  /* TCSETSW2 _IOW('T',0x2C,termios2) */
                         0x402c542d,  /* TCSETSF2 _IOW('T',0x2D,termios2) */
                         0x40049409,  /* _IOW(0x94, 9, int) DRM */
+                        0x00008933,  /* SIOCGIFINDEX _IOR('s', 0x33, int) */
                     };
                     ret = add_trace_syscall_args1(&prog, sc, sysnums[k].flags,
-                                                  ioctl_cmds, 6);
+                                                  ioctl_cmds, 7);
                 } else {
                     ret = add_trace_syscall(&prog, sc, sysnums[k].flags);
                 }

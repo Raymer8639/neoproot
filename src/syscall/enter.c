@@ -2,6 +2,8 @@
 #include <talloc.h>
 #include <sys/un.h>
 #include <linux/net.h>
+#include <linux/sockios.h>
+#include <net/if.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <string.h>
@@ -124,6 +126,34 @@ static int translate_path2_parent(Tracee *tracee, int dir_fd, char path[PATH_MAX
 
     return set_sysarg_path(tracee, translated_path, reg);
 }
+
+#ifdef __ANDROID__
+/* 上游 d30b98846（适配）：Android 常拒绝非 lo 的 SIOCGIFINDEX，
+ * 在 tracer 里用 if_nametoindex() 查真实接口号，写回 ifreq。 */
+static bool maybe_fake_siocgifindex(Tracee *tracee, word_t cmd, word_t arg)
+{
+    char name[IFNAMSIZ];
+    int ifindex;
+
+    if (cmd != SIOCGIFINDEX || arg == 0)
+        return false;
+
+    if (read_data(tracee, name, arg, sizeof(name)) < 0)
+        return false;
+    name[IFNAMSIZ - 1] = '\0';
+
+    ifindex = (int) if_nametoindex(name);
+    if (ifindex <= 0) {
+        if (strcmp(name, "lo") != 0)
+            return false;
+        ifindex = 1;
+    }
+
+    if (write_data(tracee, arg + IFNAMSIZ, &ifindex, sizeof(ifindex)) < 0)
+        return false;
+    return true;
+}
+#endif /* __ANDROID__ */
 
 static int translate_sysarg(Tracee *tracee, Reg reg, Type type)
 {
@@ -825,8 +855,19 @@ int translate_syscall_enter(Tracee *tracee)
         break;
 
 #ifdef __ANDROID__
-    case PR_ioctl:
-        if (peek_reg(tracee, CURRENT, SYSARG_2) == TCSETS + 2) {
+    case PR_ioctl: {
+        word_t cmd = peek_reg(tracee, CURRENT, SYSARG_2);
+        word_t arg = peek_reg(tracee, CURRENT, SYSARG_3);
+
+        /* 上游 d30b98846：SIOCGIFINDEX 由 tracer 用 if_nametoindex 回答，
+         * 避免 Android 对非 lo 接口 EACCES。 */
+        if (cmd == SIOCGIFINDEX && maybe_fake_siocgifindex(tracee, cmd, arg)) {
+            poke_reg(tracee, SYSARG_RESULT, 0);
+            set_sysnum(tracee, PR_void);
+            break;
+        }
+
+        if (cmd == TCSETS + 2) {
             poke_reg(tracee, SYSARG_2, TCSETS + TCSANOW);
         }
 
@@ -849,6 +890,7 @@ int translate_syscall_enter(Tracee *tracee)
             poke_reg(tracee, SYSARG_2, TCSETS);
         }
         break;
+    }
 #endif
 
     case PR_memfd_create:
