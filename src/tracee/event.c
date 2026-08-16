@@ -24,6 +24,7 @@
 #include "path/binding.h"
 #include "syscall/syscall.h"
 #include "syscall/seccomp.h"
+#include "syscall/pipe_shadow.h"
 #include "ptrace/wait.h"
 #include "extension/extension.h"
 #include "execve/elf.h"
@@ -105,6 +106,14 @@ static void kill_all_tracees2(int signum, siginfo_t *siginfo, void *ucontext)
     }
 
     atomic_flag_clear_explicit(&handling_signal, memory_order_release);
+}
+
+/* 仅用于中断 waitpid()，让事件循环有机会处理 shadow pipe。 */
+static void wakeup_event_loop(int signum, siginfo_t *siginfo, void *ucontext)
+{
+    [[maybe_unused]] const int unused_sig = signum;
+    [[maybe_unused]] siginfo_t *const unused_si = siginfo;
+    [[maybe_unused]] void *const unused_uc = ucontext;
 }
 
 // ==================== talloc 调试辅助函数 ====================
@@ -296,6 +305,18 @@ int event_loop(void)
         }
     }
 
+    /* Shadow pipe 需要在没有 tracee 事件时也能被定时释放：SIGALRM
+     * 用来打断 waitpid()，但不要 SA_RESTART。 */
+    memset(&signal_action, 0, sizeof(signal_action));
+    signal_action.sa_flags = SA_SIGINFO;
+    signal_action.sa_sigaction = wakeup_event_loop;
+    status = sigfillset(&signal_action.sa_mask);
+    if (status < 0)
+        note(NULL, WARNING, SYSTEM, "sigfillset()");
+    status = sigaction(SIGALRM, &signal_action, NULL);
+    if (status < 0)
+        note(NULL, WARNING, SYSTEM, "sigaction(SIGALRM)");
+
     for (;;) {
         int tracee_status;
         Tracee *tracee;
@@ -304,14 +325,23 @@ int event_loop(void)
 
         free_terminated_tracees();
 
+        shadow_pipes_reap();
+        shadow_pipes_set_timer(shadow_pipes_held());
+
         const bool root_exited_flag = atomic_load_explicit(&root_exited, memory_order_acquire);
         if (root_exited_flag) {
+            shadow_pipes_set_timer(false);
             atomic_store_explicit(&is_exiting_normally, true, memory_order_release);
             kill_all_tracees_safely();
             break;
         }
 
         pid = waitpid(-1, &tracee_status, __WALL);
+        {
+            const int saved_errno = errno;
+            shadow_pipes_set_timer(false);
+            errno = saved_errno;
+        }
 
         if (pid < 0) {
             if (errno == ECHILD) {
@@ -319,6 +349,8 @@ int event_loop(void)
                 kill_all_tracees_safely();
                 break;
             }
+            if (errno == EINTR)
+                continue;
             continue;
         }
 

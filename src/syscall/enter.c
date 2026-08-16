@@ -19,6 +19,7 @@
 #include "ptrace/ptrace.h"
 #include "ptrace/wait.h"
 #include "syscall/heap.h"
+#include "syscall/pipe_shadow.h"
 #include "extension/extension.h"
 #include "compat.h"
 #include "execve/execve.h"
@@ -193,6 +194,15 @@ int translate_syscall_enter(Tracee *tracee)
     default:
         status = 0;
         break;
+
+    case PR_close: {
+        /* 上游 a581fbc07：在 close 真正执行前，若 fd 是匿名管道读端，
+         * 在 tracer 里开一个 shadow 引用，避免 ptrace 序列化导致子写端
+         * 在父读端关闭后 EPIPE（进程替换等场景）。 */
+        int closed_fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+        shadow_pipe_read_end(tracee->pid, closed_fd);
+        break;
+    }
 
     case PR_execve:
         status = translate_execve_enter(tracee);
