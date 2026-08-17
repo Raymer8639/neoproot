@@ -53,7 +53,7 @@
 #define HOT __attribute__((hot))
 
 #define POKE_MEM_ID(sysarg, field) do {                                 \
-    poke_uint16(tracee, peek_reg(tracee, ORIGINAL, sysarg), config->field); \
+    poke_uint32(tracee, peek_reg(tracee, ORIGINAL, sysarg), config->field); \
     if (UNLIKELY(errno != 0)) return -errno;                            \
 } while(0)
 
