@@ -67,7 +67,7 @@ typedef struct tracee {
 	int          fake_netlink_fds[MAX_FAKE_NETLINK_FDS];
 	int          fake_netlink_fds_count;
 	bool         pending_fake_netlink_socket;
-#define MAX_FAKE_NETLINK_REPLY 1024
+#define MAX_FAKE_NETLINK_REPLY 8192
 	uint8_t      fake_netlink_reply[MAX_FAKE_NETLINK_REPLY] __attribute__((aligned(8)));
 	size_t       fake_netlink_reply_len;
 
