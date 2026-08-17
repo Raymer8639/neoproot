@@ -186,6 +186,14 @@ void translate_syscall_exit(Tracee *tracee)
 
     case PR_fchdir:
     case PR_chdir:
+    /* 上游 f2c5744：这些 syscall 在 enter.c 被 PR_void，确保
+     * 即使 AVOIDER 泄漏 -ENOSYS，tracee 也看到 0 返回值。 */
+    case PR_unshare:
+    case PR_setns:
+    case PR_mount:
+    case PR_umount:
+    case PR_umount2:
+    case PR_pivot_root:
         status = 0;
         break;
 
