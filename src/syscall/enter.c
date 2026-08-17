@@ -421,6 +421,17 @@ void apply_emulated_pivot_root(Tracee *tracee)
  * 避免破坏 stock Linux 上正常使用 netlink 的程序。 */
 bool host_blocks_af_netlink(const Tracee *tracee)
 {
+#ifdef __ANDROID__
+    /* Android SELinux can permit our probe yet reject the guest's later
+     * unconnected rtnetlink traffic.  Always emulate on Termux: the
+     * synthetic path is deterministic and avoids glibc/iproute2 hangs. */
+    static bool reported;
+    if (!reported) {
+        VERBOSE(tracee, 1, "forcing AF_NETLINK emulation on Android");
+        reported = true;
+    }
+    return true;
+#else
     enum { PROBE_UNKNOWN, PROBE_ALLOWED, PROBE_BLOCKED };
     static int cached = PROBE_UNKNOWN;
     struct {
@@ -482,6 +493,7 @@ blocked:
                        "AF_UNIX fallback for sandbox helpers",
             blocked_op, strerror(saved_errno));
     return true;
+#endif
 }
 
 /* 上游 4abc88b + f97b627：AF_NETLINK 仿真辅助。 */
