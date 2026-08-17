@@ -409,7 +409,6 @@ int new_child(Tracee *parent, word_t clone_flags) {
                 (void) insort_binding3(child, child->fs,
                                        iter->host.path,
                                        iter->guest.path);
-            parent->clone_stripped_newns = false;
         }
         else {
             /* Bindings are shared across file-system name-spaces since a
@@ -420,6 +419,9 @@ int new_child(Tracee *parent, word_t clone_flags) {
             child->fs->bindings.host  = talloc_reference(child->fs, parent->fs->bindings.host);
         }
     }
+
+    /* 上游 6a1f1fe：无论走哪条分支，消费掉 stripped-NEWNS 标记。 */
+    parent->clone_stripped_newns = false;
 
     child->exe     = talloc_reference(child, parent->exe);
     child->qemu    = talloc_reference(child, parent->qemu);
