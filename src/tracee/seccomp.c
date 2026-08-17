@@ -91,10 +91,8 @@ static int handle_seccomp_event_common(Tracee *restrict tracee) {
         set_result_after_seccomp(tracee, status);
         return 0;
     }
-    if (status >= 1) {
-        set_result_after_seccomp(tracee, 0);
+    if (status >= 1)
         return 0;
-    }
 
     const Sysnum sysnum = get_sysnum(tracee, CURRENT);
     switch (sysnum) {
