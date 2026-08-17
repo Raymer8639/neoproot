@@ -704,7 +704,10 @@ int translate_syscall_enter(Tracee *tracee)
     /* 上游 4abc88b：AF_NETLINK 仿真。 */
     case PR_socket: {
         word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
-        if (domain == AF_NETLINK && host_blocks_af_netlink(tracee)) {
+        word_t protocol = peek_reg(tracee, CURRENT, SYSARG_3);
+        if (   domain == AF_NETLINK
+            && protocol == NETLINK_ROUTE
+            && host_blocks_af_netlink(tracee)) {
             word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
             poke_reg(tracee, SYSARG_1, AF_UNIX);
             poke_reg(tracee, SYSARG_2, SOCK_DGRAM | (type & SOCK_CLOEXEC));
