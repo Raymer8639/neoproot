@@ -201,6 +201,28 @@ static int handle_seccomp_event_common(Tracee *restrict tracee) {
         case PR_setgroups32:
             set_result_after_seccomp(tracee, 0);
             break;
+
+        /* 上游 e754452：Android 父进程 seccomp 常 trap mount/umount/
+         * pivot_root/unshare/setns，这里镜像 enter.c 的模拟，让
+         * bubblewrap 这类沙箱工具能继续。 */
+        case PR_mount:
+            apply_emulated_mount(tracee);
+            set_result_after_seccomp(tracee, 0);
+            break;
+        case PR_pivot_root:
+            apply_emulated_pivot_root(tracee);
+            set_result_after_seccomp(tracee, 0);
+            break;
+        case PR_umount:
+        case PR_umount2:
+            apply_emulated_umount(tracee);
+            set_result_after_seccomp(tracee, 0);
+            break;
+        case PR_unshare:
+        case PR_setns:
+            set_result_after_seccomp(tracee, 0);
+            break;
+
         case PR_getpgrp:
             set_result_after_seccomp(tracee, getpgid(tracee->pid));
             break;

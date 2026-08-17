@@ -233,6 +233,8 @@ static FilteredSysnum proot_sysnums[] = {
     { PR_chown,         0 },
     { PR_chown32,       0 },
     { PR_chroot,        0 },
+    { PR_clone,         0 },
+    { PR_clone3,        0 },
     { PR_connect,       0 },
     { PR_creat,         0 },
     { PR_execve,        FILTER_SYSEXIT },
@@ -270,7 +272,7 @@ static FilteredSysnum proot_sysnums[] = {
     { PR_mkdirat,       0 },
     { PR_mknod,         0 },
     { PR_mknodat,       0 },
-    { PR_mount,         0 },
+    { PR_mount,         FILTER_SYSEXIT },
     { PR_name_to_handle_at, 0 },
     { PR_newfstatat,    0 },
     { PR_oldlstat,      0 },
@@ -278,7 +280,7 @@ static FilteredSysnum proot_sysnums[] = {
     { PR_open,          0 },
     { PR_openat,        0 },
     { PR_openat2,       0 },
-    { PR_pivot_root,    0 },
+    { PR_pivot_root,    FILTER_SYSEXIT },
     { PR_prctl,         0 },
     { PR_prlimit64,     FILTER_SYSEXIT },
     { PR_ptrace,        FILTER_SYSEXIT },
@@ -303,8 +305,10 @@ static FilteredSysnum proot_sysnums[] = {
     { PR_symlinkat,     0 },
     { PR_truncate,      0 },
     { PR_truncate64,    0 },
-    { PR_umount,        0 },
-    { PR_umount2,       0 },
+    { PR_umount,        FILTER_SYSEXIT },
+    { PR_umount2,       FILTER_SYSEXIT },
+    { PR_unshare,       FILTER_SYSEXIT },
+    { PR_setns,         FILTER_SYSEXIT },
     { PR_uname,         FILTER_SYSEXIT },
     { PR_unlink,        0 },
     { PR_unlinkat,      0 },
@@ -314,6 +318,18 @@ static FilteredSysnum proot_sysnums[] = {
     { PR_utimes,        0 },
     { PR_wait4,         FILTER_SYSEXIT },
     { PR_waitpid,       FILTER_SYSEXIT },
+    FILTERED_SYSNUM_END,
+};
+
+/* 仅当宿主拒绝 AF_NETLINK 时才需要拦截这些 syscall 做仿真；
+ * 宿主允许时让真实 netlink 直通，避免干扰 glibc/iproute2。 */
+static FilteredSysnum netlink_sysnums[] = {
+    { PR_close,         0 },
+    { PR_recvfrom,      0 },
+    { PR_recvmsg,       0 },
+    { PR_sendmsg,       0 },
+    { PR_sendto,        0 },
+    { PR_socket,        FILTER_SYSEXIT },
     FILTERED_SYSNUM_END,
 };
 
@@ -354,6 +370,11 @@ int enable_syscall_filtering(const Tracee *restrict tracee) {
     ret = merge_filtered_sysnums(tracee->ctx, &filtered, proot_sysnums);
     if (UNLIKELY(ret < 0))
         return ret;
+    if (host_blocks_af_netlink(tracee)) {
+        ret = merge_filtered_sysnums(tracee->ctx, &filtered, netlink_sysnums);
+        if (UNLIKELY(ret < 0))
+            return ret;
+    }
     if (tracee->extensions) {
         Extension *ext;
         LIST_FOREACH(ext, tracee->extensions, link) {

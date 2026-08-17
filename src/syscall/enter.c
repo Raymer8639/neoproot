@@ -4,13 +4,26 @@
 #include <linux/net.h>
 #include <linux/sockios.h>
 #include <net/if.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <netpacket/packet.h>
+#include <sys/ioctl.h>
+#include <sys/time.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/mount.h>
 #include <termios.h>
+#include <sched.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+#include <linux/if_addr.h>
 
 #include "cli/note.h"
 #include "syscall/syscall.h"
@@ -30,8 +43,31 @@
 #include "path/path.h"
 #include "path/canon.h"
 #include "path/binding.h"
+#include "path/temp.h"
 #include "arch.h"
 #include "attribute.h"
+
+/* 上游 064617f：bubblewrap 等需要剥离命名空间 flag */
+#ifndef CLONE_NEWTIME
+#define CLONE_NEWTIME 0x00000080
+#endif
+#ifndef CLONE_NEWCGROUP
+#define CLONE_NEWCGROUP 0x02000000
+#endif
+#define CLONE_NS_MASK (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | \
+                       CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | \
+                       CLONE_NEWCGROUP | CLONE_NEWTIME)
+
+/* ABI-stable rtnetlink constants for loopback reply. */
+#ifndef ARPHRD_LOOPBACK
+#define ARPHRD_LOOPBACK 772
+#endif
+#ifndef ARPHRD_ETHER
+#define ARPHRD_ETHER 1
+#endif
+#ifndef IFF_LOWER_UP
+#define IFF_LOWER_UP 0x10000
+#endif
 
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
@@ -128,6 +164,1249 @@ static int translate_path2_parent(Tracee *tracee, int dir_fd, char path[PATH_MAX
     return set_sysarg_path(tracee, translated_path, reg);
 }
 
+
+/* 上游 bwrap 基础（064617f^ 已有）：mount/pivot_root 的用户态模拟。
+ * 本地 scicat 基线没有这套，先补上，后续 bwrap 系列依赖它。 */
+static int guest_canonicalize(Tracee *tracee, const char *user_path,
+                              char guest_path[PATH_MAX])
+{
+    int status;
+
+    if (user_path[0] == '/')
+        strcpy(guest_path, "/");
+    else {
+        status = getcwd2(tracee, guest_path);
+        if (status < 0)
+            return status;
+    }
+
+    status = canonicalize(tracee, user_path, true, guest_path, 0);
+    if (status < 0)
+        return status;
+
+    chop_finality(guest_path);
+    return 0;
+}
+
+static void emulate_mount(Tracee *tracee, const char *src_user,
+                          const char *target_user, const char *fstype,
+                          unsigned long flags)
+{
+    char host_path[PATH_MAX];
+    char guest_path[PATH_MAX];
+    const char *tmpdir;
+
+    if ((flags & MS_REMOUNT) != 0)
+        return;
+
+    if ((flags & MS_BIND) != 0) {
+        if (translate_path(tracee, host_path, AT_FDCWD, src_user, true) < 0)
+            return;
+    }
+    else if (strcmp(fstype, "proc") == 0)
+        strcpy(host_path, "/proc");
+    else if (strcmp(fstype, "sysfs") == 0)
+        strcpy(host_path, "/sys");
+    else if (strcmp(fstype, "devtmpfs") == 0)
+        strcpy(host_path, "/dev");
+    else if (strcmp(fstype, "devpts") == 0)
+        strcpy(host_path, "/dev/pts");
+    else if (strcmp(fstype, "tmpfs") == 0) {
+        tmpdir = create_temp_directory(tracee->fs, "proot-tmpfs-");
+        if (tmpdir == NULL)
+            return;
+        strncpy(host_path, tmpdir, PATH_MAX - 1);
+        host_path[PATH_MAX - 1] = '\0';
+    }
+    else
+        return;
+
+    chop_finality(host_path);
+
+    if (guest_canonicalize(tracee, target_user, guest_path) < 0)
+        return;
+
+    (void) insort_binding3(tracee, tracee->fs, host_path, guest_path);
+}
+
+static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
+                               const char *put_old_user)
+{
+    char new_root_host[PATH_MAX];
+    char new_root_guest[PATH_MAX];
+    char put_old_guest[PATH_MAX];
+    char old_root_host[PATH_MAX];
+    Binding *root_binding;
+    Binding **snapshot;
+    size_t new_root_len;
+    size_t put_old_len = 0;
+    char put_old_after[PATH_MAX];
+    bool have_put_old = false;
+    size_t count = 0;
+    size_t i;
+    Binding *iter;
+
+    if (translate_path(tracee, new_root_host, AT_FDCWD, new_root_user, true) < 0)
+        return;
+    chop_finality(new_root_host);
+
+    if (guest_canonicalize(tracee, new_root_user, new_root_guest) < 0)
+        return;
+
+    if (put_old_user[0] == '/')
+        strcpy(put_old_guest, "/");
+    else
+        strcpy(put_old_guest, new_root_guest);
+    if (canonicalize(tracee, put_old_user, true, put_old_guest, 0) < 0)
+        return;
+
+    root_binding = get_binding(tracee, GUEST, "/");
+    if (root_binding == NULL)
+        return;
+    strncpy(old_root_host, root_binding->host.path, PATH_MAX - 1);
+    old_root_host[PATH_MAX - 1] = '\0';
+
+    new_root_len = strlen(new_root_guest);
+
+    /* 计算 oldroot 在 new_root 下的暴露路径。 */
+    if (   new_root_len > 0
+        && strncmp(put_old_guest, new_root_guest, new_root_len) == 0
+        && (   put_old_guest[new_root_len] == '/'
+            || (new_root_len == 1 && new_root_guest[0] == '/'))) {
+        const char *after = put_old_guest + (new_root_len == 1 ? 0 : new_root_len);
+        if (after[0] == '/' && after[1] != '\0') {
+            strncpy(put_old_after, after, PATH_MAX - 1);
+            put_old_after[PATH_MAX - 1] = '\0';
+            put_old_len = strlen(put_old_after);
+            have_put_old = true;
+        }
+    }
+
+    /* 先快照当前 bindings，避免边遍历边改。 */
+    for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+         iter != (void *) tracee->fs->bindings.guest;
+         iter = CIRCLEQ_NEXT(iter, link.guest))
+        count++;
+
+    snapshot = talloc_array(tracee->ctx, Binding *, count);
+    if (snapshot == NULL)
+        return;
+    i = 0;
+    for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+         iter != (void *) tracee->fs->bindings.guest && i < count;
+         iter = CIRCLEQ_NEXT(iter, link.guest))
+        snapshot[i++] = iter;
+
+    /* 切换 root，并把旧 root 暴露到 put_old。 */
+    remove_binding_from_all_lists(tracee, root_binding);
+    (void) insort_binding3(tracee, tracee->fs, new_root_host, "/");
+    if (have_put_old)
+        (void) insort_binding3(tracee, tracee->fs, old_root_host, put_old_after);
+
+    for (i = 0; i < count; i++) {
+        Binding *b = snapshot[i];
+        size_t blen;
+
+        if (b == root_binding || strcmp(b->guest.path, "/") == 0)
+            continue;
+
+        blen = strlen(b->guest.path);
+
+        /* new_root 下的 bind 随 pivot 一起移动：/newroot/usr -> /usr。 */
+        if (   new_root_len > 0
+            && blen > new_root_len
+            && strncmp(b->guest.path, new_root_guest, new_root_len) == 0
+            && b->guest.path[new_root_len] == '/') {
+            (void) insort_binding3(tracee, tracee->fs, b->host.path,
+                                   b->guest.path + new_root_len);
+            remove_binding_from_all_lists(tracee, b);
+            continue;
+        }
+
+        /* 其余属于旧 root 树，重新暴露到 put_old 下。 */
+        if (have_put_old) {
+            char aliased[PATH_MAX];
+
+            if (   strncmp(b->guest.path, put_old_after, put_old_len) == 0
+                && (   b->guest.path[put_old_len] == '\0'
+                    || b->guest.path[put_old_len] == '/'))
+                continue;
+
+            if ((size_t) snprintf(aliased, sizeof(aliased), "%s%s",
+                                  put_old_after, b->guest.path)
+                >= sizeof(aliased))
+                continue;
+
+            (void) insort_binding3(tracee, tracee->fs,
+                                   b->host.path, aliased);
+        }
+    }
+
+    talloc_free(snapshot);
+}
+
+/* 上游 5c7b2fd：模拟 umount，移除运行时 binding。 */
+static void emulate_umount(Tracee *tracee, const char *target_user)
+{
+    char guest_path[PATH_MAX];
+    Binding *binding;
+
+    if (guest_canonicalize(tracee, target_user, guest_path) < 0)
+        return;
+
+    if (strcmp(guest_path, "/") == 0)
+        return;
+
+    binding = get_binding(tracee, GUEST, guest_path);
+    if (binding == NULL)
+        return;
+
+    if (strcmp(binding->guest.path, guest_path) != 0)
+        return;
+
+    remove_binding_from_all_lists(tracee, binding);
+}
+
+void apply_emulated_umount(Tracee *tracee)
+{
+    char target_user[PATH_MAX];
+
+    if (get_sysarg_path(tracee, target_user, SYSARG_1) < 0)
+        return;
+
+    emulate_umount(tracee, target_user);
+}
+
+/* 上游 e754452：供普通 sysenter 和 SIGSYS 处理器共用。 */
+void apply_emulated_mount(Tracee *tracee)
+{
+    char src_user[PATH_MAX];
+    char target_user[PATH_MAX];
+    char fstype[256];
+    word_t fstype_addr;
+    unsigned long flags;
+
+    fstype[0] = '\0';
+    /* 上游 d7f4764：read_string 不保证末尾 NUL，先钉住最后字节。 */
+    fstype[sizeof(fstype) - 1] = '\0';
+
+    if (get_sysarg_path(tracee, src_user, SYSARG_1) < 0)
+        return;
+    if (get_sysarg_path(tracee, target_user, SYSARG_2) < 0)
+        return;
+
+    fstype_addr = peek_reg(tracee, CURRENT, SYSARG_3);
+    if (fstype_addr != 0)
+        (void) read_string(tracee, fstype, fstype_addr, sizeof(fstype) - 1);
+    flags = peek_reg(tracee, CURRENT, SYSARG_4);
+
+    emulate_mount(tracee, src_user, target_user, fstype, flags);
+}
+
+void apply_emulated_pivot_root(Tracee *tracee)
+{
+    char new_root_user[PATH_MAX];
+    char put_old_user[PATH_MAX];
+
+    if (get_sysarg_path(tracee, new_root_user, SYSARG_1) < 0)
+        return;
+    if (get_sysarg_path(tracee, put_old_user, SYSARG_2) < 0)
+        return;
+
+    emulate_pivot_root(tracee, new_root_user, put_old_user);
+}
+
+
+/* 上游 4abc88b + d738215：仅当宿主拒绝 AF_NETLINK 时才启用仿真，
+ * 避免破坏 stock Linux 上正常使用 netlink 的程序。 */
+bool host_blocks_af_netlink(const Tracee *tracee)
+{
+#ifdef __ANDROID__
+    /* Android SELinux can permit our probe yet reject the guest's later
+     * unconnected rtnetlink traffic.  Always emulate on Termux: the
+     * synthetic path is deterministic and avoids glibc/iproute2 hangs. */
+    static bool reported;
+    if (!reported) {
+        VERBOSE(tracee, 1, "forcing AF_NETLINK emulation on Android");
+        reported = true;
+    }
+    return true;
+#else
+    enum { PROBE_UNKNOWN, PROBE_ALLOWED, PROBE_BLOCKED };
+    static int cached = PROBE_UNKNOWN;
+    struct {
+        struct nlmsghdr  nlh;
+        struct ifaddrmsg ifa;
+    } request;
+    struct sockaddr_nl snl;
+    const char *blocked_op;
+    int fd;
+    int saved_errno;
+
+    if (cached != PROBE_UNKNOWN)
+        return cached == PROBE_BLOCKED;
+
+    /* 上游 2ecbad5：像 bubblewrap 一样 socket+bind 都探测，有些宿主
+     * 允许建 socket 但 bind 被 SELinux/AppArmor/seccomp 拒绝。 */
+    fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if (fd < 0) {
+        saved_errno = errno;
+        blocked_op = "socket";
+        goto blocked;
+    }
+
+    memset(&snl, 0, sizeof(snl));
+    snl.nl_family = AF_NETLINK;
+    if (bind(fd, (struct sockaddr *) &snl, sizeof(snl)) < 0) {
+        saved_errno = errno;
+        close(fd);
+        blocked_op = "bind";
+        goto blocked;
+    }
+
+    /* 上游 4638659：socket+bind 成功不代表能写；Android SELinux 常
+     * 允许 nlmsg_read 但拒绝 nlmsg_write。用无害 RTM_NEWADDR 探测
+     * sendto 是否被 EACCES/EPERM 拦截。 */
+    memset(&request, 0, sizeof(request));
+    request.nlh.nlmsg_len   = NLMSG_LENGTH(sizeof(request.ifa));
+    request.nlh.nlmsg_type  = RTM_NEWADDR;
+    request.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    request.nlh.nlmsg_seq   = 1;
+    request.ifa.ifa_family  = AF_UNSPEC;
+
+    if (sendto(fd, &request, sizeof(request), MSG_DONTWAIT,
+               (struct sockaddr *) &snl, sizeof(snl)) < 0
+        && (errno == EACCES || errno == EPERM)) {
+        saved_errno = errno;
+        close(fd);
+        blocked_op = "sendto";
+        goto blocked;
+    }
+
+    close(fd);
+    cached = PROBE_ALLOWED;
+    return false;
+
+blocked:
+    cached = PROBE_BLOCKED;
+    VERBOSE(tracee, 1, "AF_NETLINK %s denied by host (%s); enabling "
+                       "AF_UNIX fallback for sandbox helpers",
+            blocked_op, strerror(saved_errno));
+    return true;
+#endif
+}
+
+/* 上游 4abc88b + f97b627：AF_NETLINK 仿真辅助。 */
+static struct fake_netlink_socket *fake_netlink_socket(Tracee *tracee, int fd)
+{
+    int i;
+
+    if (fd < 0)
+        return NULL;
+
+    for (i = 0; i < tracee->fake_netlink_fds_count; i++)
+        if (tracee->fake_netlink_fds[i].fd == fd)
+            return &tracee->fake_netlink_fds[i];
+
+    return NULL;
+}
+
+static bool is_fake_netlink_fd(Tracee *tracee, int fd)
+{
+    return fake_netlink_socket(tracee, fd) != NULL;
+}
+
+static void unmark_fake_netlink_fd(Tracee *tracee, int fd)
+{
+    struct fake_netlink_socket *sock = fake_netlink_socket(tracee, fd);
+
+    if (sock == NULL)
+        return;
+
+    talloc_free(sock->reply);
+    *sock = tracee->fake_netlink_fds[--tracee->fake_netlink_fds_count];
+}
+
+/* 上游 87af48f：真实 NETLINK_ROUTE socket 的跟踪。 */
+static bool is_netlink_route_fd(const Tracee *tracee, int fd)
+{
+    int i;
+    if (fd < 0)
+        return false;
+    for (i = 0; i < tracee->netlink_route_fds_count; i++)
+        if (tracee->netlink_route_fds[i] == fd)
+            return true;
+    return false;
+}
+
+static void unmark_netlink_route_fd(Tracee *tracee, int fd)
+{
+    int i;
+    for (i = 0; i < tracee->netlink_route_fds_count; i++) {
+        if (tracee->netlink_route_fds[i] == fd) {
+            tracee->netlink_route_fds[i] =
+                tracee->netlink_route_fds[--tracee->netlink_route_fds_count];
+            break;
+        }
+    }
+
+    if (tracee->netlink_ack_pending && tracee->netlink_ack_fd == fd)
+        tracee->netlink_ack_pending = false;
+}
+
+static bool msghdr_first_iovec(const Tracee *tracee, word_t msghdr_addr,
+                               word_t *base, word_t *len)
+{
+    size_t w = sizeof_word(tracee);
+    word_t iov_ptr, iov_count;
+
+    if (msghdr_addr == 0)
+        return false;
+
+    errno = 0;
+    iov_ptr   = peek_word(tracee, msghdr_addr + 2 * w);
+    iov_count = (errno == 0) ? peek_word(tracee, msghdr_addr + 3 * w) : 0;
+    errno = 0;
+
+    if (iov_ptr == 0 || iov_count == 0)
+        return false;
+
+    *base = peek_word(tracee, iov_ptr);
+    *len  = (errno == 0) ? peek_word(tracee, iov_ptr + w) : 0;
+    errno = 0;
+
+    return true;
+}
+
+static bool nl_type_reconfigures(uint16_t type)
+{
+    if (type < RTM_BASE || type > RTM_MAX)
+        return false;
+    return ((type - RTM_BASE) & 3) != 2 /* RTM_GET* */;
+}
+
+static bool is_netns_netlink_fd(const Tracee *tracee, int fd)
+{
+    return tracee->fake_netns && is_netlink_route_fd(tracee, fd);
+}
+
+static void note_netns_netlink_request(Tracee *tracee, int fd,
+                                       word_t buf_addr, word_t buf_len)
+{
+    struct nlmsghdr hdr;
+
+    if (!is_netns_netlink_fd(tracee, fd))
+        return;
+
+    if (buf_addr == 0 || buf_len < sizeof(hdr))
+        return;
+    if (read_data(tracee, &hdr, buf_addr, sizeof(hdr)) < 0)
+        return;
+
+    if (!nl_type_reconfigures(hdr.nlmsg_type))
+        return;
+
+    tracee->netlink_ack_pending = true;
+    tracee->netlink_ack_fd      = fd;
+    tracee->netlink_ack_seq     = hdr.nlmsg_seq;
+}
+
+static void note_netns_netlink_reply(Tracee *tracee, int fd)
+{
+    if (!tracee->netlink_ack_pending || tracee->netlink_ack_fd != fd)
+        return;
+
+    tracee->sysexit_pending = true;
+    tracee->restart_how = PTRACE_SYSCALL;
+}
+
+void handle_netlink_reply_exit(Tracee *tracee, word_t syscall_number)
+{
+    uint8_t reply[512] __attribute__((aligned(8)));
+    struct nlmsghdr hdr;
+    word_t buf_addr = 0;
+    word_t buf_len = 0;
+    size_t len, off;
+    int flags;
+    int result;
+    int error;
+
+    if (!tracee->netlink_ack_pending)
+        return;
+    if ((int) peek_reg(tracee, ORIGINAL, SYSARG_1) != tracee->netlink_ack_fd)
+        return;
+
+    result = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+    if (result <= 0)
+        return;
+
+    if (syscall_number == PR_recvfrom) {
+        buf_addr = peek_reg(tracee, ORIGINAL, SYSARG_2);
+        buf_len  = peek_reg(tracee, ORIGINAL, SYSARG_3);
+        flags    = (int) peek_reg(tracee, ORIGINAL, SYSARG_4);
+    }
+    else {
+        if (!msghdr_first_iovec(tracee, peek_reg(tracee, ORIGINAL, SYSARG_2),
+                                &buf_addr, &buf_len))
+            return;
+        flags = (int) peek_reg(tracee, ORIGINAL, SYSARG_3);
+    }
+
+    len = (size_t) result;
+    if (len > buf_len)
+        len = buf_len;
+    if (len > sizeof(reply))
+        len = sizeof(reply);
+    if (buf_addr == 0 || len < NLMSG_HDRLEN + sizeof(error))
+        return;
+    if (read_data(tracee, reply, buf_addr, len) < 0)
+        return;
+
+    for (off = 0; off + NLMSG_HDRLEN + sizeof(error) <= len; ) {
+        memcpy(&hdr, reply + off, sizeof(hdr));
+        if (hdr.nlmsg_len < NLMSG_HDRLEN)
+            break;
+
+        if (   hdr.nlmsg_type == NLMSG_ERROR
+            && hdr.nlmsg_seq  == tracee->netlink_ack_seq) {
+            memcpy(&error, reply + off + NLMSG_HDRLEN, sizeof(error));
+            if (error != -EPERM && error != -EACCES)
+                break;
+
+            poke_uint32(tracee, buf_addr + off + NLMSG_HDRLEN, 0);
+            if (errno == 0)
+                VERBOSE(tracee, 1, "netlink: acked the request "
+                        "denied to the tracee's would-be network "
+                        "namespace (%s)", strerror(-error));
+            errno = 0;
+            break;
+        }
+
+        off += NLMSG_ALIGN(hdr.nlmsg_len);
+    }
+
+    if ((flags & MSG_PEEK) == 0)
+        tracee->netlink_ack_pending = false;
+}
+
+static size_t nl_add_attr(uint8_t *buf, size_t off, size_t max,
+                          uint16_t type, const void *data, uint16_t dlen)
+{
+    struct rtattr *rta;
+    size_t space = RTA_SPACE(dlen);
+
+    if (off + space > max)
+        return off;
+
+    rta = (struct rtattr *) (buf + off);
+    rta->rta_len  = RTA_LENGTH(dlen);
+    rta->rta_type = type;
+    if (dlen > 0)
+        memcpy((char *) rta + RTA_LENGTH(0), data, dlen);
+    if (space > RTA_LENGTH(dlen))
+        memset(buf + off + RTA_LENGTH(dlen), 0, space - RTA_LENGTH(dlen));
+    return off + space;
+}
+
+static size_t nl_build_link(uint8_t *buf, size_t off, size_t max,
+                            uint32_t seq, uint32_t pid, uint16_t nlflags,
+                            int ifindex, uint16_t iftype, uint32_t ifflags,
+                            uint32_t mtu, const char *name,
+                            const uint8_t *hwaddr, uint8_t hwlen)
+{
+    size_t start = off;
+    struct nlmsghdr *nlh;
+    struct ifinfomsg ifi;
+    uint32_t txqlen    = 1000;
+    uint8_t  operstate = (ifflags & IFF_UP) ? 6 : 2;  /* IF_OPER_UP : _DOWN */
+    uint8_t  brd[8];
+    size_t len;
+
+    if (start + NLMSG_HDRLEN + NLMSG_ALIGN(sizeof(ifi)) > max)
+        return start;
+
+    memset(&ifi, 0, sizeof(ifi));
+    ifi.ifi_family = AF_UNSPEC;
+    ifi.ifi_type   = iftype;
+    ifi.ifi_index  = ifindex;
+    ifi.ifi_flags  = ifflags | ((ifflags & IFF_RUNNING) ? IFF_LOWER_UP : 0);
+    ifi.ifi_change = 0;
+
+    off = start + NLMSG_HDRLEN;
+    memcpy(buf + off, &ifi, sizeof(ifi));
+    off += NLMSG_ALIGN(sizeof(ifi));
+
+    off = nl_add_attr(buf, off, max, IFLA_IFNAME, name, strlen(name) + 1);
+    off = nl_add_attr(buf, off, max, IFLA_MTU, &mtu, sizeof(mtu));
+    off = nl_add_attr(buf, off, max, IFLA_TXQLEN, &txqlen, sizeof(txqlen));
+    off = nl_add_attr(buf, off, max, IFLA_OPERSTATE, &operstate, sizeof(operstate));
+    if (hwlen > 0) {
+        memset(brd, (iftype == ARPHRD_LOOPBACK) ? 0x00 : 0xff, sizeof(brd));
+        off = nl_add_attr(buf, off, max, IFLA_ADDRESS, hwaddr, hwlen);
+        off = nl_add_attr(buf, off, max, IFLA_BROADCAST, brd, hwlen);
+    }
+
+    len = off - start;
+    nlh = (struct nlmsghdr *) (buf + start);
+    nlh->nlmsg_len   = len;
+    nlh->nlmsg_type  = RTM_NEWLINK;
+    nlh->nlmsg_flags = nlflags;
+    nlh->nlmsg_seq   = seq;
+    nlh->nlmsg_pid   = pid;
+    return start + NLMSG_ALIGN(len);
+}
+
+static size_t nl_build_addr(uint8_t *buf, size_t off, size_t max,
+                            uint32_t seq, uint32_t pid, uint16_t nlflags,
+                            int family, int ifindex,
+                            const uint8_t *addr, uint8_t addrlen,
+                            uint8_t prefixlen, uint8_t scope, const char *label)
+{
+    size_t start = off;
+    struct nlmsghdr *nlh;
+    struct ifaddrmsg ifa;
+    size_t len;
+
+    if (start + NLMSG_HDRLEN + NLMSG_ALIGN(sizeof(ifa)) > max)
+        return start;
+
+    memset(&ifa, 0, sizeof(ifa));
+    ifa.ifa_family    = family;
+    ifa.ifa_prefixlen = prefixlen;
+    ifa.ifa_flags     = IFA_F_PERMANENT;
+    ifa.ifa_scope     = scope;
+    ifa.ifa_index     = ifindex;
+
+    off = start + NLMSG_HDRLEN;
+    memcpy(buf + off, &ifa, sizeof(ifa));
+    off += NLMSG_ALIGN(sizeof(ifa));
+
+    off = nl_add_attr(buf, off, max, IFA_ADDRESS, addr, addrlen);
+    off = nl_add_attr(buf, off, max, IFA_LOCAL, addr, addrlen);
+    if (family == AF_INET && label != NULL)
+        off = nl_add_attr(buf, off, max, IFA_LABEL, label, strlen(label) + 1);
+
+    len = off - start;
+    nlh = (struct nlmsghdr *) (buf + start);
+    nlh->nlmsg_len   = len;
+    nlh->nlmsg_type  = RTM_NEWADDR;
+    nlh->nlmsg_flags = nlflags;
+    nlh->nlmsg_seq   = seq;
+    nlh->nlmsg_pid   = pid;
+    return start + NLMSG_ALIGN(len);
+}
+
+static size_t nl_build_done(uint8_t *buf, size_t off, size_t max,
+                            uint32_t seq, uint32_t pid)
+{
+    struct nlmsghdr *nlh;
+    int32_t error = 0;
+    size_t len = NLMSG_HDRLEN + sizeof(error);
+
+    if (off + NLMSG_ALIGN(len) > max)
+        return off;
+
+    nlh = (struct nlmsghdr *) (buf + off);
+    memcpy(buf + off + NLMSG_HDRLEN, &error, sizeof(error));
+    nlh->nlmsg_len   = len;
+    nlh->nlmsg_type  = NLMSG_DONE;
+    nlh->nlmsg_flags = NLM_F_MULTI;
+    nlh->nlmsg_seq   = seq;
+    nlh->nlmsg_pid   = pid;
+    return off + NLMSG_ALIGN(len);
+}
+
+static size_t nl_build_error(uint8_t *buf, size_t off, size_t max,
+                             uint32_t seq, uint32_t pid, int error)
+{
+    struct nlmsghdr *nlh;
+    struct nlmsgerr err;
+    size_t len = NLMSG_HDRLEN + sizeof(err);
+
+    if (off + NLMSG_ALIGN(len) > max)
+        return off;
+
+    memset(&err, 0, sizeof(err));
+    err.error = error;
+
+    nlh = (struct nlmsghdr *) (buf + off);
+    memcpy(buf + off + NLMSG_HDRLEN, &err, sizeof(err));
+    nlh->nlmsg_len   = len;
+    nlh->nlmsg_type  = NLMSG_ERROR;
+    nlh->nlmsg_flags = 0;
+    nlh->nlmsg_seq   = seq;
+    nlh->nlmsg_pid   = pid;
+    return off + NLMSG_ALIGN(len);
+}
+
+static bool nl_request_is_loopback(const uint8_t *req, size_t req_len)
+{
+    const struct ifinfomsg *ifi;
+    size_t off = NLMSG_HDRLEN;
+    char name[IFNAMSIZ] = { 0 };
+    bool have_name = false;
+    int ifindex;
+
+    if (req_len < off + sizeof(*ifi))
+        return true;
+
+    ifi = (const struct ifinfomsg *) (req + off);
+    ifindex = ifi->ifi_index;
+
+    off += NLMSG_ALIGN(sizeof(*ifi));
+    while (off + sizeof(struct rtattr) <= req_len) {
+        const struct rtattr *rta = (const struct rtattr *) (req + off);
+        size_t rlen = rta->rta_len;
+
+        if (rlen < sizeof(*rta) || off + rlen > req_len)
+            break;
+        if (rta->rta_type == IFLA_IFNAME) {
+            size_t dlen = rlen - RTA_LENGTH(0);
+            size_t cpy  = dlen < sizeof(name) ? dlen : sizeof(name) - 1;
+            memcpy(name, (const char *) rta + RTA_LENGTH(0), cpy);
+            name[cpy] = '\0';
+            have_name = true;
+        }
+        off += RTA_ALIGN(rlen);
+    }
+
+    if (have_name)
+        return strcmp(name, "lo") == 0;
+    return ifindex == 0 || ifindex == 1;
+}
+
+static int write_fake_netlink_sockname(Tracee *tracee, word_t addr_ptr,
+                                       word_t size_ptr, uint32_t nl_pid)
+{
+    struct sockaddr_nl snl;
+    uint32_t in_size;
+    uint32_t out_size;
+
+    if (size_ptr == 0)
+        return -EINVAL;
+
+    in_size = peek_uint32(tracee, size_ptr);
+    if (errno != 0)
+        return -errno;
+
+    memset(&snl, 0, sizeof(snl));
+    snl.nl_family = AF_NETLINK;
+    snl.nl_pid    = nl_pid;
+
+    if (addr_ptr != 0 && in_size > 0) {
+        uint32_t copy = in_size < sizeof(snl) ? in_size : sizeof(snl);
+        if (write_data(tracee, addr_ptr, &snl, copy) < 0)
+            return -EFAULT;
+    }
+
+    out_size = sizeof(snl);
+    poke_uint32(tracee, size_ptr, out_size);
+    if (errno != 0)
+        return -errno;
+
+    return 0;
+}
+
+/* 上游 208a06c：真实主机接口枚举辅助。 */
+static uint8_t nl_prefixlen(const uint8_t *mask, size_t len)
+{
+    uint8_t bits = 0;
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        uint8_t b = mask[i];
+        if (b == 0xff) {
+            bits += 8;
+            continue;
+        }
+        while (b & 0x80) {
+            bits++;
+            b <<= 1;
+        }
+        break;
+    }
+    return bits;
+}
+
+static uint8_t nl_addr_scope(int family, const uint8_t *addr)
+{
+    if (family == AF_INET) {
+        if (addr[0] == 127)
+            return RT_SCOPE_HOST;
+        if (addr[0] == 169 && addr[1] == 254)
+            return RT_SCOPE_LINK;
+        return RT_SCOPE_UNIVERSE;
+    } else {
+        static const uint8_t loop[16] = { 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1 };
+        if (memcmp(addr, loop, 16) == 0)
+            return RT_SCOPE_HOST;
+        if (addr[0] == 0xfe && (addr[1] & 0xc0) == 0x80)
+            return RT_SCOPE_LINK;
+        return RT_SCOPE_UNIVERSE;
+    }
+}
+
+static size_t nl_build_loopback_link(uint8_t *buf, size_t off, size_t max,
+                                     uint32_t seq, uint32_t pid, uint16_t nlflags)
+{
+    static const uint8_t zero[6] = { 0 };
+    return nl_build_link(buf, off, max, seq, pid, nlflags, 1, ARPHRD_LOOPBACK,
+                         IFF_UP | IFF_LOOPBACK | IFF_RUNNING, 65536, "lo", zero, 6);
+}
+
+static size_t nl_build_loopback_addr(uint8_t *buf, size_t off, size_t max,
+                                     uint32_t seq, uint32_t pid, int family,
+                                     uint16_t nlflags)
+{
+    static const uint8_t v4[4]  = { 127, 0, 0, 1 };
+    static const uint8_t v6[16] = { 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1 };
+    if (family == AF_INET6)
+        return nl_build_addr(buf, off, max, seq, pid, nlflags, AF_INET6, 1,
+                             v6, 16, 128, RT_SCOPE_HOST, NULL);
+    return nl_build_addr(buf, off, max, seq, pid, nlflags, AF_INET, 1,
+                         v4, 4, 8, RT_SCOPE_HOST, "lo");
+}
+
+static int nl_request_link_target(const uint8_t *req, size_t req_len,
+                                  char name[IFNAMSIZ])
+{
+    const struct ifinfomsg *ifi;
+    size_t off = NLMSG_HDRLEN;
+    int ifindex;
+
+    name[0] = '\0';
+    if (req_len < off + sizeof(*ifi))
+        return 0;
+    ifi = (const struct ifinfomsg *) (req + off);
+    ifindex = ifi->ifi_index;
+
+    off += NLMSG_ALIGN(sizeof(*ifi));
+    while (off + sizeof(struct rtattr) <= req_len) {
+        const struct rtattr *rta = (const struct rtattr *) (req + off);
+        size_t rlen = rta->rta_len;
+
+        if (rlen < sizeof(*rta) || off + rlen > req_len)
+            break;
+        if (rta->rta_type == IFLA_IFNAME) {
+            size_t dlen = rlen - RTA_LENGTH(0);
+            size_t cpy  = dlen < IFNAMSIZ ? dlen : IFNAMSIZ - 1;
+            memcpy(name, (const char *) rta + RTA_LENGTH(0), cpy);
+            name[cpy] = '\0';
+        }
+        off += RTA_ALIGN(rlen);
+    }
+    return ifindex;
+}
+
+static size_t build_host_links(uint8_t *out, size_t max, uint32_t seq,
+                               uint32_t pid, const char *want_name,
+                               int want_index, bool dump, int *built)
+{
+    struct ifaddrs *ifaddr, *ifa;
+    char seen[64][IFNAMSIZ];
+    int seen_count = 0;
+    size_t off = 0;
+    int sock;
+
+    *built = 0;
+    if (getifaddrs(&ifaddr) != 0)
+        return 0;
+    sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        uint32_t ifflags;
+        uint16_t iftype;
+        uint32_t mtu;
+        uint8_t  hwaddr[8] = { 0 };
+        uint8_t  hwlen = 0;
+        int ifindex;
+        int i;
+        bool dup = false;
+
+        if (ifa->ifa_name == NULL)
+            continue;
+        for (i = 0; i < seen_count; i++)
+            if (strncmp(seen[i], ifa->ifa_name, IFNAMSIZ) == 0) {
+                dup = true;
+                break;
+            }
+        if (dup)
+            continue;
+        if (seen_count < 64) {
+            strncpy(seen[seen_count], ifa->ifa_name, IFNAMSIZ - 1);
+            seen[seen_count][IFNAMSIZ - 1] = '\0';
+            seen_count++;
+        }
+
+        ifflags = ifa->ifa_flags;
+        iftype  = (ifflags & IFF_LOOPBACK) ? ARPHRD_LOOPBACK : ARPHRD_ETHER;
+        mtu     = (ifflags & IFF_LOOPBACK) ? 65536 : 1500;
+        ifindex = (int) if_nametoindex(ifa->ifa_name);
+
+        if (ifa->ifa_addr != NULL && ifa->ifa_addr->sa_family == AF_PACKET) {
+            struct sockaddr_ll *sll = (struct sockaddr_ll *) ifa->ifa_addr;
+            if (sll->sll_ifindex != 0)
+                ifindex = sll->sll_ifindex;
+            iftype = sll->sll_hatype;
+            if (sll->sll_halen > 0 && sll->sll_halen <= sizeof(hwaddr)) {
+                memcpy(hwaddr, sll->sll_addr, sll->sll_halen);
+                hwlen = sll->sll_halen;
+            }
+        }
+
+        if (sock >= 0) {
+            struct ifreq ifr;
+
+            memset(&ifr, 0, sizeof(ifr));
+            strncpy(ifr.ifr_name, ifa->ifa_name, IFNAMSIZ - 1);
+            if (ioctl(sock, SIOCGIFMTU, &ifr) == 0)
+                mtu = ifr.ifr_mtu;
+            if (hwlen == 0) {
+                memset(&ifr, 0, sizeof(ifr));
+                strncpy(ifr.ifr_name, ifa->ifa_name, IFNAMSIZ - 1);
+                if (ioctl(sock, SIOCGIFHWADDR, &ifr) == 0) {
+                    iftype = ifr.ifr_hwaddr.sa_family;
+                    memcpy(hwaddr, ifr.ifr_hwaddr.sa_data, 6);
+                    hwlen = 6;
+                }
+            }
+        }
+
+        if (!dump) {
+            if (want_name != NULL && want_name[0] != '\0') {
+                if (strcmp(want_name, ifa->ifa_name) != 0)
+                    continue;
+            } else if (want_index > 0 && ifindex != want_index) {
+                continue;
+            }
+        }
+
+        if (off + 256 > max)
+            break;
+        off = nl_build_link(out, off, max, seq, pid,
+                            dump ? NLM_F_MULTI : 0, ifindex, iftype,
+                            ifflags, mtu, ifa->ifa_name, hwaddr, hwlen);
+        (*built)++;
+        if (!dump)
+            break;
+    }
+
+    if (sock >= 0)
+        close(sock);
+    freeifaddrs(ifaddr);
+    return off;
+}
+
+static size_t build_host_addrs(uint8_t *out, size_t max, uint32_t seq,
+                               uint32_t pid, int want_family, bool dump,
+                               int *built)
+{
+    struct ifaddrs *ifaddr, *ifa;
+    size_t off = 0;
+
+    *built = 0;
+    if (getifaddrs(&ifaddr) != 0)
+        return 0;
+
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        const uint8_t *addr;
+        const uint8_t *mask = NULL;
+        uint8_t addrlen, masklen = 0;
+        uint8_t prefixlen, scope;
+        int family, ifindex;
+
+        if (ifa->ifa_name == NULL || ifa->ifa_addr == NULL)
+            continue;
+        family = ifa->ifa_addr->sa_family;
+        if (family != AF_INET && family != AF_INET6)
+            continue;
+        if (want_family != AF_UNSPEC && family != want_family)
+            continue;
+
+        if (family == AF_INET) {
+            addr = (const uint8_t *) &((struct sockaddr_in *) ifa->ifa_addr)->sin_addr;
+            addrlen = 4;
+            if (ifa->ifa_netmask != NULL) {
+                mask = (const uint8_t *) &((struct sockaddr_in *) ifa->ifa_netmask)->sin_addr;
+                masklen = 4;
+            }
+        } else {
+            addr = (const uint8_t *) &((struct sockaddr_in6 *) ifa->ifa_addr)->sin6_addr;
+            addrlen = 16;
+            if (ifa->ifa_netmask != NULL) {
+                mask = (const uint8_t *) &((struct sockaddr_in6 *) ifa->ifa_netmask)->sin6_addr;
+                masklen = 16;
+            }
+        }
+
+        prefixlen = (mask != NULL) ? nl_prefixlen(mask, masklen)
+                                   : (family == AF_INET ? 32 : 128);
+        scope = nl_addr_scope(family, addr);
+        ifindex = (int) if_nametoindex(ifa->ifa_name);
+
+        if (off + 256 > max)
+            break;
+        off = nl_build_addr(out, off, max, seq, pid,
+                            dump ? NLM_F_MULTI : 0, family, ifindex,
+                            addr, addrlen, prefixlen, scope, ifa->ifa_name);
+        (*built)++;
+    }
+
+    freeifaddrs(ifaddr);
+    return off;
+}
+
+static size_t relay_route_dump(const uint8_t *req, size_t req_len,
+                               uint8_t *out, size_t max,
+                               uint32_t seq, uint32_t pid)
+{
+    struct {
+        struct nlmsghdr nlh;
+        struct rtmsg    rtm;
+    } dreq;
+    struct sockaddr_nl sa;
+    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+    uint8_t family = (req_len > NLMSG_HDRLEN) ? req[NLMSG_HDRLEN] : 0;
+    size_t off = 0;
+    bool done = false;
+    bool saw_done = false;
+    int fd;
+    int rounds;
+
+    fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if (fd < 0)
+        return 0;
+    (void) setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    memset(&dreq, 0, sizeof(dreq));
+    dreq.nlh.nlmsg_len   = NLMSG_LENGTH(sizeof(struct rtmsg));
+    dreq.nlh.nlmsg_type  = RTM_GETROUTE;
+    dreq.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    dreq.nlh.nlmsg_seq   = seq;
+    dreq.rtm.rtm_family  = family;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    if (sendto(fd, &dreq, dreq.nlh.nlmsg_len, 0,
+               (struct sockaddr *) &sa, sizeof(sa)) < 0) {
+        close(fd);
+        return 0;
+    }
+
+    for (rounds = 0; !done && rounds < 64; rounds++) {
+        uint8_t buf[8192] __attribute__((aligned(8)));
+        struct nlmsghdr *h;
+        ssize_t n;
+        size_t len;
+
+        n = recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0)
+            break;
+        len = (size_t) n;
+        for (h = (struct nlmsghdr *) buf; NLMSG_OK(h, len);
+             h = NLMSG_NEXT(h, len)) {
+            size_t mlen = h->nlmsg_len;
+            size_t aligned = NLMSG_ALIGN(mlen);
+
+            if (off + aligned + 64 > max) {
+                done = true;
+                break;
+            }
+            h->nlmsg_seq = seq;
+            h->nlmsg_pid = pid;
+            memcpy(out + off, h, mlen);
+            if (aligned > mlen)
+                memset(out + off + mlen, 0, aligned - mlen);
+            off += aligned;
+            if (h->nlmsg_type == NLMSG_DONE) {
+                saw_done = true;
+                done = true;
+                break;
+            }
+        }
+    }
+
+    close(fd);
+
+    if (off == 0)
+        return 0;
+    if (!saw_done)
+        off = nl_build_done(out, off, max, seq, pid);
+    return off;
+}
+
+static void build_fake_netlink_reply(Tracee *tracee, struct fake_netlink_socket *sock,
+                                     word_t buf_addr, word_t buf_len)
+{
+    uint8_t req[256] __attribute__((aligned(8)));
+    size_t  req_len;
+    struct nlmsghdr hdr;
+    uint8_t *out;
+    size_t   max = MAX_FAKE_NETLINK_REPLY;
+    uint32_t pid = (uint32_t) tracee->pid;
+    uint32_t seq = 0;
+    uint16_t type, flags;
+    bool dump;
+    size_t off = 0;
+
+    sock->reply_len = 0;
+    sock->reply_off = 0;
+
+    if (sock->reply == NULL) {
+        sock->reply = talloc_size(tracee, max);
+        if (sock->reply == NULL)
+            return;
+    }
+    out = sock->reply;
+
+    if (buf_addr == 0 || buf_len < sizeof(hdr))
+        goto reply;
+    req_len = buf_len < sizeof(req) ? buf_len : sizeof(req);
+    if (read_data(tracee, req, buf_addr, req_len) < 0)
+        goto reply;
+
+    memcpy(&hdr, req, sizeof(hdr));
+    type  = hdr.nlmsg_type;
+    flags = hdr.nlmsg_flags;
+    seq   = hdr.nlmsg_seq;
+    dump  = (flags & NLM_F_DUMP) == NLM_F_DUMP;
+
+    switch (type) {
+    case RTM_GETLINK: {
+        char want_name[IFNAMSIZ];
+        int want_index = nl_request_link_target(req, req_len, want_name);
+        int n = 0;
+
+        off = build_host_links(out, max, seq, pid,
+                               dump ? NULL : want_name,
+                               dump ? 0 : want_index, dump, &n);
+        if (n == 0) {
+            off = 0;
+            if (dump)
+                off = nl_build_loopback_link(out, off, max, seq, pid, NLM_F_MULTI);
+            else if (nl_request_is_loopback(req, req_len))
+                off = nl_build_loopback_link(out, off, max, seq, pid, 0);
+            else
+                off = nl_build_error(out, off, max, seq, pid, -ENODEV);
+        }
+        if (dump)
+            off = nl_build_done(out, off, max, seq, pid);
+        break;
+    }
+
+    case RTM_GETADDR: {
+        uint8_t family = (req_len > NLMSG_HDRLEN) ? req[NLMSG_HDRLEN] : 0;
+        int want_family = (family == AF_INET || family == AF_INET6)
+                          ? family : AF_UNSPEC;
+        int n = 0;
+
+        off = build_host_addrs(out, max, seq, pid, want_family, dump, &n);
+        if (n == 0) {
+            off = 0;
+            if (family == 0 || family == AF_INET)
+                off = nl_build_loopback_addr(out, off, max, seq, pid,
+                                             AF_INET, dump ? NLM_F_MULTI : 0);
+            if (family == 0 || family == AF_INET6)
+                off = nl_build_loopback_addr(out, off, max, seq, pid,
+                                             AF_INET6, dump ? NLM_F_MULTI : 0);
+        }
+        if (dump)
+            off = nl_build_done(out, off, max, seq, pid);
+        break;
+    }
+
+    case RTM_GETROUTE:
+        if (dump) {
+            off = relay_route_dump(req, req_len, out, max, seq, pid);
+            if (off == 0)
+                off = nl_build_done(out, off, max, seq, pid);
+        } else {
+            off = nl_build_error(out, off, max, seq, pid, 0);
+        }
+        break;
+
+    default:
+        if (dump)
+            off = nl_build_done(out, off, max, seq, pid);
+        else
+            off = nl_build_error(out, off, max, seq, pid, 0);
+        break;
+    }
+
+reply:
+    /* 上游 c81a1c9：绝不返回零长度 netlink 消息。 */
+    if (off == 0)
+        off = nl_build_error(out, off, max, seq, pid, -EINVAL);
+
+    sock->reply_len = off;
+}
+
+static size_t fake_netlink_datagram_len(const uint8_t *reply, size_t len)
+{
+    size_t off = 0;
+
+    while (off + NLMSG_HDRLEN <= len) {
+        const struct nlmsghdr *nlh = (const struct nlmsghdr *) (reply + off);
+        size_t mlen = nlh->nlmsg_len;
+
+        if (mlen < NLMSG_HDRLEN || off + mlen > len)
+            break;
+        if (nlh->nlmsg_type == NLMSG_DONE)
+            break;
+        off += NLMSG_ALIGN(mlen);
+    }
+
+    return (off == 0 || off > len) ? len : off;
+}
+
+static size_t pending_fake_netlink_datagram(const struct fake_netlink_socket *sock,
+                                            const uint8_t **reply)
+{
+    if (sock->reply_len == 0)
+        return 0;
+
+    *reply = sock->reply + sock->reply_off;
+
+    return fake_netlink_datagram_len(*reply, sock->reply_len - sock->reply_off);
+}
+
+static void consume_fake_netlink_datagram(struct fake_netlink_socket *sock,
+                                          size_t datagram)
+{
+    sock->reply_off += datagram;
+    if (sock->reply_off >= sock->reply_len) {
+        sock->reply_len = 0;
+        sock->reply_off = 0;
+    }
+}
+
+static size_t scatter_fake_netlink_reply(Tracee *tracee, word_t iov_ptr,
+                                         word_t iov_count,
+                                         const uint8_t *reply, size_t reply_len)
+{
+    size_t w = sizeof_word(tracee);
+    size_t done = 0;
+    word_t i;
+
+    for (i = 0; i < iov_count && done < reply_len; i++) {
+        word_t base = peek_word(tracee, iov_ptr + i * 2 * w);
+        word_t len  = (errno == 0) ? peek_word(tracee, iov_ptr + i * 2 * w + w) : 0;
+        size_t chunk;
+
+        errno = 0;
+        chunk = reply_len - done;
+        if (chunk > len)
+            chunk = len;
+        if (base != 0 && chunk > 0) {
+            if (write_data(tracee, base, reply + done, chunk) < 0)
+                break;
+        }
+        done += chunk;
+    }
+
+    return done;
+}
+
 #ifdef __ANDROID__
 /* 上游 d30b98846（适配）：Android 常拒绝非 lo 的 SIOCGIFINDEX，
  * 在 tracer 里用 if_nametoindex() 查真实接口号，写回 ifreq。 */
@@ -201,6 +1480,43 @@ int translate_syscall_enter(Tracee *tracee)
          * 在父读端关闭后 EPIPE（进程替换等场景）。 */
         int closed_fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
         shadow_pipe_read_end(tracee->pid, closed_fd);
+        /* 上游 4abc88b / 87af48f：关闭 netlink fd 时从跟踪表移除。 */
+        unmark_fake_netlink_fd(tracee, closed_fd);
+        unmark_netlink_route_fd(tracee, closed_fd);
+        break;
+    }
+
+    case PR_clone: {
+        /* 上游 064617f + 5c7b2fd：剥离 CLONE_NEW* 命名空间 flag，避免
+         * Android 无权限创建命名空间时报 EPERM；fork/thread 本身正常继续。
+         * 若请求了 CLONE_NEWNS，记住让子进程获得独立 bindings。 */
+        word_t flags = peek_reg(tracee, CURRENT, SYSARG_1);
+        if ((flags & CLONE_NS_MASK) != 0) {
+            if ((flags & CLONE_NEWNS) != 0)
+                tracee->clone_stripped_newns = true;
+            if ((flags & CLONE_NEWNET) != 0)
+                tracee->clone_stripped_newnet = true;
+            poke_reg(tracee, SYSARG_1, flags & ~(word_t)CLONE_NS_MASK);
+        }
+        status = 0;
+        break;
+    }
+
+    case PR_clone3: {
+        word_t args_addr = peek_reg(tracee, CURRENT, SYSARG_1);
+        word_t flags;
+        if (args_addr != 0) {
+            errno = 0;
+            flags = peek_word(tracee, args_addr);
+            if (errno == 0 && (flags & CLONE_NS_MASK) != 0) {
+                if ((flags & CLONE_NEWNS) != 0)
+                    tracee->clone_stripped_newns = true;
+                if ((flags & CLONE_NEWNET) != 0)
+                    tracee->clone_stripped_newnet = true;
+                poke_word(tracee, args_addr, flags & ~(word_t)CLONE_NS_MASK);
+            }
+        }
+        status = 0;
         break;
     }
 
@@ -237,6 +1553,7 @@ int translate_syscall_enter(Tracee *tracee)
         break;
 
     case PR_getcwd:
+        poke_reg(tracee, SYSARG_RESULT, 0);
         set_sysnum(tracee, PR_void);
         status = 0;
         break;
@@ -291,6 +1608,7 @@ int translate_syscall_enter(Tracee *tracee)
         tracee->fs->cwd = tmp;
         talloc_set_name_const(tracee->fs->cwd, "$cwd");
 
+        poke_reg(tracee, SYSARG_RESULT, 0);
         set_sysnum(tracee, PR_void);
         status = 0;
         break;
@@ -300,6 +1618,16 @@ int translate_syscall_enter(Tracee *tracee)
     case PR_connect: {
         word_t address;
         word_t size;
+
+        /* 上游 4abc88b：对已替换成 AF_UNIX 的假 netlink fd，bind
+         * 直接假装成功。 */
+        if (syscall_number == PR_bind
+            && is_fake_netlink_fd(tracee, peek_reg(tracee, CURRENT, SYSARG_1))) {
+            poke_reg(tracee, SYSARG_RESULT, 0);
+            set_sysnum(tracee, PR_void);
+            status = 0;
+            break;
+        }
 
         address = peek_reg(tracee, CURRENT, SYSARG_2);
         size    = peek_reg(tracee, CURRENT, SYSARG_3);
@@ -343,9 +1671,208 @@ int translate_syscall_enter(Tracee *tracee)
     case PR_getpeername:{
         int size;
 
+        /* 上游 30e0644：假 netlink fd 返回 sockaddr_nl，避免 iproute2
+         * 报 "Wrong address length 2"。 */
+        if ((syscall_number == PR_getsockname || syscall_number == PR_getpeername)
+            && is_fake_netlink_fd(tracee, peek_reg(tracee, CURRENT, SYSARG_1))) {
+            word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
+            word_t size_ptr = peek_reg(tracee, CURRENT, SYSARG_3);
+            int    rc = write_fake_netlink_sockname(tracee, addr_ptr, size_ptr,
+                                                    (uint32_t) tracee->pid);
+
+            poke_reg(tracee, SYSARG_RESULT, (word_t) rc);
+            set_sysnum(tracee, PR_void);
+            status = 0;
+            break;
+        }
+
         size = (int) PEEK_WORD(peek_reg(tracee, ORIGINAL, SYSARG_3), special ? -EINVAL : 0);
         poke_reg(tracee, SYSARG_6, size);
 
+        status = 0;
+        break;
+    }
+
+
+    /* 上游 4abc88b：AF_NETLINK 仿真。 */
+    case PR_socket: {
+        word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
+        word_t protocol = peek_reg(tracee, CURRENT, SYSARG_3);
+        if (domain == AF_NETLINK && protocol == NETLINK_ROUTE) {
+            if (host_blocks_af_netlink(tracee)) {
+                word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
+                poke_reg(tracee, SYSARG_1, AF_UNIX);
+                poke_reg(tracee, SYSARG_2, SOCK_DGRAM | (type & SOCK_CLOEXEC));
+                poke_reg(tracee, SYSARG_3, 0);
+                tracee->pending_fake_netlink_socket = true;
+            }
+            else {
+                /* 真实 socket：若 tracee 认为自己有独立 netns，仍需 ACK 仿真。 */
+                tracee->pending_real_netlink_socket = true;
+            }
+            tracee->sysexit_pending = true;
+            tracee->restart_how = PTRACE_SYSCALL;
+        }
+        status = 0;
+        break;
+    }
+
+    case PR_sendto: {
+        int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+        word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
+        word_t len = peek_reg(tracee, CURRENT, SYSARG_3);
+        struct fake_netlink_socket *sock = fake_netlink_socket(tracee, fd);
+
+        if (sock != NULL) {
+            build_fake_netlink_reply(tracee, sock, buf, len);
+
+            poke_reg(tracee, SYSARG_RESULT, len);
+            set_sysnum(tracee, PR_void);
+            status = 0;
+            break;
+        }
+        note_netns_netlink_request(tracee, fd, buf, len);
+        status = 0;
+        break;
+    }
+
+    case PR_sendmsg: {
+        int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+        word_t msghdr_addr = peek_reg(tracee, CURRENT, SYSARG_2);
+        word_t base = 0, len = 0;
+        struct fake_netlink_socket *sock = fake_netlink_socket(tracee, fd);
+
+        if (sock != NULL) {
+            word_t total = 0;
+
+            if (msghdr_first_iovec(tracee, msghdr_addr, &base, &len)) {
+                build_fake_netlink_reply(tracee, sock, base, len);
+                total = len;
+            }
+
+            poke_reg(tracee, SYSARG_RESULT, total);
+            set_sysnum(tracee, PR_void);
+            status = 0;
+            break;
+        }
+        if (   is_netns_netlink_fd(tracee, fd)
+            && msghdr_first_iovec(tracee, msghdr_addr, &base, &len))
+            note_netns_netlink_request(tracee, fd, base, len);
+        status = 0;
+        break;
+    }
+
+    case PR_recvfrom: {
+        int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+        struct fake_netlink_socket *sock = fake_netlink_socket(tracee, fd);
+
+        if (sock != NULL) {
+            word_t buf       = peek_reg(tracee, CURRENT, SYSARG_2);
+            word_t len       = peek_reg(tracee, CURRENT, SYSARG_3);
+            int    flags     = (int) peek_reg(tracee, CURRENT, SYSARG_4);
+            word_t addr_ptr  = peek_reg(tracee, CURRENT, SYSARG_5);
+            word_t size_ptr  = peek_reg(tracee, CURRENT, SYSARG_6);
+            const uint8_t *reply = NULL;
+            size_t datagram  = pending_fake_netlink_datagram(sock, &reply);
+            size_t copied    = 0;
+            size_t result;
+
+            if (datagram == 0) {
+                status = 0;
+                break;
+            }
+
+            if (buf != 0) {
+                copied = len < datagram ? len : datagram;
+                if (copied > 0 &&
+                    write_data(tracee, buf, reply, copied) < 0)
+                    copied = 0;
+            }
+
+            if (!(flags & MSG_PEEK))
+                consume_fake_netlink_datagram(sock, datagram);
+            result = (flags & MSG_TRUNC) ? datagram : copied;
+
+            if (addr_ptr != 0 && size_ptr != 0)
+                (void) write_fake_netlink_sockname(tracee, addr_ptr, size_ptr, 0);
+            errno = 0;
+
+            poke_reg(tracee, SYSARG_RESULT, (word_t) result);
+            set_sysnum(tracee, PR_void);
+            status = 0;
+            break;
+        }
+        note_netns_netlink_reply(tracee, fd);
+        status = 0;
+        break;
+    }
+
+    case PR_recvmsg: {
+        int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+        struct fake_netlink_socket *sock = fake_netlink_socket(tracee, fd);
+
+        if (sock != NULL) {
+            word_t msghdr_addr = peek_reg(tracee, CURRENT, SYSARG_2);
+            int    flags = (int) peek_reg(tracee, CURRENT, SYSARG_3);
+            size_t w = sizeof_word(tracee);
+            word_t msg_name = 0;
+            word_t iov_ptr = 0, iov_count = 0;
+            const uint8_t *reply = NULL;
+            size_t datagram  = pending_fake_netlink_datagram(sock, &reply);
+            size_t scattered = 0;
+            size_t result;
+
+            if (datagram == 0) {
+                status = 0;
+                break;
+            }
+
+            if (msghdr_addr != 0) {
+                msg_name  = peek_word(tracee, msghdr_addr);
+                if (errno != 0) { errno = 0; msg_name = 0; }
+                iov_ptr   = peek_word(tracee, msghdr_addr + 2 * w);
+                if (errno != 0) { errno = 0; iov_ptr   = 0; }
+                iov_count = peek_word(tracee, msghdr_addr + 3 * w);
+                if (errno != 0) { errno = 0; iov_count = 0; }
+            }
+
+            if (iov_ptr != 0 && iov_count > 0)
+                scattered = scatter_fake_netlink_reply(tracee, iov_ptr,
+                                                       iov_count,
+                                                       reply, datagram);
+
+            if (!(flags & MSG_PEEK))
+                consume_fake_netlink_datagram(sock, datagram);
+            result = (flags & MSG_TRUNC) ? datagram : scattered;
+
+            if (msg_name != 0 && msghdr_addr != 0) {
+                struct sockaddr_nl snl;
+                uint32_t in_namelen = peek_uint32(tracee, msghdr_addr + w);
+                if (errno == 0 && in_namelen > 0) {
+                    uint32_t copy = in_namelen < sizeof(snl)
+                                    ? in_namelen
+                                    : sizeof(snl);
+                    memset(&snl, 0, sizeof(snl));
+                    snl.nl_family = AF_NETLINK;
+                    (void) write_data(tracee, msg_name, &snl, copy);
+                    poke_uint32(tracee, msghdr_addr + w,
+                                (uint32_t) sizeof(snl));
+                }
+                errno = 0;
+            }
+
+            if (msghdr_addr != 0) {
+                poke_uint32(tracee, msghdr_addr + 6 * w,
+                            scattered < datagram ? MSG_TRUNC : 0);
+                errno = 0;
+            }
+
+            poke_reg(tracee, SYSARG_RESULT, (word_t) result);
+            set_sysnum(tracee, PR_void);
+            status = 0;
+            break;
+        }
+        note_netns_netlink_reply(tracee, fd);
         status = 0;
         break;
     }
@@ -439,8 +1966,6 @@ int translate_syscall_enter(Tracee *tracee)
     case PR_setxattr:
     case PR_truncate:
     case PR_truncate64:
-    case PR_umount:
-    case PR_umount2:
     case PR_utime:
     case PR_utimes:
         status = get_sysarg_path(tracee, path, SYSARG_1);
@@ -450,6 +1975,29 @@ int translate_syscall_enter(Tracee *tracee)
         if (status < 0)
             break;
         status = translate_sysarg(tracee, SYSARG_1, REGULAR);
+        break;
+
+    /* 上游 5c7b2fd：unshare/setns 假装成功；umount 移除模拟 binding。 */
+    case PR_unshare:
+        if ((peek_reg(tracee, CURRENT, SYSARG_1) & CLONE_NEWNET) != 0)
+            tracee->fake_netns = true;
+        poke_reg(tracee, SYSARG_RESULT, 0);
+        set_sysnum(tracee, PR_void);
+        status = 0;
+        break;
+
+    case PR_setns:
+        poke_reg(tracee, SYSARG_RESULT, 0);
+        set_sysnum(tracee, PR_void);
+        status = 0;
+        break;
+
+    case PR_umount:
+    case PR_umount2:
+        apply_emulated_umount(tracee);
+        poke_reg(tracee, SYSARG_RESULT, 0);
+        set_sysnum(tracee, PR_void);
+        status = 0;
         break;
 
     case PR_open:
@@ -593,11 +2141,10 @@ int translate_syscall_enter(Tracee *tracee)
         break;
 
     case PR_pivot_root:
-        status = translate_sysarg(tracee, SYSARG_1, REGULAR);
-        if (status < 0)
-            break;
-
-        status = translate_sysarg(tracee, SYSARG_2, REGULAR);
+        apply_emulated_pivot_root(tracee);
+        poke_reg(tracee, SYSARG_RESULT, 0);
+        set_sysnum(tracee, PR_void);
+        status = 0;
         break;
 
     case PR_linkat:
@@ -629,17 +2176,10 @@ int translate_syscall_enter(Tracee *tracee)
         break;
 
     case PR_mount:
-        status = get_sysarg_path(tracee, path, SYSARG_1);
-        if (status < 0)
-            break;
-
-        if (path[0] == '/' || path[0] == '.') {
-            status = translate_path2(tracee, AT_FDCWD, path, SYSARG_1, REGULAR);
-            if (status < 0)
-                break;
-        }
-
-        status = translate_sysarg(tracee, SYSARG_2, REGULAR);
+        apply_emulated_mount(tracee);
+        poke_reg(tracee, SYSARG_RESULT, 0);
+        set_sysnum(tracee, PR_void);
+        status = 0;
         break;
 
     case PR_openat2: {

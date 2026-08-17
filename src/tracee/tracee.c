@@ -389,9 +389,54 @@ int new_child(Tracee *parent, word_t clone_flags) {
         if (UNLIKELY(!child->fs)) return -ENOMEM;
         child->fs->cwd = talloc_strdup(child->fs, parent->fs->cwd);
         talloc_set_name_const(child->fs->cwd, "$cwd");
-        child->fs->bindings.guest = talloc_reference(child->fs, parent->fs->bindings.guest);
-        child->fs->bindings.host  = talloc_reference(child->fs, parent->fs->bindings.host);
+        if (parent->clone_stripped_newns
+            && parent->fs->bindings.guest != NULL) {
+            /* 上游 5c7b2fd：调用方请求了 CLONE_NEWNS（已被剥掉），
+             * 给子进程一份独立 binding 树，模拟 mount 不泄漏回父进程。 */
+            Binding *iter;
+
+            child->fs->bindings.guest = talloc_zero(child->fs, Bindings);
+            child->fs->bindings.host  = talloc_zero(child->fs, Bindings);
+            if (   child->fs->bindings.guest == NULL
+                || child->fs->bindings.host  == NULL)
+                return -ENOMEM;
+            CIRCLEQ_INIT(child->fs->bindings.guest);
+            CIRCLEQ_INIT(child->fs->bindings.host);
+
+            for (iter = CIRCLEQ_FIRST(parent->fs->bindings.guest);
+                 iter != (void *) parent->fs->bindings.guest;
+                 iter = CIRCLEQ_NEXT(iter, link.guest))
+                (void) insort_binding3(child, child->fs,
+                                       iter->host.path,
+                                       iter->guest.path);
+        }
+        else {
+            /* Bindings are shared across file-system name-spaces since a
+             * "mount --bind" made by a process affects all other processes
+             * under Linux.  Actually they are copied when a sub
+             * reconfiguration occured (nested proot or chroot(2)).  */
+            child->fs->bindings.guest = talloc_reference(child->fs, parent->fs->bindings.guest);
+            child->fs->bindings.host  = talloc_reference(child->fs, parent->fs->bindings.host);
+        }
     }
+
+    /* 上游 6a1f1fe：无论走哪条分支，消费掉 stripped-NEWNS 标记。 */
+    parent->clone_stripped_newns = false;
+
+    /* 上游 87af48f：网络命名空间继承与 fd 跟踪复制。 */
+    child->fake_netns = parent->fake_netns || parent->clone_stripped_newnet;
+    parent->clone_stripped_newnet = false;
+
+    for (int i = 0; i < parent->fake_netlink_fds_count; i++) {
+        child->fake_netlink_fds[i].fd = parent->fake_netlink_fds[i].fd;
+        child->fake_netlink_fds[i].reply = NULL;
+        child->fake_netlink_fds[i].reply_len = 0;
+        child->fake_netlink_fds[i].reply_off = 0;
+    }
+    child->fake_netlink_fds_count = parent->fake_netlink_fds_count;
+    memcpy(child->netlink_route_fds, parent->netlink_route_fds,
+           sizeof(child->netlink_route_fds));
+    child->netlink_route_fds_count = parent->netlink_route_fds_count;
 
     child->exe     = talloc_reference(child, parent->exe);
     child->qemu    = talloc_reference(child, parent->qemu);

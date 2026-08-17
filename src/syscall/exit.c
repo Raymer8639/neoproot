@@ -186,6 +186,14 @@ void translate_syscall_exit(Tracee *tracee)
 
     case PR_fchdir:
     case PR_chdir:
+    /* 上游 f2c5744：这些 syscall 在 enter.c 被 PR_void，确保
+     * 即使 AVOIDER 泄漏 -ENOSYS，tracee 也看到 0 返回值。 */
+    case PR_unshare:
+    case PR_setns:
+    case PR_mount:
+    case PR_umount:
+    case PR_umount2:
+    case PR_pivot_root:
         status = 0;
         break;
 
@@ -564,6 +572,58 @@ write_back:
         {
             poke_reg(tracee, SYSARG_RESULT, -EOPNOTSUPP);
         }
+        goto end;
+
+    case PR_socket:
+        /* 上游 4abc88b：记录被替换成 AF_UNIX 的假 netlink fd。 */
+        if (tracee->pending_fake_netlink_socket) {
+            int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+            if (fd >= 0) {
+                int i;
+                if (tracee->fake_netlink_fds_count < MAX_FAKE_NETLINK_FDS) {
+                    bool present = false;
+                    for (i = 0; i < tracee->fake_netlink_fds_count; i++) {
+                        if (tracee->fake_netlink_fds[i].fd == fd) {
+                            present = true;
+                            break;
+                        }
+                    }
+                    if (!present) {
+                        struct fake_netlink_socket *sock =
+                            &tracee->fake_netlink_fds[tracee->fake_netlink_fds_count++];
+                        memset(sock, 0, sizeof(*sock));
+                        sock->fd = fd;
+                    }
+                }
+            }
+            tracee->pending_fake_netlink_socket = false;
+        }
+
+        /* 上游 87af48f：记录宿主直接给的真实 NETLINK_ROUTE socket。 */
+        if (tracee->pending_real_netlink_socket) {
+            int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+            if (fd >= 0) {
+                int i;
+                if (tracee->netlink_route_fds_count < MAX_NETLINK_ROUTE_FDS) {
+                    bool present = false;
+                    for (i = 0; i < tracee->netlink_route_fds_count; i++) {
+                        if (tracee->netlink_route_fds[i] == fd) {
+                            present = true;
+                            break;
+                        }
+                    }
+                    if (!present)
+                        tracee->netlink_route_fds[tracee->netlink_route_fds_count++] = fd;
+                }
+            }
+            tracee->pending_real_netlink_socket = false;
+        }
+        goto end;
+
+    case PR_recvfrom:
+    case PR_recvmsg:
+        /* 上游 87af48f：把内核拒绝的 netns 配置请求改成 ACK。 */
+        handle_netlink_reply_exit(tracee, syscall_number);
         goto end;
 
     default:

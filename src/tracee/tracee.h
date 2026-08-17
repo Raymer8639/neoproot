@@ -56,6 +56,38 @@ typedef struct tracee {
 	struct tracee *parent;
 	bool         clone;
 
+	/* 上游 5c7b2fd：本次 clone/clone3 被剥掉 CLONE_NEWNS 时置位，
+	 * new_child 会给子进程独立 bindings，模拟 mount 不泄漏回父进程。 */
+	bool         clone_stripped_newns;
+
+	/* 上游 87af48f：CLONE_NEWNET 被剥掉时置位，传给子进程成为 fake_netns。 */
+	bool         clone_stripped_newnet;
+
+	/* 上游 87af48f：该 tracee 认为自己拥有独立网络命名空间。 */
+	bool         fake_netns;
+
+	/* 上游 4abc88b + f97b627：AF_NETLINK 仿真。每个被替换的 socket
+	 * 有自己独立的 pending reply，避免多 socket 互相串。 */
+#define MAX_FAKE_NETLINK_FDS 8
+#define MAX_FAKE_NETLINK_REPLY 8192
+	struct fake_netlink_socket {
+		int fd;
+		uint8_t *reply;
+		size_t reply_len;
+		size_t reply_off;
+	} fake_netlink_fds[MAX_FAKE_NETLINK_FDS];
+	int          fake_netlink_fds_count;
+	bool         pending_fake_netlink_socket;
+
+	/* 上游 87af48f：真实 NETLINK_ROUTE socket 的跟踪与 ACK 仿真。 */
+#define MAX_NETLINK_ROUTE_FDS 8
+	int          netlink_route_fds[MAX_NETLINK_ROUTE_FDS];
+	int          netlink_route_fds_count;
+	bool         pending_real_netlink_socket;
+	bool         netlink_ack_pending;
+	int          netlink_ack_fd;
+	uint32_t     netlink_ack_seq;
+
 	/* Ptrace: tracer side */
 	struct {
 		size_t nb_ptracees;
