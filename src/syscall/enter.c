@@ -1063,7 +1063,7 @@ static void build_fake_netlink_reply(Tracee *tracee, word_t buf_addr,
     uint8_t *out = tracee->fake_netlink_reply;
     size_t   max = sizeof(tracee->fake_netlink_reply);
     uint32_t pid = (uint32_t) tracee->pid;
-    uint32_t seq;
+    uint32_t seq = 0;
     uint16_t type, flags;
     bool dump;
     size_t off = 0;
@@ -1071,10 +1071,10 @@ static void build_fake_netlink_reply(Tracee *tracee, word_t buf_addr,
     tracee->fake_netlink_reply_len = 0;
 
     if (buf_addr == 0 || buf_len < sizeof(hdr))
-        return;
+        goto reply;
     req_len = buf_len < sizeof(req) ? buf_len : sizeof(req);
     if (read_data(tracee, req, buf_addr, req_len) < 0)
-        return;
+        goto reply;
 
     memcpy(&hdr, req, sizeof(hdr));
     type  = hdr.nlmsg_type;
@@ -1143,6 +1143,11 @@ static void build_fake_netlink_reply(Tracee *tracee, word_t buf_addr,
             off = nl_build_error(out, off, max, seq, pid, 0);
         break;
     }
+
+reply:
+    /* 上游 c81a1c9：绝不返回零长度 netlink 消息。 */
+    if (off == 0)
+        off = nl_build_error(out, off, max, seq, pid, -EINVAL);
 
     tracee->fake_netlink_reply_len = off;
 }
@@ -1540,7 +1545,14 @@ int translate_syscall_enter(Tracee *tracee)
             size_t copied    = 0;
             size_t result;
 
-            if (reply_len > 0 && buf != 0) {
+            /* 上游 c81a1c9：空接收队列交给真实 socket 报 EAGAIN/阻塞，
+             * 不要回零长度消息。 */
+            if (reply_len == 0) {
+                status = 0;
+                break;
+            }
+
+            if (buf != 0) {
                 copied = len < reply_len ? len : reply_len;
                 if (copied > 0 &&
                     write_data(tracee, buf,
@@ -1578,6 +1590,12 @@ int translate_syscall_enter(Tracee *tracee)
             size_t reply_len = tracee->fake_netlink_reply_len;
             size_t scattered = 0;
             size_t result;
+
+            /* 上游 c81a1c9：同 recvfrom。 */
+            if (reply_len == 0) {
+                status = 0;
+                break;
+            }
 
             if (msghdr_addr != 0) {
                 msg_name  = peek_word(tracee, msghdr_addr);
