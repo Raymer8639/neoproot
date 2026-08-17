@@ -1238,6 +1238,7 @@ static void build_fake_netlink_reply(Tracee *tracee, struct fake_netlink_socket 
     size_t off = 0;
 
     sock->reply_len = 0;
+    sock->reply_off = 0;
 
     if (sock->reply == NULL) {
         sock->reply = talloc_size(tracee, max);
@@ -1326,6 +1327,45 @@ reply:
         off = nl_build_error(out, off, max, seq, pid, -EINVAL);
 
     sock->reply_len = off;
+}
+
+static size_t fake_netlink_datagram_len(const uint8_t *reply, size_t len)
+{
+    size_t off = 0;
+
+    while (off + NLMSG_HDRLEN <= len) {
+        const struct nlmsghdr *nlh = (const struct nlmsghdr *) (reply + off);
+        size_t mlen = nlh->nlmsg_len;
+
+        if (mlen < NLMSG_HDRLEN || off + mlen > len)
+            break;
+        if (nlh->nlmsg_type == NLMSG_DONE)
+            break;
+        off += NLMSG_ALIGN(mlen);
+    }
+
+    return (off == 0 || off > len) ? len : off;
+}
+
+static size_t pending_fake_netlink_datagram(const struct fake_netlink_socket *sock,
+                                            const uint8_t **reply)
+{
+    if (sock->reply_len == 0)
+        return 0;
+
+    *reply = sock->reply + sock->reply_off;
+
+    return fake_netlink_datagram_len(*reply, sock->reply_len - sock->reply_off);
+}
+
+static void consume_fake_netlink_datagram(struct fake_netlink_socket *sock,
+                                          size_t datagram)
+{
+    sock->reply_off += datagram;
+    if (sock->reply_off >= sock->reply_len) {
+        sock->reply_len = 0;
+        sock->reply_off = 0;
+    }
 }
 
 static size_t scatter_fake_netlink_reply(Tracee *tracee, word_t iov_ptr,
@@ -1720,25 +1760,26 @@ int translate_syscall_enter(Tracee *tracee)
             int    flags     = (int) peek_reg(tracee, CURRENT, SYSARG_4);
             word_t addr_ptr  = peek_reg(tracee, CURRENT, SYSARG_5);
             word_t size_ptr  = peek_reg(tracee, CURRENT, SYSARG_6);
-            size_t reply_len = sock->reply_len;
+            const uint8_t *reply = NULL;
+            size_t datagram  = pending_fake_netlink_datagram(sock, &reply);
             size_t copied    = 0;
             size_t result;
 
-            if (reply_len == 0) {
+            if (datagram == 0) {
                 status = 0;
                 break;
             }
 
             if (buf != 0) {
-                copied = len < reply_len ? len : reply_len;
+                copied = len < datagram ? len : datagram;
                 if (copied > 0 &&
-                    write_data(tracee, buf, sock->reply, copied) < 0)
+                    write_data(tracee, buf, reply, copied) < 0)
                     copied = 0;
             }
 
             if (!(flags & MSG_PEEK))
-                sock->reply_len = 0;
-            result = (flags & MSG_TRUNC) ? reply_len : copied;
+                consume_fake_netlink_datagram(sock, datagram);
+            result = (flags & MSG_TRUNC) ? datagram : copied;
 
             if (addr_ptr != 0 && size_ptr != 0)
                 (void) write_fake_netlink_sockname(tracee, addr_ptr, size_ptr, 0);
@@ -1764,11 +1805,12 @@ int translate_syscall_enter(Tracee *tracee)
             size_t w = sizeof_word(tracee);
             word_t msg_name = 0;
             word_t iov_ptr = 0, iov_count = 0;
-            size_t reply_len = sock->reply_len;
+            const uint8_t *reply = NULL;
+            size_t datagram  = pending_fake_netlink_datagram(sock, &reply);
             size_t scattered = 0;
             size_t result;
 
-            if (reply_len == 0) {
+            if (datagram == 0) {
                 status = 0;
                 break;
             }
@@ -1785,12 +1827,11 @@ int translate_syscall_enter(Tracee *tracee)
             if (iov_ptr != 0 && iov_count > 0)
                 scattered = scatter_fake_netlink_reply(tracee, iov_ptr,
                                                        iov_count,
-                                                       sock->reply,
-                                                       reply_len);
+                                                       reply, datagram);
 
             if (!(flags & MSG_PEEK))
-                sock->reply_len = 0;
-            result = (flags & MSG_TRUNC) ? reply_len : scattered;
+                consume_fake_netlink_datagram(sock, datagram);
+            result = (flags & MSG_TRUNC) ? datagram : scattered;
 
             if (msg_name != 0 && msghdr_addr != 0) {
                 struct sockaddr_nl snl;
@@ -1810,7 +1851,7 @@ int translate_syscall_enter(Tracee *tracee)
 
             if (msghdr_addr != 0) {
                 poke_uint32(tracee, msghdr_addr + 6 * w,
-                            scattered < reply_len ? MSG_TRUNC : 0);
+                            scattered < datagram ? MSG_TRUNC : 0);
                 errno = 0;
             }
 
