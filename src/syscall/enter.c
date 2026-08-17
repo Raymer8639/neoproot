@@ -360,21 +360,28 @@ void apply_emulated_pivot_root(Tracee *tracee)
 
 /* 上游 4abc88b + d738215：仅当宿主拒绝 AF_NETLINK 时才启用仿真，
  * 避免破坏 stock Linux 上正常使用 netlink 的程序。 */
-static bool host_blocks_af_netlink(void)
+static bool host_blocks_af_netlink(const Tracee *tracee)
 {
-    static int cached = -1; /* -1: unknown, 0: works, 1: blocked */
+    enum { PROBE_UNKNOWN, PROBE_ALLOWED, PROBE_BLOCKED };
+    static int cached = PROBE_UNKNOWN;
     int fd;
+    int saved_errno;
 
-    if (cached != -1)
-        return cached == 1;
+    if (cached != PROBE_UNKNOWN)
+        return cached == PROBE_BLOCKED;
 
     fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
     if (fd >= 0) {
         close(fd);
-        cached = 0;
+        cached = PROBE_ALLOWED;
         return false;
     }
-    cached = 1;
+
+    saved_errno = errno;
+    cached = PROBE_BLOCKED;
+    VERBOSE(tracee, 1, "AF_NETLINK denied by host (%s); enabling "
+                       "AF_UNIX fallback for sandbox helpers",
+            strerror(saved_errno));
     return true;
 }
 
@@ -697,7 +704,7 @@ int translate_syscall_enter(Tracee *tracee)
     /* 上游 4abc88b：AF_NETLINK 仿真。 */
     case PR_socket: {
         word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
-        if (domain == AF_NETLINK && host_blocks_af_netlink()) {
+        if (domain == AF_NETLINK && host_blocks_af_netlink(tracee)) {
             word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
             poke_reg(tracee, SYSARG_1, AF_UNIX);
             poke_reg(tracee, SYSARG_2, SOCK_DGRAM | (type & SOCK_CLOEXEC));
