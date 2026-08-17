@@ -48,6 +48,8 @@
 #define SIZEOF_RELEVANT_STRUCT_STAT 72
 
 static int decrement_link_count(Tracee *tracee, Reg sysarg);
+static bool is_l2s_internal_path(const char *path);
+static bool parse_l2s_final_count(const char *path, int *count);
 
 static FORCE_INLINE int my_readlink(const char *link_path, char *buf, size_t buf_size) {
     if (UNLIKELY(!link_path || !buf || buf_size < 1)) return -EINVAL;
@@ -99,8 +101,10 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
         status = my_readlink(original, intermediate, PATH_MAX);
         if (UNLIKELY(status < 0)) return status;
         filename = get_filename(intermediate, NULL);
-        if (strncmp(filename, PREFIX, PREFIX_LEN) == 0)
+        if (is_l2s_internal_path(intermediate))
             first_link = false;
+        else if (strncmp(filename, PREFIX, PREFIX_LEN) == 0)
+            return -EINVAL;
     } else {
         filename = get_filename(original, &path_len);
         prefix_len = path_len - strlen(filename);
@@ -192,7 +196,9 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
         status = my_readlink(intermediate, final, PATH_MAX);
         if (UNLIKELY(status < 0)) return status;
         size_t final_len = strlen(final);
-        link_count = parse_4digit(final + final_len - 4) + 1;
+        if (UNLIKELY(!parse_l2s_final_count(final, &link_count)))
+            return -EINVAL;
+        link_count++;
         /* 编号溢出保护：链接数到顶（第 9999 个链接会写出 5 位编号）
          * → 拒绝并返回 EMLINK，让调用方（pnpm）fallback 到复制模式 */
         if (UNLIKELY(link_count > MAX_LINK_COUNT))
@@ -232,7 +238,6 @@ static HOT int decrement_link_count(Tracee *restrict tracee, Reg path_sysarg) {
     char final[PATH_MAX] ALIGNED;
     char new_final[PATH_MAX] ALIGNED;
     struct stat statl;
-    char *filename;
     size_t final_len;
     ssize_t size;
     int status, link_count;
@@ -246,8 +251,7 @@ static HOT int decrement_link_count(Tracee *restrict tracee, Reg path_sysarg) {
 
     status = my_readlink(original, intermediate, PATH_MAX);
     if (UNLIKELY(status < 0)) return status;
-    filename = get_filename(intermediate, NULL);
-    if (UNLIKELY(strncmp(filename, PREFIX, PREFIX_LEN) != 0)) return 0;
+    if (UNLIKELY(!is_l2s_internal_path(intermediate))) return 0;
 
     status = my_readlink(intermediate, final, PATH_MAX);
     if (UNLIKELY(status < 0)) {
@@ -255,7 +259,9 @@ static HOT int decrement_link_count(Tracee *restrict tracee, Reg path_sysarg) {
         return 0;
     }
     final_len = strlen(final);
-    link_count = parse_4digit(final + final_len - 4) - 1;
+    if (UNLIKELY(!parse_l2s_final_count(final, &link_count)))
+        return 0;
+    link_count--;
 
     if (LIKELY(link_count > 0)) {
         strncpy(new_final, final, final_len - 4);
@@ -337,7 +343,8 @@ static HOT int handle_sysexit_end(Extension *extension) {
 
     filename = get_filename(original, NULL);
     status = lstat(original, &statl);
-    if (strncmp(filename, PREFIX, PREFIX_LEN) == 0) {
+    if (UNLIKELY(status < 0)) return 0;
+    if (is_l2s_internal_path(original)) {
         if (S_ISLNK(statl.st_mode)) {
             strcpy(intermediate, original);
             goto proc_intermediate;
@@ -360,8 +367,9 @@ proc_intermediate:
 proc_final:
     status = lstat(final, &final_stat);
     if (UNLIKELY(status < 0)) return -errno;
-    size_t final_len = strlen(final);
-    final_stat.st_nlink = parse_4digit(final + final_len - 4);
+    int final_count;
+    if (UNLIKELY(!parse_l2s_final_count(final, &final_count))) return 0;
+    final_stat.st_nlink = final_count;
 
 #ifdef USERLAND
     read_data(tracee, &statl, peek_reg(tracee, ORIGINAL, stat_reg), sizeof(statl));
@@ -455,15 +463,36 @@ static FORCE_INLINE bool is_l2s_file(const char *host_path) {
 	return true;
 }
 
+static bool is_l2s_internal_path(const char *path) {
+    char *name = get_filename((char *)path, NULL);
+    return is_l2s_internal_name(name);
+}
+
+static bool parse_l2s_final_count(const char *path, int *count) {
+    char *name;
+    size_t len;
+
+    if (UNLIKELY(path == NULL || count == NULL || !is_l2s_file(path)))
+        return false;
+
+    name = get_filename((char *)path, NULL);
+    len = strlen(name);
+    if (UNLIKELY(len < PREFIX_LEN + 5))
+        return false;
+
+    *count = parse_4digit(name + len - 4);
+    return true;
+}
+
 /* 解假硬链接链：link(链) -> intermediate(中间链) -> final(数据文件) */
 static FORCE_INLINE int resolve_faked_hard_link(const char link[PATH_MAX], char final[PATH_MAX]) {
 	char intermediate[PATH_MAX] ALIGNED;
 	int status = my_readlink(link, intermediate, PATH_MAX);
 	if (UNLIKELY(status < 0)) return status;
-	char *name = get_filename(intermediate, NULL);
-	if (UNLIKELY(strncmp(name, PREFIX, PREFIX_LEN) != 0)) return -EINVAL;
-	status = my_readlink(intermediate, final, PATH_MAX);
-	return UNLIKELY(status < 0) ? status : 0;
+    if (UNLIKELY(!is_l2s_internal_path(intermediate))) return -EINVAL;
+    status = my_readlink(intermediate, final, PATH_MAX);
+    if (UNLIKELY(status < 0)) return status;
+    return parse_l2s_final_count(final, &(int){0}) ? 0 : -EINVAL;
 }
 
 /* 经假硬链接打开的 fd 登记表：内核只知道 l2s 存储名，这里记住 tracee
@@ -686,7 +715,10 @@ static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *pa
      * 计数=0 → 删 intermediate+final（家族除名）。
      * 必须在复制完成之后：计数=0 会删 final 数据，副本已保存数据无损失。 */
     size_t final_len = strlen(final_host);
-    int link_count = parse_4digit(final_host + final_len - 4) - 1;
+    int link_count;
+    if (UNLIKELY(!parse_l2s_final_count(final_host, &link_count)))
+        return 1;
+    link_count--;
     if (LIKELY(link_count >= 0)) {
         if (link_count > 0) {
             char new_final[PATH_MAX] ALIGNED;
@@ -773,10 +805,10 @@ static FORCE_INLINE void translated_path(Extension *restrict extension, char *re
     char link_target[PATH_MAX] ALIGNED, final_target[PATH_MAX] ALIGNED;
     int status = my_readlink(translated_path, link_target, PATH_MAX);
     if (UNLIKELY(status < 0)) return;
-    char *link_filename = get_filename(link_target, NULL);
-    if (UNLIKELY(strncmp(link_filename, PREFIX, PREFIX_LEN) != 0)) return;
+    if (UNLIKELY(!is_l2s_internal_path(link_target))) return;
     status = my_readlink(link_target, final_target, PATH_MAX);
     if (UNLIKELY(status < 0)) return;
+    if (UNLIKELY(!parse_l2s_final_count(final_target, &(int){0}))) return;
     /* 上游 7ff389a1：open 被重定向到 l2s 数据文件时，记下 tracee 用的链名
      * （供 /proc/<pid>/fd/<fd> readlink 换名），并强制 exit 停靠拿 fd 号。 */
     if (UNLIKELY(is_open_syscall(sysnum)))

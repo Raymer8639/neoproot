@@ -16,6 +16,8 @@ int otod(int n);
 
 int path_exists(char path[PATH_MAX]);
 
+int initialize_meta_store(void);
+
 int get_fd_path(Tracee *tracee, char path[PATH_MAX], Reg fd_sysarg, RegVersion version);
 
 int read_sysarg_path(Tracee *tracee, char path[PATH_MAX], Reg path_sysarg, RegVersion version);
@@ -33,5 +35,8 @@ int get_meta_path(char orig_path[PATH_MAX], char meta_path[PATH_MAX]);
 int read_meta_file(char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group, Config *config);
 
 int write_meta_file(char path[PATH_MAX], mode_t mode, uid_t owner, gid_t group, bool is_creat, Config *config);
+
+int remove_meta_file(char path[PATH_MAX]);
+int rename_meta_file(char old_path[PATH_MAX], char new_path[PATH_MAX]);
 
 #endif

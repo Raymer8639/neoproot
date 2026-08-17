@@ -8,7 +8,6 @@
 #include <assert.h>
 #include <stdio.h>
 #include <arm_neon.h>
-#include <arm_acle.h>
 
 #include "path/canon.h"
 #include "path/path.h"
@@ -18,26 +17,11 @@
 #include "path/f2fs-bug.h"
 #include "extension/extension.h"
 
-#define STAT_CACHE_SIZE      64
-#define STAT_CACHE_MASK      (STAT_CACHE_SIZE - 1)
-#define STAT_CACHE_PROBE     8
-#define CACHE_ALIGN          __attribute__((aligned(64)))
 #define NEON_VEC_BYTES        16
 
 #define LIKELY(x)   __builtin_expect(!!(x), 1)
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #define ALWAYS_INLINE __attribute__((always_inline)) inline
-
-typedef struct CACHE_ALIGN {
-    char     path[PATH_MAX];
-    struct   stat st;
-    uint32_t crc;
-    unsigned valid    : 1;
-    unsigned lru_time : 31;
-} StatCacheEntry;
-
-static StatCacheEntry stat_cache[STAT_CACHE_SIZE] CACHE_ALIGN;
-static unsigned int   stat_cache_clock = 0;
 
 static ALWAYS_INLINE size_t neon_strlen_fast(const char *s) {
     if (UNLIKELY(!s || !*s)) return 0;
@@ -103,93 +87,6 @@ static ALWAYS_INLINE void copy_component(char *restrict d, const char *restrict 
     d[len] = '\0';
 }
 
-static ALWAYS_INLINE uint32_t crc32_path(const char *s, size_t len) {
-    uint32_t crc = 0xFFFFFFFFU;
-    const uint8_t *p = (const uint8_t *)s;
-#if defined(__ARM_FEATURE_CRC32)
-    while (len >= 4) {
-        crc = __crc32w(crc, *(const uint32_t *)p);
-        p += 4; len -= 4;
-    }
-    while (len >= 1) {
-        crc = __crc32b(crc, *p);
-        p += 1; len -= 1;
-    }
-#else
-    /* portable 构建（如 -march=armv8-a，无 +crc）的软件 CRC-32：
-     * 与 ARM crc32 指令语义一致（IEEE 802.3 反射多项式 0xEDB88320，LSB 先行），
-     * 保证同二进制内哈希结果自洽，仅作为 stat cache 索引使用 */
-    while (len >= 4) {
-        uint32_t word = *(const uint32_t *)p;
-        for (int i = 0; i < 32; i++) {
-            uint32_t bit = (word ^ crc) & 1;
-            crc >>= 1;
-            if (bit) crc ^= 0xEDB88320U;
-            word >>= 1;
-        }
-        p += 4; len -= 4;
-    }
-    while (len >= 1) {
-        uint32_t byte = *p;
-        for (int i = 0; i < 8; i++) {
-            uint32_t bit = (byte ^ crc) & 1;
-            crc >>= 1;
-            if (bit) crc ^= 0xEDB88320U;
-            byte >>= 1;
-        }
-        p += 1; len -= 1;
-    }
-#endif
-    return crc;
-}
-
-static int stat_cache_lookup(const char *restrict path, struct stat *restrict out_st) {
-    size_t len = neon_strlen_fast(path);
-    uint32_t h = crc32_path(path, len);
-    unsigned slot = h & STAT_CACHE_MASK;
-    /* crc32 直接索引 + 短线性探测；空槽终止（插入保证连续性） */
-    for (unsigned i = 0; i < STAT_CACHE_PROBE; i++) {
-        StatCacheEntry *e = &stat_cache[(slot + i) & STAT_CACHE_MASK];
-        if (UNLIKELY(!e->valid)) return -ENOENT;
-        if (e->crc != h) continue;
-        if (LIKELY(neon_strcmp_fast(e->path, path) == 0)) {
-            *out_st = e->st;
-            e->lru_time = ++stat_cache_clock;
-            return 0;
-        }
-    }
-    return -ENOENT;
-}
-
-static void stat_cache_insert(const char *restrict path, const struct stat *restrict st) {
-    size_t len = neon_strlen_fast(path);
-    uint32_t h = crc32_path(path, len);
-    unsigned slot = h & STAT_CACHE_MASK;
-    for (unsigned i = 0; i < STAT_CACHE_PROBE; i++) {
-        StatCacheEntry *e = &stat_cache[(slot + i) & STAT_CACHE_MASK];
-        if (UNLIKELY(!e->valid)) {
-            neon_strcpy_fast(e->path, path);
-            e->st = *st;
-            e->crc = h;
-            e->valid = 1;
-            e->lru_time = ++stat_cache_clock;
-            return;
-        }
-    }
-    /* 探测窗口全满：替换窗口内最老的项 */
-    StatCacheEntry *victim = &stat_cache[slot & STAT_CACHE_MASK];
-    for (unsigned i = 1; i < STAT_CACHE_PROBE; i++) {
-        StatCacheEntry *e = &stat_cache[(slot + i) & STAT_CACHE_MASK];
-        if (e->lru_time < victim->lru_time)
-            victim = e;
-    }
-    neon_strcpy_fast(victim->path, path);
-    victim->st = *st;
-    victim->crc = h;
-    victim->valid = 1;
-    victim->lru_time = ++stat_cache_clock;
-}
-
 static ALWAYS_INLINE void pop_component(char *restrict path) {
     if (UNLIKELY(!path || *path != '/')) return;
     int len = neon_strlen_fast(path) - 1;
@@ -227,9 +124,7 @@ static int substitute_binding_stat(Tracee *restrict tracee, Finality finality,
                                 IS_FINAL(finality) && recursion_level == 0);
         if (UNLIKELY(res < 0)) return res;
     }
-    if (LIKELY(stat_cache_lookup(host_path, &statl) == 0)) {
-        res = 0;
-    } else if (should_skip_file_access_due_to_f2fs_bug(tracee, host_path)) {
+    if (should_skip_file_access_due_to_f2fs_bug(tracee, host_path)) {
         res = -ENOENT;
     } else {
         res = lstat(host_path, &statl);
@@ -241,8 +136,6 @@ static int substitute_binding_stat(Tracee *restrict tracee, Finality finality,
                 statl.st_mode = S_IFDIR | 0755;
             }
         }
-        if (LIKELY(res == 0))
-            stat_cache_insert(host_path, &statl);
     }
     if (UNLIKELY(res < 0 && tracee->glue_type != 0)) {
         statl.st_mode = build_glue(tracee, guest_path, host_path, finality);
@@ -313,14 +206,11 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
         }
         res = readlink(host_path, scratch_path, PATH_MAX - 1);
         if (UNLIKELY(res < 0)) {
-            /* stat cache 可能过期：link2symlink 物化（rename 覆盖 symlink）会把
-             * 链路径变成普通文件，而 cache 仍记录为 symlink → readlink 失败
-             * （EINVAL/ENOTDIR），导致 execve 翻译返回 -EPERM。
-             * 重新 lstat 验证：已非符号链接则更新 cache 并按普通文件继续。 */
+            /* 文件可在路径解析期间改变；重新 lstat，若已不再是符号链接则
+             * 按普通文件继续，避免将陈旧的链接状态带到最终宿主 syscall。 */
             const int saved_errno = errno;
             struct stat st_now;
             if (LIKELY(lstat(host_path, &st_now) == 0 && !S_ISLNK(st_now.st_mode))) {
-                stat_cache_insert(host_path, &st_now);
                 neon_strcpy_fast(scratch_path, guest_path);
                 res = join_paths(2, guest_path, scratch_path, comp);
                 if (UNLIKELY(res < 0)) return res;

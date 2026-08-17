@@ -37,7 +37,7 @@ int handle_unlink_enter_end(Tracee *tracee, Reg fd_sysarg, Reg path_sysarg, Conf
 
     // 如果 meta 文件存在，一并删除
     if (path_exists(meta_path) == 0)
-        unlink(meta_path);
+        remove_meta_file(meta_path);
 
     return 0;
 }

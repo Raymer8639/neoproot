@@ -80,7 +80,9 @@ int handle_chown_enter_end(Tracee *restrict tracee, Reg path_sysarg, Reg owner_s
         return ret;
 
     // 4. 读取当前 meta 信息
-    read_meta_file(meta_path, &mode, &current_owner, &current_group, config);
+    ret = read_meta_file(meta_path, &mode, &current_owner, &current_group, config);
+    if (UNLIKELY(ret < 0))
+        return ret;
 
     // 5. 解析用户传入的 uid/gid（-1 表示保持不变）
     new_owner = (uid_t)peek_reg(tracee, ORIGINAL, owner_sysarg);
@@ -98,10 +100,12 @@ int handle_chown_enter_end(Tracee *restrict tracee, Reg path_sysarg, Reg owner_s
     // 7. 写入新的属主到 meta
     if (LIKELY(config->euid == 0)) {
         // root 可以改任何属主
-        write_meta_file(meta_path, mode, new_owner, new_group, 0, config);
+        return write_meta_file(meta_path, mode, new_owner, new_group, 0, config);
     } else {
         // 普通用户只能改组，不能改所有者
-        write_meta_file(meta_path, mode, current_owner, new_group, 0, config);
+        ret = write_meta_file(meta_path, mode, current_owner, new_group, 0, config);
+        if (UNLIKELY(ret < 0))
+            return ret;
         poke_reg(tracee, owner_sysarg, current_owner);
     }
 

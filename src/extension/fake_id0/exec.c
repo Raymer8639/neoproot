@@ -46,7 +46,9 @@ int handle_exec_enter_end(Tracee *tracee, Reg filename_sysarg, Config *config)
         return -EACCES;
 
     // 读取 meta 信息，处理 suid/sgid
-    read_meta_file(meta_path, &mode, &uid, &gid, config);
+    status = read_meta_file(meta_path, &mode, &uid, &gid, config);
+    if (status < 0)
+        return status;
 
     // 设置 suid 模拟
     if (mode & S_ISUID) {
