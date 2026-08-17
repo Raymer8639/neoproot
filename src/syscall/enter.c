@@ -695,7 +695,7 @@ static bool nl_request_is_loopback(const uint8_t *req, size_t req_len)
 }
 
 static int write_fake_netlink_sockname(Tracee *tracee, word_t addr_ptr,
-                                       word_t size_ptr)
+                                       word_t size_ptr, uint32_t nl_pid)
 {
     struct sockaddr_nl snl;
     uint32_t in_size;
@@ -710,7 +710,7 @@ static int write_fake_netlink_sockname(Tracee *tracee, word_t addr_ptr,
 
     memset(&snl, 0, sizeof(snl));
     snl.nl_family = AF_NETLINK;
-    snl.nl_pid    = (uint32_t) tracee->pid;
+    snl.nl_pid    = nl_pid;
 
     if (addr_ptr != 0 && in_size > 0) {
         uint32_t copy = in_size < sizeof(snl) ? in_size : sizeof(snl);
@@ -1445,7 +1445,8 @@ int translate_syscall_enter(Tracee *tracee)
             && is_fake_netlink_fd(tracee, peek_reg(tracee, CURRENT, SYSARG_1))) {
             word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
             word_t size_ptr = peek_reg(tracee, CURRENT, SYSARG_3);
-            int    rc = write_fake_netlink_sockname(tracee, addr_ptr, size_ptr);
+            int    rc = write_fake_netlink_sockname(tracee, addr_ptr, size_ptr,
+                                                    (uint32_t) tracee->pid);
 
             poke_reg(tracee, SYSARG_RESULT, (word_t) rc);
             set_sysnum(tracee, PR_void);
@@ -1567,7 +1568,7 @@ int translate_syscall_enter(Tracee *tracee)
             result = (flags & MSG_TRUNC) ? reply_len : copied;
 
             if (addr_ptr != 0 && size_ptr != 0)
-                (void) write_fake_netlink_sockname(tracee, addr_ptr, size_ptr);
+                (void) write_fake_netlink_sockname(tracee, addr_ptr, size_ptr, 0);
             errno = 0;
 
             poke_reg(tracee, SYSARG_RESULT, (word_t) result);
