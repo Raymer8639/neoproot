@@ -40,6 +40,7 @@ extern int  translate_syscall_enter(Tracee *tracee);
 extern void translate_syscall_exit(Tracee *tracee);
 
 extern void handle_netlink_reply_exit(Tracee *tracee, word_t syscall_number);
+extern bool host_blocks_af_netlink(const Tracee *tracee);
 
 extern void apply_emulated_mount(Tracee *tracee);
 extern void apply_emulated_pivot_root(Tracee *tracee);

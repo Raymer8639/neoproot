@@ -237,11 +237,6 @@ static FilteredSysnum proot_sysnums[] = {
     { PR_clone3,        0 },
     { PR_connect,       0 },
     { PR_creat,         0 },
-    { PR_recvfrom,      0 },
-    { PR_recvmsg,       0 },
-    { PR_sendmsg,       0 },
-    { PR_sendto,        0 },
-    { PR_socket,        FILTER_SYSEXIT },
     { PR_execve,        FILTER_SYSEXIT },
     { PR_execveat,      FILTER_SYSEXIT },
     { PR_faccessat,     0 },
@@ -326,6 +321,17 @@ static FilteredSysnum proot_sysnums[] = {
     FILTERED_SYSNUM_END,
 };
 
+/* 仅当宿主拒绝 AF_NETLINK 时才需要拦截这些 syscall 做仿真；
+ * 宿主允许时让真实 netlink 直通，避免干扰 glibc/iproute2。 */
+static FilteredSysnum netlink_sysnums[] = {
+    { PR_recvfrom,      0 },
+    { PR_recvmsg,       0 },
+    { PR_sendmsg,       0 },
+    { PR_sendto,        0 },
+    { PR_socket,        FILTER_SYSEXIT },
+    FILTERED_SYSNUM_END,
+};
+
 static int merge_filtered_sysnums(TALLOC_CTX *ctx,
                                   FilteredSysnum **restrict list,
                                   const FilteredSysnum *restrict new_list) {
@@ -363,6 +369,11 @@ int enable_syscall_filtering(const Tracee *restrict tracee) {
     ret = merge_filtered_sysnums(tracee->ctx, &filtered, proot_sysnums);
     if (UNLIKELY(ret < 0))
         return ret;
+    if (host_blocks_af_netlink(tracee)) {
+        ret = merge_filtered_sysnums(tracee->ctx, &filtered, netlink_sysnums);
+        if (UNLIKELY(ret < 0))
+            return ret;
+    }
     if (tracee->extensions) {
         Extension *ext;
         LIST_FOREACH(ext, tracee->extensions, link) {

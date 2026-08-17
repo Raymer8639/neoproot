@@ -419,7 +419,7 @@ void apply_emulated_pivot_root(Tracee *tracee)
 
 /* 上游 4abc88b + d738215：仅当宿主拒绝 AF_NETLINK 时才启用仿真，
  * 避免破坏 stock Linux 上正常使用 netlink 的程序。 */
-static bool host_blocks_af_netlink(const Tracee *tracee)
+bool host_blocks_af_netlink(const Tracee *tracee)
 {
     enum { PROBE_UNKNOWN, PROBE_ALLOWED, PROBE_BLOCKED };
     static int cached = PROBE_UNKNOWN;
