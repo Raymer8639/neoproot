@@ -16,10 +16,15 @@ mkdir -p "$ROOT/safe" "$ROOT/l2s"
 printf 'inside\n' > "$ROOT/safe/probe"
 printf 'host-only\n' > "$OUTSIDE/secret"
 
-"$CC" -static -O2 -o "$ROOT/security-regressions" \
-    "$SCRIPT_DIR/test-security-regressions.c"
+BINDS=""
+if ! "$CC" -static -O2 -o "$ROOT/security-regressions" \
+    "$SCRIPT_DIR/test-security-regressions.c" 2>/dev/null; then
+    "$CC" -O2 -o "$ROOT/security-regressions" \
+        "$SCRIPT_DIR/test-security-regressions.c"
+    BINDS="-b /system -b /apex -b $PREFIX/lib/libtermux-exec-ld-preload.so"
+fi
 
-PROOT_UNSET_DONE=1 "$PROOT" -r "$ROOT" -b /proc --link2symlink -0 /security-regressions "$OUTSIDE"
+PROOT_UNSET_DONE=1 "$PROOT" -r "$ROOT" -b /proc $BINDS --link2symlink -0 /security-regressions "$OUTSIDE"
 
 if find "$ROOT" -name '.proot-meta-file.*' -print | grep -q .; then
     echo "guest-visible fake-id0 metadata found" >&2
