@@ -423,6 +423,10 @@ static bool host_blocks_af_netlink(const Tracee *tracee)
 {
     enum { PROBE_UNKNOWN, PROBE_ALLOWED, PROBE_BLOCKED };
     static int cached = PROBE_UNKNOWN;
+    struct {
+        struct nlmsghdr  nlh;
+        struct ifaddrmsg ifa;
+    } request;
     struct sockaddr_nl snl;
     const char *blocked_op;
     int fd;
@@ -446,6 +450,25 @@ static bool host_blocks_af_netlink(const Tracee *tracee)
         saved_errno = errno;
         close(fd);
         blocked_op = "bind";
+        goto blocked;
+    }
+
+    /* 上游 4638659：socket+bind 成功不代表能写；Android SELinux 常
+     * 允许 nlmsg_read 但拒绝 nlmsg_write。用无害 RTM_NEWADDR 探测
+     * sendto 是否被 EACCES/EPERM 拦截。 */
+    memset(&request, 0, sizeof(request));
+    request.nlh.nlmsg_len   = NLMSG_LENGTH(sizeof(request.ifa));
+    request.nlh.nlmsg_type  = RTM_NEWADDR;
+    request.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    request.nlh.nlmsg_seq   = 1;
+    request.ifa.ifa_family  = AF_UNSPEC;
+
+    if (sendto(fd, &request, sizeof(request), MSG_DONTWAIT,
+               (struct sockaddr *) &snl, sizeof(snl)) < 0
+        && (errno == EACCES || errno == EPERM)) {
+        saved_errno = errno;
+        close(fd);
+        blocked_op = "sendto";
         goto blocked;
     }
 
