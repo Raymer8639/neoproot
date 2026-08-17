@@ -66,16 +66,17 @@ typedef struct tracee {
 	/* 上游 87af48f：该 tracee 认为自己拥有独立网络命名空间。 */
 	bool         fake_netns;
 
-	/* 上游 4abc88b：AF_NETLINK 仿真。把 tracee 请求的 AF_NETLINK
-	 * socket 悄悄替换成 AF_UNIX/SOCK_DGRAM，并记录 fd，后续
-	 * bind/sendto/recvfrom 等走伪造回复。 */
+	/* 上游 4abc88b + f97b627：AF_NETLINK 仿真。每个被替换的 socket
+	 * 有自己独立的 pending reply，避免多 socket 互相串。 */
 #define MAX_FAKE_NETLINK_FDS 8
-	int          fake_netlink_fds[MAX_FAKE_NETLINK_FDS];
+#define MAX_FAKE_NETLINK_REPLY 8192
+	struct fake_netlink_socket {
+		int fd;
+		uint8_t *reply;
+		size_t reply_len;
+	} fake_netlink_fds[MAX_FAKE_NETLINK_FDS];
 	int          fake_netlink_fds_count;
 	bool         pending_fake_netlink_socket;
-#define MAX_FAKE_NETLINK_REPLY 8192
-	uint8_t      fake_netlink_reply[MAX_FAKE_NETLINK_REPLY] __attribute__((aligned(8)));
-	size_t       fake_netlink_reply_len;
 
 	/* 上游 87af48f：真实 NETLINK_ROUTE socket 的跟踪与 ACK 仿真。 */
 #define MAX_NETLINK_ROUTE_FDS 8
