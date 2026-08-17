@@ -245,9 +245,38 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
         && (   put_old_guest[prefix_len] == '/'
             || (prefix_len == 1 && new_root_guest[0] == '/'))) {
         put_old_after = put_old_guest + (prefix_len == 1 ? 0 : prefix_len);
-        if (put_old_after[0] == '/' && put_old_after[1] != '\0')
+        if (put_old_after[0] == '/' && put_old_after[1] != '\0') {
+            Binding *iter;
+            Binding *next;
+            size_t put_old_len = strlen(put_old_after);
+            char aliased[PATH_MAX];
+
             (void) insort_binding3(tracee, tracee->fs,
                                    old_root_host, put_old_after);
+
+            /* 上游 e6908d2：把已有非 root bind 也重新暴露到
+             * oldroot 前缀下，方便沙箱工具继续访问 /proc、/dev 等。 */
+            for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+                 iter != (void *) tracee->fs->bindings.guest;
+                 iter = next) {
+                next = CIRCLEQ_NEXT(iter, link.guest);
+
+                if (strcmp(iter->guest.path, "/") == 0)
+                    continue;
+                if (strncmp(iter->guest.path, put_old_after, put_old_len) == 0
+                    && (iter->guest.path[put_old_len] == '\0'
+                        || iter->guest.path[put_old_len] == '/'))
+                    continue;
+
+                if ((size_t) snprintf(aliased, sizeof(aliased), "%s%s",
+                                      put_old_after, iter->guest.path)
+                    >= sizeof(aliased))
+                    continue;
+
+                (void) insort_binding3(tracee, tracee->fs,
+                                       iter->host.path, aliased);
+            }
+        }
     }
 }
 
