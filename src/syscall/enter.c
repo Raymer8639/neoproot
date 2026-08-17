@@ -8,6 +8,7 @@
 #include <limits.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/mount.h>
 #include <termios.h>
 #include <sched.h>
 #include <stddef.h>
@@ -31,6 +32,7 @@
 #include "path/path.h"
 #include "path/canon.h"
 #include "path/binding.h"
+#include "path/temp.h"
 #include "arch.h"
 #include "attribute.h"
 
@@ -138,6 +140,153 @@ static int translate_path2_parent(Tracee *tracee, int dir_fd, char path[PATH_MAX
         return status;
 
     return set_sysarg_path(tracee, translated_path, reg);
+}
+
+
+/* 上游 bwrap 基础（064617f^ 已有）：mount/pivot_root 的用户态模拟。
+ * 本地 scicat 基线没有这套，先补上，后续 bwrap 系列依赖它。 */
+static int guest_canonicalize(Tracee *tracee, const char *user_path,
+                              char guest_path[PATH_MAX])
+{
+    int status;
+
+    if (user_path[0] == '/')
+        strcpy(guest_path, "/");
+    else {
+        status = getcwd2(tracee, guest_path);
+        if (status < 0)
+            return status;
+    }
+
+    status = canonicalize(tracee, user_path, true, guest_path, 0);
+    if (status < 0)
+        return status;
+
+    chop_finality(guest_path);
+    return 0;
+}
+
+static void emulate_mount(Tracee *tracee, const char *src_user,
+                          const char *target_user, const char *fstype,
+                          unsigned long flags)
+{
+    char host_path[PATH_MAX];
+    char guest_path[PATH_MAX];
+    const char *tmpdir;
+
+    if ((flags & MS_REMOUNT) != 0)
+        return;
+
+    if ((flags & MS_BIND) != 0) {
+        if (translate_path(tracee, host_path, AT_FDCWD, src_user, true) < 0)
+            return;
+    }
+    else if (strcmp(fstype, "proc") == 0)
+        strcpy(host_path, "/proc");
+    else if (strcmp(fstype, "sysfs") == 0)
+        strcpy(host_path, "/sys");
+    else if (   strcmp(fstype, "tmpfs") == 0
+             || strcmp(fstype, "devpts") == 0
+             || strcmp(fstype, "devtmpfs") == 0) {
+        tmpdir = create_temp_directory(tracee->fs, "proot-tmpfs-");
+        if (tmpdir == NULL)
+            return;
+        strncpy(host_path, tmpdir, PATH_MAX - 1);
+        host_path[PATH_MAX - 1] = '\0';
+    }
+    else
+        return;
+
+    chop_finality(host_path);
+
+    if (guest_canonicalize(tracee, target_user, guest_path) < 0)
+        return;
+
+    (void) insort_binding3(tracee, tracee->fs, host_path, guest_path);
+}
+
+static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
+                               const char *put_old_user)
+{
+    char new_root_host[PATH_MAX];
+    char new_root_guest[PATH_MAX];
+    char put_old_guest[PATH_MAX];
+    char old_root_host[PATH_MAX];
+    Binding *root_binding;
+    size_t prefix_len;
+    const char *put_old_after;
+
+    if (translate_path(tracee, new_root_host, AT_FDCWD, new_root_user, true) < 0)
+        return;
+    chop_finality(new_root_host);
+
+    if (guest_canonicalize(tracee, new_root_user, new_root_guest) < 0)
+        return;
+
+    if (put_old_user[0] == '/')
+        strcpy(put_old_guest, "/");
+    else
+        strcpy(put_old_guest, new_root_guest);
+    if (canonicalize(tracee, put_old_user, true, put_old_guest, 0) < 0)
+        return;
+
+    root_binding = get_binding(tracee, GUEST, "/");
+    if (root_binding == NULL)
+        return;
+    strncpy(old_root_host, root_binding->host.path, PATH_MAX - 1);
+    old_root_host[PATH_MAX - 1] = '\0';
+
+    remove_binding_from_all_lists(tracee, root_binding);
+    (void) insort_binding3(tracee, tracee->fs, new_root_host, "/");
+
+    prefix_len = strlen(new_root_guest);
+    if (   prefix_len > 0
+        && strncmp(put_old_guest, new_root_guest, prefix_len) == 0
+        && (   put_old_guest[prefix_len] == '/'
+            || (prefix_len == 1 && new_root_guest[0] == '/'))) {
+        put_old_after = put_old_guest + (prefix_len == 1 ? 0 : prefix_len);
+        if (put_old_after[0] == '/' && put_old_after[1] != '\0')
+            (void) insort_binding3(tracee, tracee->fs,
+                                   old_root_host, put_old_after);
+    }
+}
+
+
+/* 上游 e754452：供普通 sysenter 和 SIGSYS 处理器共用。 */
+void apply_emulated_mount(Tracee *tracee)
+{
+    char src_user[PATH_MAX];
+    char target_user[PATH_MAX];
+    char fstype[256];
+    word_t fstype_addr;
+    unsigned long flags;
+
+    fstype[0] = '\0';
+
+    if (get_sysarg_path(tracee, src_user, SYSARG_1) < 0)
+        return;
+    if (get_sysarg_path(tracee, target_user, SYSARG_2) < 0)
+        return;
+
+    fstype_addr = peek_reg(tracee, CURRENT, SYSARG_3);
+    if (fstype_addr != 0)
+        (void) read_string(tracee, fstype, fstype_addr, sizeof(fstype) - 1);
+    flags = peek_reg(tracee, CURRENT, SYSARG_4);
+
+    emulate_mount(tracee, src_user, target_user, fstype, flags);
+}
+
+void apply_emulated_pivot_root(Tracee *tracee)
+{
+    char new_root_user[PATH_MAX];
+    char put_old_user[PATH_MAX];
+
+    if (get_sysarg_path(tracee, new_root_user, SYSARG_1) < 0)
+        return;
+    if (get_sysarg_path(tracee, put_old_user, SYSARG_2) < 0)
+        return;
+
+    emulate_pivot_root(tracee, new_root_user, put_old_user);
 }
 
 #ifdef __ANDROID__
@@ -630,11 +779,10 @@ int translate_syscall_enter(Tracee *tracee)
         break;
 
     case PR_pivot_root:
-        status = translate_sysarg(tracee, SYSARG_1, REGULAR);
-        if (status < 0)
-            break;
-
-        status = translate_sysarg(tracee, SYSARG_2, REGULAR);
+        apply_emulated_pivot_root(tracee);
+        poke_reg(tracee, SYSARG_RESULT, 0);
+        set_sysnum(tracee, PR_void);
+        status = 0;
         break;
 
     case PR_linkat:
@@ -666,17 +814,10 @@ int translate_syscall_enter(Tracee *tracee)
         break;
 
     case PR_mount:
-        status = get_sysarg_path(tracee, path, SYSARG_1);
-        if (status < 0)
-            break;
-
-        if (path[0] == '/' || path[0] == '.') {
-            status = translate_path2(tracee, AT_FDCWD, path, SYSARG_1, REGULAR);
-            if (status < 0)
-                break;
-        }
-
-        status = translate_sysarg(tracee, SYSARG_2, REGULAR);
+        apply_emulated_mount(tracee);
+        poke_reg(tracee, SYSARG_RESULT, 0);
+        set_sysnum(tracee, PR_void);
+        status = 0;
         break;
 
     case PR_openat2: {
