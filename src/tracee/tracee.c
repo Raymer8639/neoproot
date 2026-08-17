@@ -389,8 +389,36 @@ int new_child(Tracee *parent, word_t clone_flags) {
         if (UNLIKELY(!child->fs)) return -ENOMEM;
         child->fs->cwd = talloc_strdup(child->fs, parent->fs->cwd);
         talloc_set_name_const(child->fs->cwd, "$cwd");
-        child->fs->bindings.guest = talloc_reference(child->fs, parent->fs->bindings.guest);
-        child->fs->bindings.host  = talloc_reference(child->fs, parent->fs->bindings.host);
+        if (parent->clone_stripped_newns
+            && parent->fs->bindings.guest != NULL) {
+            /* 上游 5c7b2fd：调用方请求了 CLONE_NEWNS（已被剥掉），
+             * 给子进程一份独立 binding 树，模拟 mount 不泄漏回父进程。 */
+            Binding *iter;
+
+            child->fs->bindings.guest = talloc_zero(child->fs, Bindings);
+            child->fs->bindings.host  = talloc_zero(child->fs, Bindings);
+            if (   child->fs->bindings.guest == NULL
+                || child->fs->bindings.host  == NULL)
+                return -ENOMEM;
+            CIRCLEQ_INIT(child->fs->bindings.guest);
+            CIRCLEQ_INIT(child->fs->bindings.host);
+
+            for (iter = CIRCLEQ_FIRST(parent->fs->bindings.guest);
+                 iter != (void *) parent->fs->bindings.guest;
+                 iter = CIRCLEQ_NEXT(iter, link.guest))
+                (void) insort_binding3(child, child->fs,
+                                       iter->host.path,
+                                       iter->guest.path);
+            parent->clone_stripped_newns = false;
+        }
+        else {
+            /* Bindings are shared across file-system name-spaces since a
+             * "mount --bind" made by a process affects all other processes
+             * under Linux.  Actually they are copied when a sub
+             * reconfiguration occured (nested proot or chroot(2)).  */
+            child->fs->bindings.guest = talloc_reference(child->fs, parent->fs->bindings.guest);
+            child->fs->bindings.host  = talloc_reference(child->fs, parent->fs->bindings.host);
+        }
     }
 
     child->exe     = talloc_reference(child, parent->exe);

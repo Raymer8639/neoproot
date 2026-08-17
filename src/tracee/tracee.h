@@ -56,6 +56,10 @@ typedef struct tracee {
 	struct tracee *parent;
 	bool         clone;
 
+	/* 上游 5c7b2fd：本次 clone/clone3 被剥掉 CLONE_NEWNS 时置位，
+	 * new_child 会给子进程独立 bindings，模拟 mount 不泄漏回父进程。 */
+	bool         clone_stripped_newns;
+
 	/* Ptrace: tracer side */
 	struct {
 		size_t nb_ptracees;

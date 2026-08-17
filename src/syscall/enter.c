@@ -281,6 +281,39 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 }
 
 
+
+/* 上游 5c7b2fd：模拟 umount，移除运行时 binding。 */
+static void emulate_umount(Tracee *tracee, const char *target_user)
+{
+    char guest_path[PATH_MAX];
+    Binding *binding;
+
+    if (guest_canonicalize(tracee, target_user, guest_path) < 0)
+        return;
+
+    if (strcmp(guest_path, "/") == 0)
+        return;
+
+    binding = get_binding(tracee, GUEST, guest_path);
+    if (binding == NULL)
+        return;
+
+    if (strcmp(binding->guest.path, guest_path) != 0)
+        return;
+
+    remove_binding_from_all_lists(tracee, binding);
+}
+
+void apply_emulated_umount(Tracee *tracee)
+{
+    char target_user[PATH_MAX];
+
+    if (get_sysarg_path(tracee, target_user, SYSARG_1) < 0)
+        return;
+
+    emulate_umount(tracee, target_user);
+}
+
 /* 上游 e754452：供普通 sysenter 和 SIGSYS 处理器共用。 */
 void apply_emulated_mount(Tracee *tracee)
 {
@@ -395,11 +428,15 @@ int translate_syscall_enter(Tracee *tracee)
     }
 
     case PR_clone: {
-        /* 上游 064617f：剥离 CLONE_NEW* 命名空间 flag，避免 Android
-         * 无权限创建命名空间时报 EPERM；fork/thread 本身正常继续。 */
+        /* 上游 064617f + 5c7b2fd：剥离 CLONE_NEW* 命名空间 flag，避免
+         * Android 无权限创建命名空间时报 EPERM；fork/thread 本身正常继续。
+         * 若请求了 CLONE_NEWNS，记住让子进程获得独立 bindings。 */
         word_t flags = peek_reg(tracee, CURRENT, SYSARG_1);
-        if ((flags & CLONE_NS_MASK) != 0)
+        if ((flags & CLONE_NS_MASK) != 0) {
+            if ((flags & CLONE_NEWNS) != 0)
+                tracee->clone_stripped_newns = true;
             poke_reg(tracee, SYSARG_1, flags & ~(word_t)CLONE_NS_MASK);
+        }
         status = 0;
         break;
     }
@@ -410,8 +447,11 @@ int translate_syscall_enter(Tracee *tracee)
         if (args_addr != 0) {
             errno = 0;
             flags = peek_word(tracee, args_addr);
-            if (errno == 0 && (flags & CLONE_NS_MASK) != 0)
+            if (errno == 0 && (flags & CLONE_NS_MASK) != 0) {
+                if ((flags & CLONE_NEWNS) != 0)
+                    tracee->clone_stripped_newns = true;
                 poke_word(tracee, args_addr, flags & ~(word_t)CLONE_NS_MASK);
+            }
         }
         status = 0;
         break;
@@ -654,8 +694,6 @@ int translate_syscall_enter(Tracee *tracee)
     case PR_setxattr:
     case PR_truncate:
     case PR_truncate64:
-    case PR_umount:
-    case PR_umount2:
     case PR_utime:
     case PR_utimes:
         status = get_sysarg_path(tracee, path, SYSARG_1);
@@ -665,6 +703,22 @@ int translate_syscall_enter(Tracee *tracee)
         if (status < 0)
             break;
         status = translate_sysarg(tracee, SYSARG_1, REGULAR);
+        break;
+
+    /* 上游 5c7b2fd：unshare/setns 假装成功；umount 移除模拟 binding。 */
+    case PR_unshare:
+    case PR_setns:
+        poke_reg(tracee, SYSARG_RESULT, 0);
+        set_sysnum(tracee, PR_void);
+        status = 0;
+        break;
+
+    case PR_umount:
+    case PR_umount2:
+        apply_emulated_umount(tracee);
+        poke_reg(tracee, SYSARG_RESULT, 0);
+        set_sysnum(tracee, PR_void);
+        status = 0;
         break;
 
     case PR_open:

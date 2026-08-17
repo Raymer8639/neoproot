@@ -215,6 +215,9 @@ static int handle_seccomp_event_common(Tracee *restrict tracee) {
             break;
         case PR_umount:
         case PR_umount2:
+            apply_emulated_umount(tracee);
+            set_result_after_seccomp(tracee, 0);
+            break;
         case PR_unshare:
         case PR_setns:
             set_result_after_seccomp(tracee, 0);
