@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <unistd.h>
 #include <sys/socket.h>
 #include <linux/netlink.h>
 
@@ -357,6 +358,26 @@ void apply_emulated_pivot_root(Tracee *tracee)
 }
 
 
+/* 上游 4abc88b + d738215：仅当宿主拒绝 AF_NETLINK 时才启用仿真，
+ * 避免破坏 stock Linux 上正常使用 netlink 的程序。 */
+static bool host_blocks_af_netlink(void)
+{
+    static int cached = -1; /* -1: unknown, 0: works, 1: blocked */
+    int fd;
+
+    if (cached != -1)
+        return cached == 1;
+
+    fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if (fd >= 0) {
+        close(fd);
+        cached = 0;
+        return false;
+    }
+    cached = 1;
+    return true;
+}
+
 /* 上游 4abc88b：AF_NETLINK 仿真辅助。 */
 static bool is_fake_netlink_fd(const Tracee *tracee, int fd)
 {
@@ -676,7 +697,7 @@ int translate_syscall_enter(Tracee *tracee)
     /* 上游 4abc88b：AF_NETLINK 仿真。 */
     case PR_socket: {
         word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
-        if (domain == AF_NETLINK) {
+        if (domain == AF_NETLINK && host_blocks_af_netlink()) {
             word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
             poke_reg(tracee, SYSARG_1, AF_UNIX);
             poke_reg(tracee, SYSARG_2, SOCK_DGRAM | (type & SOCK_CLOEXEC));
