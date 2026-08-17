@@ -8,6 +8,7 @@
 #include <netinet/in.h>
 #include <netpacket/packet.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <string.h>
@@ -951,6 +952,85 @@ static size_t build_host_addrs(uint8_t *out, size_t max, uint32_t seq,
     return off;
 }
 
+static size_t relay_route_dump(const uint8_t *req, size_t req_len,
+                               uint8_t *out, size_t max,
+                               uint32_t seq, uint32_t pid)
+{
+    struct {
+        struct nlmsghdr nlh;
+        struct rtmsg    rtm;
+    } dreq;
+    struct sockaddr_nl sa;
+    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+    uint8_t family = (req_len > NLMSG_HDRLEN) ? req[NLMSG_HDRLEN] : 0;
+    size_t off = 0;
+    bool done = false;
+    bool saw_done = false;
+    int fd;
+    int rounds;
+
+    fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if (fd < 0)
+        return 0;
+    (void) setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    memset(&dreq, 0, sizeof(dreq));
+    dreq.nlh.nlmsg_len   = NLMSG_LENGTH(sizeof(struct rtmsg));
+    dreq.nlh.nlmsg_type  = RTM_GETROUTE;
+    dreq.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    dreq.nlh.nlmsg_seq   = seq;
+    dreq.rtm.rtm_family  = family;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    if (sendto(fd, &dreq, dreq.nlh.nlmsg_len, 0,
+               (struct sockaddr *) &sa, sizeof(sa)) < 0) {
+        close(fd);
+        return 0;
+    }
+
+    for (rounds = 0; !done && rounds < 64; rounds++) {
+        uint8_t buf[8192] __attribute__((aligned(8)));
+        struct nlmsghdr *h;
+        ssize_t n;
+        size_t len;
+
+        n = recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0)
+            break;
+        len = (size_t) n;
+        for (h = (struct nlmsghdr *) buf; NLMSG_OK(h, len);
+             h = NLMSG_NEXT(h, len)) {
+            size_t mlen = h->nlmsg_len;
+            size_t aligned = NLMSG_ALIGN(mlen);
+
+            if (off + aligned + 64 > max) {
+                done = true;
+                break;
+            }
+            h->nlmsg_seq = seq;
+            h->nlmsg_pid = pid;
+            memcpy(out + off, h, mlen);
+            if (aligned > mlen)
+                memset(out + off + mlen, 0, aligned - mlen);
+            off += aligned;
+            if (h->nlmsg_type == NLMSG_DONE) {
+                saw_done = true;
+                done = true;
+                break;
+            }
+        }
+    }
+
+    close(fd);
+
+    if (off == 0)
+        return 0;
+    if (!saw_done)
+        off = nl_build_done(out, off, max, seq, pid);
+    return off;
+}
+
 static void build_fake_netlink_reply(Tracee *tracee, word_t buf_addr,
                                      word_t buf_len)
 {
@@ -1022,6 +1102,16 @@ static void build_fake_netlink_reply(Tracee *tracee, word_t buf_addr,
             off = nl_build_done(out, off, max, seq, pid);
         break;
     }
+
+    case RTM_GETROUTE:
+        if (dump) {
+            off = relay_route_dump(req, req_len, out, max, seq, pid);
+            if (off == 0)
+                off = nl_build_done(out, off, max, seq, pid);
+        } else {
+            off = nl_build_error(out, off, max, seq, pid, 0);
+        }
+        break;
 
     default:
         if (dump)
