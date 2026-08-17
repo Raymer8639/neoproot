@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/prctl.h>
 #include <termios.h>
+#include <sched.h>
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -32,6 +33,17 @@
 #include "path/binding.h"
 #include "arch.h"
 #include "attribute.h"
+
+/* 上游 064617f：bubblewrap 等需要剥离命名空间 flag */
+#ifndef CLONE_NEWTIME
+#define CLONE_NEWTIME 0x00000080
+#endif
+#ifndef CLONE_NEWCGROUP
+#define CLONE_NEWCGROUP 0x02000000
+#endif
+#define CLONE_NS_MASK (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | \
+                       CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | \
+                       CLONE_NEWCGROUP | CLONE_NEWTIME)
 
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
@@ -201,6 +213,29 @@ int translate_syscall_enter(Tracee *tracee)
          * 在父读端关闭后 EPIPE（进程替换等场景）。 */
         int closed_fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
         shadow_pipe_read_end(tracee->pid, closed_fd);
+        break;
+    }
+
+    case PR_clone: {
+        /* 上游 064617f：剥离 CLONE_NEW* 命名空间 flag，避免 Android
+         * 无权限创建命名空间时报 EPERM；fork/thread 本身正常继续。 */
+        word_t flags = peek_reg(tracee, CURRENT, SYSARG_1);
+        if ((flags & CLONE_NS_MASK) != 0)
+            poke_reg(tracee, SYSARG_1, flags & ~(word_t)CLONE_NS_MASK);
+        status = 0;
+        break;
+    }
+
+    case PR_clone3: {
+        word_t args_addr = peek_reg(tracee, CURRENT, SYSARG_1);
+        word_t flags;
+        if (args_addr != 0) {
+            errno = 0;
+            flags = peek_word(tracee, args_addr);
+            if (errno == 0 && (flags & CLONE_NS_MASK) != 0)
+                poke_word(tracee, args_addr, flags & ~(word_t)CLONE_NS_MASK);
+        }
+        status = 0;
         break;
     }
 
