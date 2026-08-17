@@ -330,6 +330,8 @@ void apply_emulated_mount(Tracee *tracee)
     unsigned long flags;
 
     fstype[0] = '\0';
+    /* 上游 d7f4764：read_string 不保证末尾 NUL，先钉住最后字节。 */
+    fstype[sizeof(fstype) - 1] = '\0';
 
     if (get_sysarg_path(tracee, src_user, SYSARG_1) < 0)
         return;
