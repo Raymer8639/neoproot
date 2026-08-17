@@ -220,9 +220,9 @@ static int pre_initialize_bindings(Tracee *restrict t, const Cli *restrict c,
         if (handle_option_r(t, c, "/") < 0)
             return -1;
     }
-    int status = initialize_extension(t, netlink_route_callback, NULL);
-    if (UNLIKELY(status < 0))
-        note(t, WARNING, INTERNAL, "netlink_route not initialized");
+    /* 上游 netlink 重写已移入 syscall 层，旧 extension/netlink_route
+     * 停用以避免双重处理。 */
+    (void)netlink_route_callback;
     return (int)cur;
 }
 
