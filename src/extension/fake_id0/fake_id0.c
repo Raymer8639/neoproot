@@ -24,6 +24,7 @@
 #include "execve/auxv.h"
 #include "path/binding.h"
 #include "path/f2fs-bug.h"
+#include "extension/fake_id0/helper_functions.h"
 #include "arch.h"
 
 #include "extension/fake_id0/chown.h"
@@ -580,7 +581,7 @@ static HOT int handle_sysexit_end(Tracee *restrict tracee, Config *restrict conf
         if (path_exists(path) == 0) return 0;
         char meta[PATH_MAX];
         if (get_meta_path(path, meta) < 0) return 0;
-        if (path_exists(meta) == 0) unlink(meta);
+        if (path_exists(meta) == 0) remove_meta_file(meta);
         return 0;
     }
 #endif
@@ -654,6 +655,10 @@ HOT int fake_id0_callback(Extension *restrict extension, ExtensionEvent event,
         config->ruid  = uid; config->euid  = uid; config->suid  = uid; config->fsuid = uid;
         config->rgid  = gid; config->egid  = gid; config->sgid  = gid; config->fsgid = gid;
         config->umask = 022;
+#ifdef USERLAND
+        if (initialize_meta_store() < 0)
+            return -1;
+#endif
         extension->filtered_sysnums = filtered_sysnums;
         return 0;
     }
@@ -680,13 +685,13 @@ HOT int fake_id0_callback(Extension *restrict extension, ExtensionEvent event,
         if (get_meta_path((char *)data1, old_meta) < 0) return 0;
         if (path_exists(old_meta) != 0) return 0;
         if (get_meta_path((char *)data2, new_meta) < 0) return 0;
-        return rename(old_meta, new_meta);
+        return rename_meta_file(old_meta, new_meta);
     }
     case LINK2SYMLINK_UNLINK: {
         char meta[PATH_MAX];
         if (get_meta_path((char *)data1, meta) < 0) return 0;
         if (path_exists(meta) != 0) return 0;
-        return unlink(meta);
+        return remove_meta_file(meta);
     }
 #endif
     case SYSCALL_ENTER_END: {

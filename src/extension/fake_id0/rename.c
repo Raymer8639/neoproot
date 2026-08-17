@@ -62,8 +62,10 @@ int handle_rename_enter_end(Tracee *tracee, Reg oldfd_sysarg, Reg oldpath_sysarg
 		return 0;
 
 	// 读取并删除旧 meta
-	read_meta_file(meta_path, &mode, &uid, &gid, config);
-	unlink(meta_path);
+	ret = read_meta_file(meta_path, &mode, &uid, &gid, config);
+	if (ret < 0)
+		return ret;
+	remove_meta_file(meta_path);
 
 	// 写入新 meta
 	ret = get_meta_path(newpath, meta_path);

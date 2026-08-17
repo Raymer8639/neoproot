@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <stdint.h>
+#include <stdlib.h>
 
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
@@ -12,11 +14,37 @@
 #include "extension/fake_id0/config.h"
 #include "extension/fake_id0/helper_functions.h"
 
-#define META_TAG ".proot-meta-file."
-
 #define OWNER_PERMS  0
 #define GROUP_PERMS  1
 #define OTHER_PERMS  2
+
+typedef struct MetaRecord {
+	char key[48];
+	mode_t mode;
+	uid_t owner;
+	gid_t group;
+	struct MetaRecord *next;
+} MetaRecord;
+
+static MetaRecord *meta_records;
+
+static MetaRecord *find_meta_record(const char *key)
+{
+	for (MetaRecord *record = meta_records; record != NULL; record = record->next)
+		if (strcmp(record->key, key) == 0)
+			return record;
+	return NULL;
+}
+
+static bool is_meta_key(const char *path)
+{
+	return strncmp(path, "@neoproot-meta:", 15) == 0;
+}
+
+int initialize_meta_store(void)
+{
+	return 0;
+}
 
 int dtoo(int n)
 {
@@ -50,7 +78,14 @@ int otod(int n)
 
 int path_exists(char path[PATH_MAX])
 {
-	return access(path, F_OK);
+	struct stat st;
+	if (is_meta_key(path)) {
+		if (find_meta_record(path) != NULL)
+			return 0;
+		errno = ENOENT;
+		return -1;
+	}
+	return lstat(path, &st);
 }
 
 int get_fd_path(Tracee *tracee, char path[PATH_MAX], Reg fd_sysarg, RegVersion version)
@@ -221,52 +256,94 @@ int get_dir_path(char path[PATH_MAX], char dir_path[PATH_MAX])
 
 int get_meta_path(char orig_path[PATH_MAX], char meta_path[PATH_MAX])
 {
-	char *filename;
+	uint64_t hash = UINT64_C(1469598103934665603);
+	uint64_t hash2 = UINT64_C(0x9e3779b97f4a7c15);
+	const unsigned char *cursor;
+	int written;
 
-	get_dir_path(orig_path, meta_path);
-	filename = get_name(orig_path);
+	if (strnlen(orig_path, PATH_MAX) >= PATH_MAX)
+		return -EINVAL;
 
-	if(strcmp(meta_path, "/") != 0)
-		(void)strcat(meta_path, "/");
+	for (cursor = (const unsigned char *)orig_path; *cursor != '\0'; ++cursor) {
+		hash ^= *cursor;
+		hash *= UINT64_C(1099511628211);
+		hash2 ^= *cursor;
+		hash2 *= UINT64_C(0x100000001b3);
+		hash2 ^= hash2 >> 29;
+	}
 
-	if(strlen(meta_path) + strlen(filename) + strlen(META_TAG) >= PATH_MAX)
-		return -ENAMETOOLONG;
-
-	(void)strcat(meta_path, META_TAG);
-	(void)strcat(meta_path, filename);
-	return 0;
+	written = snprintf(meta_path, PATH_MAX, "@neoproot-meta:%016llx%016llx",
+			   (unsigned long long)hash, (unsigned long long)hash2);
+	return written < 0 || written >= PATH_MAX ? -ENAMETOOLONG : 0;
 }
 
 int read_meta_file(char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group, Config *config)
 {
-	FILE *fp;
-	int lcl_mode;
-	fp = fopen(path, "r");
-	if(!fp) {
+	MetaRecord *record = find_meta_record(path);
+	if(record == NULL) {
 		*owner = config->euid;
 		*group = config->egid;
 		*mode = otod(755);
 		return 0;
 	}
-	fscanf(fp, "%d %d %d ", &lcl_mode, owner, group);
-	lcl_mode = otod(lcl_mode);
-	*mode = (mode_t)lcl_mode;
-	fclose(fp);
+	*mode = record->mode;
+	*owner = record->owner;
+	*group = record->group;
 	return 0;
 }
 
 int write_meta_file(char path[PATH_MAX], mode_t mode, uid_t owner, gid_t group,
 	bool is_creat, Config *config)
 {
-	FILE *fp;
-	fp = fopen(path, "w");
-	if(!fp)
-		return -1;
+	MetaRecord *record = find_meta_record(path);
+	if (record == NULL) {
+		record = calloc(1, sizeof(*record));
+		if (record == NULL)
+			return -ENOMEM;
+		if (snprintf(record->key, sizeof(record->key), "%s", path) >= (int)sizeof(record->key)) {
+			free(record);
+			return -ENAMETOOLONG;
+		}
+		record->next = meta_records;
+		meta_records = record;
+	}
 
 	if(is_creat)
 		mode = (mode & ~(config->umask) & 0777);
 
-	fprintf(fp, "%d\n%d\n%d\n", dtoo(mode), owner, group);
-	fclose(fp);
+	record->mode = mode;
+	record->owner = owner;
+	record->group = group;
+	return 0;
+}
+
+int remove_meta_file(char path[PATH_MAX])
+{
+	MetaRecord **cursor = &meta_records;
+	while (*cursor != NULL) {
+		if (strcmp((*cursor)->key, path) == 0) {
+			MetaRecord *record = *cursor;
+			*cursor = record->next;
+			free(record);
+			return 0;
+		}
+		cursor = &(*cursor)->next;
+	}
+	return 0;
+}
+
+int rename_meta_file(char old_path[PATH_MAX], char new_path[PATH_MAX])
+{
+	MetaRecord *record = find_meta_record(old_path);
+	MetaRecord *replaced;
+	if (record == NULL)
+		return 0;
+	if (strcmp(old_path, new_path) == 0)
+		return 0;
+	replaced = find_meta_record(new_path);
+	if (replaced != NULL)
+		remove_meta_file(new_path);
+	if (snprintf(record->key, sizeof(record->key), "%s", new_path) >= (int)sizeof(record->key))
+		return -ENAMETOOLONG;
 	return 0;
 }
