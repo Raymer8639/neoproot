@@ -453,6 +453,89 @@ static size_t write_fake_netlink_ack(Tracee *tracee, word_t buf_addr,
     return reply_len;
 }
 
+
+/* 上游 30e0644：支持 dump 回复和 sockaddr_nl。 */
+static size_t write_fake_netlink_done(Tracee *tracee, word_t buf_addr,
+                                      word_t buf_len, uint32_t seq)
+{
+    struct {
+        struct nlmsghdr hdr;
+        int32_t         error;
+    } reply;
+    size_t reply_len = sizeof(reply);
+
+    if (buf_len < reply_len)
+        return 0;
+
+    memset(&reply, 0, sizeof(reply));
+    reply.hdr.nlmsg_len   = reply_len;
+    reply.hdr.nlmsg_type  = NLMSG_DONE;
+    reply.hdr.nlmsg_flags = 0;
+    reply.hdr.nlmsg_seq   = seq;
+    reply.hdr.nlmsg_pid   = (uint32_t) tracee->pid;
+    reply.error           = 0;
+
+    if (write_data(tracee, buf_addr, &reply, reply_len) < 0)
+        return 0;
+    return reply_len;
+}
+
+static size_t write_fake_netlink_response(Tracee *tracee, word_t buf_addr,
+                                          word_t buf_len)
+{
+    if (tracee->fake_netlink_pending_flags & NLM_F_DUMP)
+        return write_fake_netlink_done(tracee, buf_addr, buf_len,
+                                       tracee->fake_netlink_pending_seq);
+    return write_fake_netlink_ack(tracee, buf_addr, buf_len,
+                                  tracee->fake_netlink_pending_seq);
+}
+
+static int write_fake_netlink_sockname(Tracee *tracee, word_t addr_ptr,
+                                       word_t size_ptr)
+{
+    struct sockaddr_nl snl;
+    uint32_t in_size;
+    uint32_t out_size;
+
+    if (size_ptr == 0)
+        return -EINVAL;
+
+    in_size = peek_uint32(tracee, size_ptr);
+    if (errno != 0)
+        return -errno;
+
+    memset(&snl, 0, sizeof(snl));
+    snl.nl_family = AF_NETLINK;
+    snl.nl_pid    = (uint32_t) tracee->pid;
+
+    if (addr_ptr != 0 && in_size > 0) {
+        uint32_t copy = in_size < sizeof(snl) ? in_size : sizeof(snl);
+        if (write_data(tracee, addr_ptr, &snl, copy) < 0)
+            return -EFAULT;
+    }
+
+    out_size = sizeof(snl);
+    poke_uint32(tracee, size_ptr, out_size);
+    if (errno != 0)
+        return -errno;
+
+    return 0;
+}
+
+static void record_fake_netlink_request(Tracee *tracee, word_t buf_addr,
+                                        word_t buf_len)
+{
+    struct nlmsghdr hdr;
+
+    if (buf_addr == 0 || buf_len < sizeof(hdr))
+        return;
+    if (read_data(tracee, &hdr, buf_addr, sizeof(hdr)) < 0)
+        return;
+
+    tracee->fake_netlink_pending_seq   = hdr.nlmsg_seq;
+    tracee->fake_netlink_pending_flags = hdr.nlmsg_flags;
+}
+
 #ifdef __ANDROID__
 /* 上游 d30b98846（适配）：Android 常拒绝非 lo 的 SIOCGIFINDEX，
  * 在 tracer 里用 if_nametoindex() 查真实接口号，写回 ifreq。 */
@@ -712,6 +795,20 @@ int translate_syscall_enter(Tracee *tracee)
     case PR_getpeername:{
         int size;
 
+        /* 上游 30e0644：假 netlink fd 返回 sockaddr_nl，避免 iproute2
+         * 报 "Wrong address length 2"。 */
+        if ((syscall_number == PR_getsockname || syscall_number == PR_getpeername)
+            && is_fake_netlink_fd(tracee, peek_reg(tracee, CURRENT, SYSARG_1))) {
+            word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
+            word_t size_ptr = peek_reg(tracee, CURRENT, SYSARG_3);
+            int    rc = write_fake_netlink_sockname(tracee, addr_ptr, size_ptr);
+
+            poke_reg(tracee, SYSARG_RESULT, (word_t) rc);
+            set_sysnum(tracee, PR_void);
+            status = 0;
+            break;
+        }
+
         size = (int) PEEK_WORD(peek_reg(tracee, ORIGINAL, SYSARG_3), special ? -EINVAL : 0);
         poke_reg(tracee, SYSARG_6, size);
 
@@ -744,11 +841,8 @@ int translate_syscall_enter(Tracee *tracee)
         if (is_fake_netlink_fd(tracee, fd)) {
             word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
             word_t len = peek_reg(tracee, CURRENT, SYSARG_3);
-            struct nlmsghdr hdr;
 
-            if (buf != 0 && len >= sizeof(hdr)
-                && read_data(tracee, &hdr, buf, sizeof(hdr)) == 0)
-                tracee->fake_netlink_pending_seq = hdr.nlmsg_seq;
+            record_fake_netlink_request(tracee, buf, len);
 
             poke_reg(tracee, SYSARG_RESULT, len);
             set_sysnum(tracee, PR_void);
@@ -762,7 +856,31 @@ int translate_syscall_enter(Tracee *tracee)
     case PR_sendmsg: {
         int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
         if (is_fake_netlink_fd(tracee, fd)) {
-            poke_reg(tracee, SYSARG_RESULT, 0);
+            word_t msghdr_addr = peek_reg(tracee, CURRENT, SYSARG_2);
+            size_t w = sizeof_word(tracee);
+            word_t total = 0;
+            word_t iov_ptr, iov_count;
+
+            if (msghdr_addr != 0) {
+                iov_ptr   = peek_word(tracee, msghdr_addr + 2 * w);
+                iov_count = (errno == 0)
+                            ? peek_word(tracee, msghdr_addr + 3 * w)
+                            : 0;
+                errno = 0;
+
+                if (iov_ptr != 0 && iov_count > 0) {
+                    word_t base = peek_word(tracee, iov_ptr);
+                    word_t len  = (errno == 0)
+                                  ? peek_word(tracee, iov_ptr + w)
+                                  : 0;
+                    errno = 0;
+
+                    record_fake_netlink_request(tracee, base, len);
+                    total = len;
+                }
+            }
+
+            poke_reg(tracee, SYSARG_RESULT, total);
             set_sysnum(tracee, PR_void);
             status = 0;
             break;
@@ -776,8 +894,7 @@ int translate_syscall_enter(Tracee *tracee)
         if (is_fake_netlink_fd(tracee, fd)) {
             word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
             word_t len = peek_reg(tracee, CURRENT, SYSARG_3);
-            size_t n = write_fake_netlink_ack(tracee, buf, len,
-                                              tracee->fake_netlink_pending_seq);
+            size_t n = write_fake_netlink_response(tracee, buf, len);
             poke_reg(tracee, SYSARG_RESULT, (word_t) n);
             set_sysnum(tracee, PR_void);
             status = 0;
@@ -790,7 +907,47 @@ int translate_syscall_enter(Tracee *tracee)
     case PR_recvmsg: {
         int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
         if (is_fake_netlink_fd(tracee, fd)) {
-            poke_reg(tracee, SYSARG_RESULT, 0);
+            word_t msghdr_addr = peek_reg(tracee, CURRENT, SYSARG_2);
+            size_t w = sizeof_word(tracee);
+            word_t msg_name = 0;
+            word_t iov_ptr = 0, iov_count = 0;
+            size_t n = 0;
+
+            if (msghdr_addr != 0) {
+                msg_name  = peek_word(tracee, msghdr_addr);
+                if (errno != 0) { errno = 0; msg_name = 0; }
+                iov_ptr   = peek_word(tracee, msghdr_addr + 2 * w);
+                if (errno != 0) { errno = 0; iov_ptr   = 0; }
+                iov_count = peek_word(tracee, msghdr_addr + 3 * w);
+                if (errno != 0) { errno = 0; iov_count = 0; }
+            }
+
+            if (iov_ptr != 0 && iov_count > 0) {
+                word_t base = peek_word(tracee, iov_ptr);
+                word_t len  = (errno == 0)
+                              ? peek_word(tracee, iov_ptr + w)
+                              : 0;
+                errno = 0;
+                n = write_fake_netlink_response(tracee, base, len);
+            }
+
+            if (msg_name != 0 && msghdr_addr != 0) {
+                struct sockaddr_nl snl;
+                uint32_t in_namelen = peek_uint32(tracee, msghdr_addr + w);
+                if (errno == 0 && in_namelen > 0) {
+                    uint32_t copy = in_namelen < sizeof(snl)
+                                    ? in_namelen
+                                    : sizeof(snl);
+                    memset(&snl, 0, sizeof(snl));
+                    snl.nl_family = AF_NETLINK;
+                    (void) write_data(tracee, msg_name, &snl, copy);
+                    poke_uint32(tracee, msghdr_addr + w,
+                                (uint32_t) sizeof(snl));
+                }
+                errno = 0;
+            }
+
+            poke_reg(tracee, SYSARG_RESULT, (word_t) n);
             set_sysnum(tracee, PR_void);
             status = 0;
             break;
