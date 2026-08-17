@@ -324,6 +324,7 @@ static FilteredSysnum proot_sysnums[] = {
 /* 仅当宿主拒绝 AF_NETLINK 时才需要拦截这些 syscall 做仿真；
  * 宿主允许时让真实 netlink 直通，避免干扰 glibc/iproute2。 */
 static FilteredSysnum netlink_sysnums[] = {
+    { PR_close,         0 },
     { PR_recvfrom,      0 },
     { PR_recvmsg,       0 },
     { PR_sendmsg,       0 },
