@@ -594,6 +594,32 @@ write_back:
             }
             tracee->pending_fake_netlink_socket = false;
         }
+
+        /* 上游 87af48f：记录宿主直接给的真实 NETLINK_ROUTE socket。 */
+        if (tracee->pending_real_netlink_socket) {
+            int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+            if (fd >= 0) {
+                int i;
+                if (tracee->netlink_route_fds_count < MAX_NETLINK_ROUTE_FDS) {
+                    bool present = false;
+                    for (i = 0; i < tracee->netlink_route_fds_count; i++) {
+                        if (tracee->netlink_route_fds[i] == fd) {
+                            present = true;
+                            break;
+                        }
+                    }
+                    if (!present)
+                        tracee->netlink_route_fds[tracee->netlink_route_fds_count++] = fd;
+                }
+            }
+            tracee->pending_real_netlink_socket = false;
+        }
+        goto end;
+
+    case PR_recvfrom:
+    case PR_recvmsg:
+        /* 上游 87af48f：把内核拒绝的 netns 配置请求改成 ACK。 */
+        handle_netlink_reply_exit(tracee, syscall_number);
         goto end;
 
     default:

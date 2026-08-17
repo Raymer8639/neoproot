@@ -423,6 +423,17 @@ int new_child(Tracee *parent, word_t clone_flags) {
     /* 上游 6a1f1fe：无论走哪条分支，消费掉 stripped-NEWNS 标记。 */
     parent->clone_stripped_newns = false;
 
+    /* 上游 87af48f：网络命名空间继承与 fd 跟踪复制。 */
+    child->fake_netns = parent->fake_netns || parent->clone_stripped_newnet;
+    parent->clone_stripped_newnet = false;
+
+    memcpy(child->fake_netlink_fds, parent->fake_netlink_fds,
+           sizeof(child->fake_netlink_fds));
+    child->fake_netlink_fds_count = parent->fake_netlink_fds_count;
+    memcpy(child->netlink_route_fds, parent->netlink_route_fds,
+           sizeof(child->netlink_route_fds));
+    child->netlink_route_fds_count = parent->netlink_route_fds_count;
+
     child->exe     = talloc_reference(child, parent->exe);
     child->qemu    = talloc_reference(child, parent->qemu);
     child->glue    = talloc_reference(child, parent->glue);

@@ -508,6 +508,169 @@ static void unmark_fake_netlink_fd(Tracee *tracee, int fd)
     }
 }
 
+
+/* 上游 87af48f：真实 NETLINK_ROUTE socket 的跟踪。 */
+static bool is_netlink_route_fd(const Tracee *tracee, int fd)
+{
+    int i;
+    if (fd < 0)
+        return false;
+    for (i = 0; i < tracee->netlink_route_fds_count; i++)
+        if (tracee->netlink_route_fds[i] == fd)
+            return true;
+    return false;
+}
+
+static void unmark_netlink_route_fd(Tracee *tracee, int fd)
+{
+    int i;
+    for (i = 0; i < tracee->netlink_route_fds_count; i++) {
+        if (tracee->netlink_route_fds[i] == fd) {
+            tracee->netlink_route_fds[i] =
+                tracee->netlink_route_fds[--tracee->netlink_route_fds_count];
+            break;
+        }
+    }
+
+    if (tracee->netlink_ack_pending && tracee->netlink_ack_fd == fd)
+        tracee->netlink_ack_pending = false;
+}
+
+static bool msghdr_first_iovec(const Tracee *tracee, word_t msghdr_addr,
+                               word_t *base, word_t *len)
+{
+    size_t w = sizeof_word(tracee);
+    word_t iov_ptr, iov_count;
+
+    if (msghdr_addr == 0)
+        return false;
+
+    errno = 0;
+    iov_ptr   = peek_word(tracee, msghdr_addr + 2 * w);
+    iov_count = (errno == 0) ? peek_word(tracee, msghdr_addr + 3 * w) : 0;
+    errno = 0;
+
+    if (iov_ptr == 0 || iov_count == 0)
+        return false;
+
+    *base = peek_word(tracee, iov_ptr);
+    *len  = (errno == 0) ? peek_word(tracee, iov_ptr + w) : 0;
+    errno = 0;
+
+    return true;
+}
+
+static bool nl_type_reconfigures(uint16_t type)
+{
+    if (type < RTM_BASE || type > RTM_MAX)
+        return false;
+    return ((type - RTM_BASE) & 3) != 2 /* RTM_GET* */;
+}
+
+static bool is_netns_netlink_fd(const Tracee *tracee, int fd)
+{
+    return tracee->fake_netns && is_netlink_route_fd(tracee, fd);
+}
+
+static void note_netns_netlink_request(Tracee *tracee, int fd,
+                                       word_t buf_addr, word_t buf_len)
+{
+    struct nlmsghdr hdr;
+
+    if (!is_netns_netlink_fd(tracee, fd))
+        return;
+
+    if (buf_addr == 0 || buf_len < sizeof(hdr))
+        return;
+    if (read_data(tracee, &hdr, buf_addr, sizeof(hdr)) < 0)
+        return;
+
+    if (!nl_type_reconfigures(hdr.nlmsg_type))
+        return;
+
+    tracee->netlink_ack_pending = true;
+    tracee->netlink_ack_fd      = fd;
+    tracee->netlink_ack_seq     = hdr.nlmsg_seq;
+}
+
+static void note_netns_netlink_reply(Tracee *tracee, int fd)
+{
+    if (!tracee->netlink_ack_pending || tracee->netlink_ack_fd != fd)
+        return;
+
+    tracee->sysexit_pending = true;
+    tracee->restart_how = PTRACE_SYSCALL;
+}
+
+void handle_netlink_reply_exit(Tracee *tracee, word_t syscall_number)
+{
+    uint8_t reply[512] __attribute__((aligned(8)));
+    struct nlmsghdr hdr;
+    word_t buf_addr = 0;
+    word_t buf_len = 0;
+    size_t len, off;
+    int flags;
+    int result;
+    int error;
+
+    if (!tracee->netlink_ack_pending)
+        return;
+    if ((int) peek_reg(tracee, ORIGINAL, SYSARG_1) != tracee->netlink_ack_fd)
+        return;
+
+    result = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+    if (result <= 0)
+        return;
+
+    if (syscall_number == PR_recvfrom) {
+        buf_addr = peek_reg(tracee, ORIGINAL, SYSARG_2);
+        buf_len  = peek_reg(tracee, ORIGINAL, SYSARG_3);
+        flags    = (int) peek_reg(tracee, ORIGINAL, SYSARG_4);
+    }
+    else {
+        if (!msghdr_first_iovec(tracee, peek_reg(tracee, ORIGINAL, SYSARG_2),
+                                &buf_addr, &buf_len))
+            return;
+        flags = (int) peek_reg(tracee, ORIGINAL, SYSARG_3);
+    }
+
+    len = (size_t) result;
+    if (len > buf_len)
+        len = buf_len;
+    if (len > sizeof(reply))
+        len = sizeof(reply);
+    if (buf_addr == 0 || len < NLMSG_HDRLEN + sizeof(error))
+        return;
+    if (read_data(tracee, reply, buf_addr, len) < 0)
+        return;
+
+    for (off = 0; off + NLMSG_HDRLEN + sizeof(error) <= len; ) {
+        memcpy(&hdr, reply + off, sizeof(hdr));
+        if (hdr.nlmsg_len < NLMSG_HDRLEN)
+            break;
+
+        if (   hdr.nlmsg_type == NLMSG_ERROR
+            && hdr.nlmsg_seq  == tracee->netlink_ack_seq) {
+            memcpy(&error, reply + off + NLMSG_HDRLEN, sizeof(error));
+            if (error != -EPERM && error != -EACCES)
+                break;
+
+            poke_uint32(tracee, buf_addr + off + NLMSG_HDRLEN, 0);
+            if (errno == 0)
+                VERBOSE(tracee, 1, "netlink: acked the request "
+                        "denied to the tracee's would-be network "
+                        "namespace (%s)", strerror(-error));
+            errno = 0;
+            break;
+        }
+
+        off += NLMSG_ALIGN(hdr.nlmsg_len);
+    }
+
+    if ((flags & MSG_PEEK) == 0)
+        tracee->netlink_ack_pending = false;
+}
+
 static size_t nl_add_attr(uint8_t *buf, size_t off, size_t max,
                           uint16_t type, const void *data, uint16_t dlen)
 {
@@ -1253,8 +1416,9 @@ int translate_syscall_enter(Tracee *tracee)
          * 在父读端关闭后 EPIPE（进程替换等场景）。 */
         int closed_fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
         shadow_pipe_read_end(tracee->pid, closed_fd);
-        /* 上游 4abc88b：关闭假 netlink fd 时从跟踪表移除。 */
+        /* 上游 4abc88b / 87af48f：关闭 netlink fd 时从跟踪表移除。 */
         unmark_fake_netlink_fd(tracee, closed_fd);
+        unmark_netlink_route_fd(tracee, closed_fd);
         break;
     }
 
@@ -1266,6 +1430,8 @@ int translate_syscall_enter(Tracee *tracee)
         if ((flags & CLONE_NS_MASK) != 0) {
             if ((flags & CLONE_NEWNS) != 0)
                 tracee->clone_stripped_newns = true;
+            if ((flags & CLONE_NEWNET) != 0)
+                tracee->clone_stripped_newnet = true;
             poke_reg(tracee, SYSARG_1, flags & ~(word_t)CLONE_NS_MASK);
         }
         status = 0;
@@ -1281,6 +1447,8 @@ int translate_syscall_enter(Tracee *tracee)
             if (errno == 0 && (flags & CLONE_NS_MASK) != 0) {
                 if ((flags & CLONE_NEWNS) != 0)
                     tracee->clone_stripped_newns = true;
+                if ((flags & CLONE_NEWNET) != 0)
+                    tracee->clone_stripped_newnet = true;
                 poke_word(tracee, args_addr, flags & ~(word_t)CLONE_NS_MASK);
             }
         }
@@ -1466,14 +1634,18 @@ int translate_syscall_enter(Tracee *tracee)
     case PR_socket: {
         word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
         word_t protocol = peek_reg(tracee, CURRENT, SYSARG_3);
-        if (   domain == AF_NETLINK
-            && protocol == NETLINK_ROUTE
-            && host_blocks_af_netlink(tracee)) {
-            word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
-            poke_reg(tracee, SYSARG_1, AF_UNIX);
-            poke_reg(tracee, SYSARG_2, SOCK_DGRAM | (type & SOCK_CLOEXEC));
-            poke_reg(tracee, SYSARG_3, 0);
-            tracee->pending_fake_netlink_socket = true;
+        if (domain == AF_NETLINK && protocol == NETLINK_ROUTE) {
+            if (host_blocks_af_netlink(tracee)) {
+                word_t type = peek_reg(tracee, CURRENT, SYSARG_2);
+                poke_reg(tracee, SYSARG_1, AF_UNIX);
+                poke_reg(tracee, SYSARG_2, SOCK_DGRAM | (type & SOCK_CLOEXEC));
+                poke_reg(tracee, SYSARG_3, 0);
+                tracee->pending_fake_netlink_socket = true;
+            }
+            else {
+                /* 真实 socket：若 tracee 认为自己有独立 netns，仍需 ACK 仿真。 */
+                tracee->pending_real_netlink_socket = true;
+            }
             tracee->sysexit_pending = true;
             tracee->restart_how = PTRACE_SYSCALL;
         }
@@ -1483,10 +1655,10 @@ int translate_syscall_enter(Tracee *tracee)
 
     case PR_sendto: {
         int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
-        if (is_fake_netlink_fd(tracee, fd)) {
-            word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
-            word_t len = peek_reg(tracee, CURRENT, SYSARG_3);
+        word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
+        word_t len = peek_reg(tracee, CURRENT, SYSARG_3);
 
+        if (is_fake_netlink_fd(tracee, fd)) {
             build_fake_netlink_reply(tracee, buf, len);
 
             poke_reg(tracee, SYSARG_RESULT, len);
@@ -1494,35 +1666,23 @@ int translate_syscall_enter(Tracee *tracee)
             status = 0;
             break;
         }
+        note_netns_netlink_request(tracee, fd, buf, len);
         status = 0;
         break;
     }
 
     case PR_sendmsg: {
         int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+        word_t msghdr_addr = peek_reg(tracee, CURRENT, SYSARG_2);
+        word_t base = 0, len = 0;
+
         if (is_fake_netlink_fd(tracee, fd)) {
-            word_t msghdr_addr = peek_reg(tracee, CURRENT, SYSARG_2);
-            size_t w = sizeof_word(tracee);
             word_t total = 0;
-            word_t iov_ptr, iov_count;
 
-            if (msghdr_addr != 0) {
-                iov_ptr   = peek_word(tracee, msghdr_addr + 2 * w);
-                iov_count = (errno == 0)
-                            ? peek_word(tracee, msghdr_addr + 3 * w)
-                            : 0;
-                errno = 0;
-
-                if (iov_ptr != 0 && iov_count > 0) {
-                    word_t base = peek_word(tracee, iov_ptr);
-                    word_t len  = (errno == 0)
-                                  ? peek_word(tracee, iov_ptr + w)
-                                  : 0;
-                    errno = 0;
-
-                    build_fake_netlink_reply(tracee, base, len);
-                    total = len;
-                }
+            if (msghdr_first_iovec(tracee, msghdr_addr, &base, &len)) {
+                build_fake_netlink_reply(tracee, base, len);
+                /* 只用第一个 iovec 长度作为假发送字节数。 */
+                total = len;
             }
 
             poke_reg(tracee, SYSARG_RESULT, total);
@@ -1530,6 +1690,9 @@ int translate_syscall_enter(Tracee *tracee)
             status = 0;
             break;
         }
+        if (   is_netns_netlink_fd(tracee, fd)
+            && msghdr_first_iovec(tracee, msghdr_addr, &base, &len))
+            note_netns_netlink_request(tracee, fd, base, len);
         status = 0;
         break;
     }
@@ -1576,6 +1739,7 @@ int translate_syscall_enter(Tracee *tracee)
             status = 0;
             break;
         }
+        note_netns_netlink_reply(tracee, fd);
         status = 0;
         break;
     }
@@ -1644,6 +1808,7 @@ int translate_syscall_enter(Tracee *tracee)
             status = 0;
             break;
         }
+        note_netns_netlink_reply(tracee, fd);
         status = 0;
         break;
     }
@@ -1750,6 +1915,13 @@ int translate_syscall_enter(Tracee *tracee)
 
     /* 上游 5c7b2fd：unshare/setns 假装成功；umount 移除模拟 binding。 */
     case PR_unshare:
+        if ((peek_reg(tracee, CURRENT, SYSARG_1) & CLONE_NEWNET) != 0)
+            tracee->fake_netns = true;
+        poke_reg(tracee, SYSARG_RESULT, 0);
+        set_sysnum(tracee, PR_void);
+        status = 0;
+        break;
+
     case PR_setns:
         poke_reg(tracee, SYSARG_RESULT, 0);
         set_sysnum(tracee, PR_void);
