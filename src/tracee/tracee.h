@@ -60,6 +60,15 @@ typedef struct tracee {
 	 * new_child 会给子进程独立 bindings，模拟 mount 不泄漏回父进程。 */
 	bool         clone_stripped_newns;
 
+	/* 上游 4abc88b：AF_NETLINK 仿真。把 tracee 请求的 AF_NETLINK
+	 * socket 悄悄替换成 AF_UNIX/SOCK_DGRAM，并记录 fd，后续
+	 * bind/sendto/recvfrom 等走伪造回复。 */
+#define MAX_FAKE_NETLINK_FDS 8
+	int          fake_netlink_fds[MAX_FAKE_NETLINK_FDS];
+	int          fake_netlink_fds_count;
+	bool         pending_fake_netlink_socket;
+	uint32_t     fake_netlink_pending_seq;
+
 	/* Ptrace: tracer side */
 	struct {
 		size_t nb_ptracees;

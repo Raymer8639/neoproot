@@ -574,6 +574,28 @@ write_back:
         }
         goto end;
 
+    case PR_socket:
+        /* 上游 4abc88b：记录被替换成 AF_UNIX 的假 netlink fd。 */
+        if (tracee->pending_fake_netlink_socket) {
+            int fd = (int) peek_reg(tracee, CURRENT, SYSARG_RESULT);
+            if (fd >= 0) {
+                int i;
+                if (tracee->fake_netlink_fds_count < MAX_FAKE_NETLINK_FDS) {
+                    bool present = false;
+                    for (i = 0; i < tracee->fake_netlink_fds_count; i++) {
+                        if (tracee->fake_netlink_fds[i] == fd) {
+                            present = true;
+                            break;
+                        }
+                    }
+                    if (!present)
+                        tracee->fake_netlink_fds[tracee->fake_netlink_fds_count++] = fd;
+                }
+            }
+            tracee->pending_fake_netlink_socket = false;
+        }
+        goto end;
+
     default:
         goto end;
     }
