@@ -1120,13 +1120,6 @@ static size_t build_host_addrs(uint8_t *out, size_t max, uint32_t seq,
         family = ifa->ifa_addr->sa_family;
         if (family != AF_INET && family != AF_INET6)
             continue;
-#ifdef __ANDROID__
-        /* Android's partial IPv6/netlink view can make glibc 2.43
-         * assert during RFC 3484 source sorting.  Do not advertise
-         * IPv6 through the synthetic rtnetlink path. */
-        if (family == AF_INET6)
-            continue;
-#endif
         if (want_family != AF_UNSPEC && family != want_family)
             continue;
 
@@ -1313,11 +1306,9 @@ static void build_fake_netlink_reply(Tracee *tracee, struct fake_netlink_socket 
             if (family == 0 || family == AF_INET)
                 off = nl_build_loopback_addr(out, off, max, seq, pid,
                                              AF_INET, dump ? NLM_F_MULTI : 0);
-#ifndef __ANDROID__
             if (family == 0 || family == AF_INET6)
                 off = nl_build_loopback_addr(out, off, max, seq, pid,
                                              AF_INET6, dump ? NLM_F_MULTI : 0);
-#endif
         }
         if (dump)
             off = nl_build_done(out, off, max, seq, pid);
