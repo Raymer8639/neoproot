@@ -254,8 +254,9 @@ static void insort_binding2(const Tracee *restrict tracee, Binding *restrict bin
 	insort_binding(tracee, HOST, binding);
 }
 
-Binding *insort_binding3(const Tracee *restrict tracee, const TALLOC_CTX *restrict ctx,
-                         const char *host, const char *guest) {
+Binding *insort_binding4(const Tracee *restrict tracee, const TALLOC_CTX *restrict ctx,
+                         const char *host, const char *guest,
+                         BindingMountKind mount_kind) {
 	Binding *b = talloc_zero(ctx, Binding);
 	if (UNLIKELY(!b))
 		return NULL;
@@ -263,8 +264,14 @@ Binding *insort_binding3(const Tracee *restrict tracee, const TALLOC_CTX *restri
 	fast_memcpy(b->guest.path, guest, fast_strlen(guest) + 1);
 	b->host.length = fast_strlen(host);
 	b->guest.length = fast_strlen(guest);
+	b->mount_kind = mount_kind;
 	insort_binding2(tracee, b);
 	return b;
+}
+
+Binding *insort_binding3(const Tracee *restrict tracee, const TALLOC_CTX *restrict ctx,
+                         const char *host, const char *guest) {
+	return insort_binding4(tracee, ctx, host, guest, BINDING_MOUNT_NONE);
 }
 
 static int remove_bindings(Bindings *restrict bindings) {

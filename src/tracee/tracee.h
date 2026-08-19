@@ -33,6 +33,12 @@ typedef struct {
 		struct bindings *host;
 	} bindings;
 	char *cwd;
+	/* bwrap's pivot_root leaves its inherited cwd below /oldroot. */
+	char *cwd_alias_prefix;
+	/* Stable host files used to emulate the writable proc map files. */
+	const char *proc_uid_map;
+	const char *proc_gid_map;
+	const char *proc_setgroups;
 } FileSystemNameSpace;
 
 /* Emulated virtual heap */

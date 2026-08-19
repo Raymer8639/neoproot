@@ -59,6 +59,7 @@ static const Sysnum sysnums_arm64[] = {
 	[ 55 ] = PR_fchown,
 	[ 56 ] = PR_openat,
 	[ 57 ] = PR_close,
+	[ 436 ] = PR_close_range,
 	[ 58 ] = PR_vhangup,
 	[ 59 ] = PR_pipe2,
 	[ 60 ] = PR_quotactl,

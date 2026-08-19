@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <limits.h>
 
 #include "cli/note.h"
 #include "syscall/syscall.h"
@@ -22,11 +24,183 @@
 #include "tracee/seccomp.h"
 #include "tracee/statx.h"
 #include "path/path.h"
+#include "path/binding.h"
 #include "ptrace/ptrace.h"
 #include "ptrace/wait.h"
 #include "extension/extension.h"
 #include "arch.h"
 #include <stdio.h>      /* sscanf(3), */
+
+#define PROC_FD_PATH_CACHE_SIZE 128
+
+static struct {
+    pid_t pid;
+    int fd;
+    char path[PATH_MAX];
+} proc_fd_path_cache[PROC_FD_PATH_CACHE_SIZE];
+static size_t proc_fd_path_cache_next;
+
+static void remember_proc_fd_path(pid_t pid, int fd, const char *path)
+{
+    size_t index;
+    size_t slot = PROC_FD_PATH_CACHE_SIZE;
+
+    if (fd < 0 || path == NULL || path[0] != '/')
+        return;
+
+    for (index = 0; index < PROC_FD_PATH_CACHE_SIZE; index++) {
+        if (proc_fd_path_cache[index].pid == pid &&
+            proc_fd_path_cache[index].fd == fd) {
+            slot = index;
+            break;
+        }
+    }
+    if (slot == PROC_FD_PATH_CACHE_SIZE) {
+        slot = proc_fd_path_cache_next;
+        proc_fd_path_cache_next =
+            (proc_fd_path_cache_next + 1) % PROC_FD_PATH_CACHE_SIZE;
+    }
+
+    proc_fd_path_cache[slot].pid = pid;
+    proc_fd_path_cache[slot].fd = fd;
+    strncpy(proc_fd_path_cache[slot].path, path, PATH_MAX - 1);
+    proc_fd_path_cache[slot].path[PATH_MAX - 1] = 0;
+}
+
+void forget_proc_fd_path(pid_t pid, int fd)
+{
+    size_t index;
+
+    for (index = 0; index < PROC_FD_PATH_CACHE_SIZE; index++) {
+        if (proc_fd_path_cache[index].pid == pid &&
+            proc_fd_path_cache[index].fd == fd) {
+            proc_fd_path_cache[index].pid = 0;
+            proc_fd_path_cache[index].fd = -1;
+            proc_fd_path_cache[index].path[0] = 0;
+        }
+    }
+}
+
+void forget_proc_fd_paths_range(pid_t pid, unsigned int first, unsigned int last)
+{
+    size_t index;
+
+    for (index = 0; index < PROC_FD_PATH_CACHE_SIZE; index++) {
+        int fd = proc_fd_path_cache[index].fd;
+        if (proc_fd_path_cache[index].pid == pid && fd >= 0 &&
+            (unsigned int)fd >= first && (unsigned int)fd <= last) {
+            proc_fd_path_cache[index].pid = 0;
+            proc_fd_path_cache[index].fd = -1;
+            proc_fd_path_cache[index].path[0] = 0;
+        }
+    }
+}
+
+void clear_proc_fd_paths(pid_t pid)
+{
+    size_t index;
+
+    for (index = 0; index < PROC_FD_PATH_CACHE_SIZE; index++) {
+        if (proc_fd_path_cache[index].pid == pid) {
+            proc_fd_path_cache[index].pid = 0;
+            proc_fd_path_cache[index].fd = -1;
+            proc_fd_path_cache[index].path[0] = 0;
+        }
+    }
+}
+
+void inherit_proc_fd_paths(pid_t parent_pid, pid_t child_pid)
+{
+    size_t index;
+
+    clear_proc_fd_paths(child_pid);
+    for (index = 0; index < PROC_FD_PATH_CACHE_SIZE; index++) {
+        if (proc_fd_path_cache[index].pid == parent_pid)
+            remember_proc_fd_path(child_pid, proc_fd_path_cache[index].fd,
+                                  proc_fd_path_cache[index].path);
+    }
+}
+
+static void copy_proc_fd_path(pid_t pid, int source_fd, int target_fd)
+{
+    const char *path = recall_proc_fd_path(pid, source_fd);
+
+    if (path != NULL)
+        remember_proc_fd_path(pid, target_fd, path);
+    else
+        forget_proc_fd_path(pid, target_fd);
+}
+
+const char *recall_proc_fd_path(pid_t pid, int fd)
+{
+    size_t index;
+
+    for (index = 0; index < PROC_FD_PATH_CACHE_SIZE; index++) {
+        if (proc_fd_path_cache[index].pid == pid &&
+            proc_fd_path_cache[index].fd == fd &&
+            proc_fd_path_cache[index].path[0] != 0)
+            return proc_fd_path_cache[index].path;
+    }
+    return NULL;
+}
+
+static bool parse_nonnegative_int(const char *text, size_t length, int *value)
+{
+    long parsed = 0;
+    size_t index;
+
+    if (length == 0)
+        return false;
+    for (index = 0; index < length; index++) {
+        int digit = text[index] - '0';
+        if (digit < 0 || digit > 9 ||
+            parsed > (INT_MAX - digit) / 10)
+            return false;
+        parsed = parsed * 10 + digit;
+    }
+    *value = (int)parsed;
+    return true;
+}
+
+static bool parse_proc_fd_reference(const Tracee *tracee, const char *path,
+                                    int *fd)
+{
+    static const char self_prefix[] = "/proc/self/fd/";
+    const char *fd_text;
+
+    if (strncmp(path, self_prefix, sizeof(self_prefix) - 1) == 0) {
+        fd_text = path + sizeof(self_prefix) - 1;
+        return parse_nonnegative_int(fd_text, strlen(fd_text), fd);
+    }
+
+    if (tracee->fs->cwd_alias_prefix != NULL) {
+        size_t alias_len = strlen(tracee->fs->cwd_alias_prefix);
+        size_t path_len = strlen(path);
+        if (path_len >= alias_len + sizeof(self_prefix) - 1 &&
+            strncmp(path, tracee->fs->cwd_alias_prefix, alias_len) == 0 &&
+            strncmp(path + alias_len, self_prefix,
+                    sizeof(self_prefix) - 1) == 0) {
+            fd_text = path + alias_len + sizeof(self_prefix) - 1;
+            return parse_nonnegative_int(fd_text, strlen(fd_text), fd);
+        }
+    }
+
+    if (strncmp(path, "/proc/", 6) == 0) {
+        const char *pid_text = path + 6;
+        const char *slash = strchr(pid_text, '/');
+        int pid;
+
+        if (slash == NULL || strncmp(slash, "/fd/", 4) != 0 ||
+            !parse_nonnegative_int(pid_text, slash - pid_text, &pid) ||
+            pid != tracee->pid)
+            return false;
+
+        fd_text = slash + 4;
+        return parse_nonnegative_int(fd_text, strlen(fd_text), fd);
+    }
+
+    return false;
+}
 
 void translate_syscall_exit(Tracee *tracee)
 {
@@ -64,6 +238,7 @@ void translate_syscall_exit(Tracee *tracee)
 
     case PR_getcwd: {
         char path[PATH_MAX];
+        const char *reported_cwd;
         size_t new_size;
         size_t size;
         word_t output;
@@ -78,14 +253,25 @@ void translate_syscall_exit(Tracee *tracee)
         if (status < 0)
             break;
 
-        new_size = strlen(tracee->fs->cwd) + 1;
+        reported_cwd = tracee->fs->cwd;
+        if (tracee->fs->cwd_alias_prefix != NULL) {
+            size_t prefix_len = strlen(tracee->fs->cwd_alias_prefix);
+            if (strncmp(reported_cwd, tracee->fs->cwd_alias_prefix,
+                        prefix_len) == 0 &&
+                (reported_cwd[prefix_len] == 0 ||
+                 reported_cwd[prefix_len] == '/'))
+                reported_cwd = reported_cwd[prefix_len] == 0
+                    ? "/" : reported_cwd + prefix_len;
+        }
+
+        new_size = strlen(reported_cwd) + 1;
         if (size < new_size) {
             status = -ERANGE;
             break;
         }
 
         output = peek_reg(tracee, ORIGINAL, SYSARG_1);
-        status = write_data(tracee, output, tracee->fs->cwd, new_size);
+        status = write_data(tracee, output, reported_cwd, new_size);
         if (status < 0)
             break;
 
@@ -264,6 +450,45 @@ void translate_syscall_exit(Tracee *tracee)
         break;
     }
 
+    case PR_dup:
+    case PR_dup2:
+    case PR_dup3:
+        if ((int)syscall_result >= 0) {
+            int source_fd = (int)peek_reg(tracee, ORIGINAL, SYSARG_1);
+            copy_proc_fd_path(tracee->pid, source_fd, (int)syscall_result);
+        }
+        goto end;
+
+    case PR_fcntl:
+    case PR_fcntl64:
+        if ((int)syscall_result >= 0) {
+            int command = (int)peek_reg(tracee, ORIGINAL, SYSARG_2);
+            if (command == F_DUPFD
+#ifdef F_DUPFD_CLOEXEC
+                || command == F_DUPFD_CLOEXEC
+#endif
+            ) {
+                int source_fd = (int)peek_reg(tracee, ORIGINAL, SYSARG_1);
+                copy_proc_fd_path(tracee->pid, source_fd, (int)syscall_result);
+            }
+        }
+        goto end;
+
+    case PR_creat:
+    case PR_open:
+    case PR_openat:
+    case PR_openat2:
+        if ((int)syscall_result >= 0) {
+            char opened_path[PATH_MAX];
+            Reg path_reg = (syscall_number == PR_creat || syscall_number == PR_open)
+                ? SYSARG_1 : SYSARG_2;
+            word_t input = peek_reg(tracee, MODIFIED, path_reg);
+
+            if (read_path(tracee, opened_path, input) >= 0)
+                remember_proc_fd_path(tracee->pid, (int)syscall_result, opened_path);
+        }
+        goto end;
+
     case PR_readlink:
     case PR_readlinkat: {
         char referee[PATH_MAX];
@@ -280,8 +505,65 @@ void translate_syscall_exit(Tracee *tracee)
         word_t input;
         word_t output;
 
-        if ((int)syscall_result < 0)
+        if ((int)syscall_result < 0) {
+            char failed_ref[PATH_MAX];
+            char failed_target[PATH_MAX];
+            char original_ref[PATH_MAX];
+            int fd = -1;
+            word_t failed_input = (syscall_number == PR_readlink)
+                ? peek_reg(tracee, MODIFIED, SYSARG_1)
+                : peek_reg(tracee, MODIFIED, SYSARG_2);
+            word_t original_input = (syscall_number == PR_readlink)
+                ? peek_reg(tracee, ORIGINAL, SYSARG_1)
+                : peek_reg(tracee, ORIGINAL, SYSARG_2);
+            word_t failed_output = (syscall_number == PR_readlink)
+                ? peek_reg(tracee, ORIGINAL, SYSARG_2)
+                : peek_reg(tracee, ORIGINAL, SYSARG_3);
+            word_t failed_max = (syscall_number == PR_readlink)
+                ? peek_reg(tracee, ORIGINAL, SYSARG_3)
+                : peek_reg(tracee, ORIGINAL, SYSARG_4);
+            const char *remembered;
+            int target_status;
+            int path_status;
+            int original_status;
+            bool valid_ref;
+
+            /* Only repair the Android procfd ENOENT.  Other readlink
+             * failures retain their kernel-defined result. */
+            if ((int)syscall_result != -ENOENT)
+                goto end;
+            if (failed_max > PATH_MAX)
+                failed_max = PATH_MAX;
+            path_status = read_path(tracee, failed_ref, failed_input);
+            original_status = read_path(tracee, original_ref, original_input);
+            valid_ref = original_status >= 0 &&
+                parse_proc_fd_reference(tracee, original_ref, &fd);
+            if (path_status < 0 || !valid_ref)
+                goto end;
+
+            remembered = recall_proc_fd_path(tracee->pid, fd);
+            if (remembered != NULL) {
+                strncpy(failed_target, remembered, PATH_MAX - 1);
+                failed_target[PATH_MAX - 1] = 0;
+                target_status = 0;
+            } else {
+                target_status = readlink_proc_pid_fd(tracee->pid, fd, failed_target);
+            }
+            if (target_status == 0 && failed_max > 0) {
+                int translated_len = detranslate_path(tracee, failed_target, failed_ref);
+                if (translated_len >= 0) {
+                    size_t write_len = translated_len > 0
+                        ? (size_t)translated_len - 1 : strlen(failed_target);
+                    if (write_len > failed_max)
+                        write_len = failed_max;
+                    if (write_data(tracee, failed_output, failed_target, write_len) >= 0) {
+                        status = (int)write_len;
+                        break;
+                    }
+                }
+            }
             goto end;
+        }
 
         old_size = syscall_result;
 
@@ -472,6 +754,8 @@ write_back:
 
     case PR_execve:
     case PR_execveat:
+        if ((int)syscall_result >= 0)
+            clear_proc_fd_paths(tracee->pid);
         translate_execve_exit(tracee);
         goto end;
 

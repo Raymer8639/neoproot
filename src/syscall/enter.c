@@ -58,6 +58,10 @@
                        CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | \
                        CLONE_NEWCGROUP | CLONE_NEWTIME)
 
+#ifndef CLOSE_RANGE_CLOEXEC
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+#endif
+
 /* ABI-stable rtnetlink constants for loopback reply. */
 #ifndef ARPHRD_LOOPBACK
 #define ARPHRD_LOOPBACK 772
@@ -195,6 +199,7 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
     char host_path[PATH_MAX];
     char guest_path[PATH_MAX];
     const char *tmpdir;
+    BindingMountKind mount_kind = BINDING_MOUNT_NONE;
 
     if ((flags & MS_REMOUNT) != 0)
         return;
@@ -215,6 +220,7 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
         tmpdir = create_temp_directory(tracee->fs, "proot-tmpfs-");
         if (tmpdir == NULL)
             return;
+        mount_kind = BINDING_MOUNT_TMPFS;
         strncpy(host_path, tmpdir, PATH_MAX - 1);
         host_path[PATH_MAX - 1] = '\0';
     }
@@ -222,11 +228,16 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
         return;
 
     chop_finality(host_path);
+    {
+        size_t host_len = strlen(host_path);
+        while (host_len > 1 && host_path[host_len - 1] == '/')
+            host_path[--host_len] = '\0';
+    }
 
     if (guest_canonicalize(tracee, target_user, guest_path) < 0)
         return;
 
-    (void) insort_binding3(tracee, tracee->fs, host_path, guest_path);
+    (void) insort_binding4(tracee, tracee->fs, host_path, guest_path, mount_kind);
 }
 
 static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
@@ -317,8 +328,9 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
             && blen > new_root_len
             && strncmp(b->guest.path, new_root_guest, new_root_len) == 0
             && b->guest.path[new_root_len] == '/') {
-            (void) insort_binding3(tracee, tracee->fs, b->host.path,
-                                   b->guest.path + new_root_len);
+            (void) insort_binding4(tracee, tracee->fs, b->host.path,
+                                   b->guest.path + new_root_len,
+                                   b->mount_kind);
             remove_binding_from_all_lists(tracee, b);
             continue;
         }
@@ -337,8 +349,31 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
                 >= sizeof(aliased))
                 continue;
 
-            (void) insort_binding3(tracee, tracee->fs,
-                                   b->host.path, aliased);
+            (void) insort_binding4(tracee, tracee->fs,
+                                   b->host.path, aliased,
+                                   b->mount_kind);
+        }
+    }
+
+    /* Derive the alias from the resulting binding tree.  bwrap can issue a
+     * second pivot_root without a put-old argument, so inspecting only that
+     * syscall's arguments would lose an alias established by the first one. */
+    {
+        bool has_oldroot = false;
+        for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+             iter != (void *) tracee->fs->bindings.guest;
+             iter = CIRCLEQ_NEXT(iter, link.guest)) {
+            if (strcmp(iter->guest.path, "/oldroot") == 0) {
+                has_oldroot = true;
+                break;
+            }
+        }
+        if (has_oldroot) {
+            TALLOC_FREE(tracee->fs->cwd_alias_prefix);
+            tracee->fs->cwd_alias_prefix =
+                talloc_strdup(tracee->fs, "/oldroot");
+        } else if (have_put_old) {
+            TALLOC_FREE(tracee->fs->cwd_alias_prefix);
         }
     }
 
@@ -364,6 +399,8 @@ static void emulate_umount(Tracee *tracee, const char *target_user)
     if (strcmp(binding->guest.path, guest_path) != 0)
         return;
 
+    if (strcmp(guest_path, "/oldroot") == 0)
+        TALLOC_FREE(tracee->fs->cwd_alias_prefix);
     remove_binding_from_all_lists(tracee, binding);
 }
 
@@ -1480,9 +1517,29 @@ int translate_syscall_enter(Tracee *tracee)
          * 在父读端关闭后 EPIPE（进程替换等场景）。 */
         int closed_fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
         shadow_pipe_read_end(tracee->pid, closed_fd);
+        /* Losing a cache entry on a failed close is safe; keeping a stale
+         * entry could make a closed procfd appear to remain valid. */
+        forget_proc_fd_path(tracee->pid, closed_fd);
         /* 上游 4abc88b / 87af48f：关闭 netlink fd 时从跟踪表移除。 */
         unmark_fake_netlink_fd(tracee, closed_fd);
         unmark_netlink_route_fd(tracee, closed_fd);
+        break;
+    }
+
+    case PR_close_range: {
+        word_t first = peek_reg(tracee, CURRENT, SYSARG_1);
+        word_t last = peek_reg(tracee, CURRENT, SYSARG_2);
+        word_t flags = peek_reg(tracee, CURRENT, SYSARG_3);
+
+        /* CLOSE_RANGE_CLOEXEC leaves descriptors usable until execve;
+         * successful execve clears their cache entries below. */
+        if ((flags & CLOSE_RANGE_CLOEXEC) == 0 && first <= UINT_MAX) {
+            unsigned int first_fd = (unsigned int)first;
+            unsigned int last_fd = last > UINT_MAX ? UINT_MAX : (unsigned int)last;
+            if (first_fd <= last_fd)
+                forget_proc_fd_paths_range(tracee->pid, first_fd, last_fd);
+        }
+        status = 0;
         break;
     }
 
@@ -1580,6 +1637,14 @@ int translate_syscall_enter(Tracee *tracee)
         }
 
         status = translate_path(tracee, path, dirfd, oldpath, true);
+        if (status < 0 && syscall_number == PR_fchdir) {
+            const char *remembered = recall_proc_fd_path(tracee->pid, (int)dirfd);
+            if (remembered != NULL) {
+                strncpy(path, remembered, PATH_MAX - 1);
+                path[PATH_MAX - 1] = 0;
+                status = 0;
+            }
+        }
         if (status < 0)
             break;
 
@@ -2381,6 +2446,7 @@ int translate_syscall_enter(Tracee *tracee)
 
     case PR_prctl:
         if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_SET_DUMPABLE) {
+            poke_reg(tracee, SYSARG_RESULT, 0);
             set_sysnum(tracee, PR_void);
             status = 0;
         }

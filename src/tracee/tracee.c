@@ -17,6 +17,7 @@
 #include "tracee/reg.h"
 #include "tracee/mem.h"
 #include "path/binding.h"
+#include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "tracee/event.h"
 #include "ptrace/ptrace.h"
@@ -83,6 +84,7 @@ static void clean_life_span_object(const void *pointer, int depth, int max_depth
 
 // 析构函数内链表操作必须加锁，且无阻塞操作
 static int remove_tracee(Tracee *tracee) {
+    clear_proc_fd_paths(tracee->pid);
     // 1. 先在锁内安全移除链表节点，无任何阻塞操作
     tracee_list_lock_acquire();
     LIST_REMOVE(tracee, link);
@@ -348,6 +350,8 @@ int new_child(Tracee *parent, word_t clone_flags) {
     if (UNLIKELY(!child))
         return -ENOMEM;
 
+    inherit_proc_fd_paths(parent->pid, child->pid);
+
     child->verbose    = parent->verbose;
     child->seccomp    = parent->seccomp;
     child->sysexit_pending = parent->sysexit_pending;
@@ -389,6 +393,24 @@ int new_child(Tracee *parent, word_t clone_flags) {
         if (UNLIKELY(!child->fs)) return -ENOMEM;
         child->fs->cwd = talloc_strdup(child->fs, parent->fs->cwd);
         talloc_set_name_const(child->fs->cwd, "$cwd");
+        if (parent->fs->cwd_alias_prefix != NULL)
+            child->fs->cwd_alias_prefix =
+                talloc_strdup(child->fs, parent->fs->cwd_alias_prefix);
+        if (parent->fs->proc_uid_map != NULL) {
+            child->fs->proc_uid_map =
+                talloc_reference(child->fs, parent->fs->proc_uid_map);
+            if (UNLIKELY(child->fs->proc_uid_map == NULL)) return -ENOMEM;
+        }
+        if (parent->fs->proc_gid_map != NULL) {
+            child->fs->proc_gid_map =
+                talloc_reference(child->fs, parent->fs->proc_gid_map);
+            if (UNLIKELY(child->fs->proc_gid_map == NULL)) return -ENOMEM;
+        }
+        if (parent->fs->proc_setgroups != NULL) {
+            child->fs->proc_setgroups =
+                talloc_reference(child->fs, parent->fs->proc_setgroups);
+            if (UNLIKELY(child->fs->proc_setgroups == NULL)) return -ENOMEM;
+        }
         if (parent->clone_stripped_newns
             && parent->fs->bindings.guest != NULL) {
             /* 上游 5c7b2fd：调用方请求了 CLONE_NEWNS（已被剥掉），
@@ -406,9 +428,10 @@ int new_child(Tracee *parent, word_t clone_flags) {
             for (iter = CIRCLEQ_FIRST(parent->fs->bindings.guest);
                  iter != (void *) parent->fs->bindings.guest;
                  iter = CIRCLEQ_NEXT(iter, link.guest))
-                (void) insort_binding3(child, child->fs,
+                (void) insort_binding4(child, child->fs,
                                        iter->host.path,
-                                       iter->guest.path);
+                                       iter->guest.path,
+                                       iter->mount_kind);
         }
         else {
             /* Bindings are shared across file-system name-spaces since a

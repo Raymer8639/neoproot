@@ -8,6 +8,11 @@
 #include "tracee/tracee.h"
 #include "path.h"
 
+typedef enum {
+	BINDING_MOUNT_NONE = 0,
+	BINDING_MOUNT_TMPFS = 1,
+} BindingMountKind;
+
 typedef struct binding {
 	Path host;
 	Path guest;
@@ -15,6 +20,7 @@ typedef struct binding {
 	bool readonly;
 	bool need_substitution;
 	bool must_exist;
+	BindingMountKind mount_kind;
 
 	struct {
 		CIRCLEQ_ENTRY(binding) pending;
@@ -27,6 +33,10 @@ typedef CIRCLEQ_HEAD(bindings, binding) Bindings;
 
 Binding *insort_binding3(const Tracee *tracee, const TALLOC_CTX *context,
 			 const char host_path[PATH_MAX], const char guest_path[PATH_MAX]);
+
+Binding *insort_binding4(const Tracee *tracee, const TALLOC_CTX *context,
+			 const char host_path[PATH_MAX], const char guest_path[PATH_MAX],
+			 BindingMountKind mount_kind);
 
 Binding *new_binding(Tracee *tracee, const char *host, const char *guest, bool must_exist);
 

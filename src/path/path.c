@@ -17,6 +17,7 @@
 #include "path/binding.h"
 #include "path/canon.h"
 #include "path/proc.h"
+#include "path/temp.h"
 #include "extension/extension.h"
 #include "cli/note.h"
 #include "build.h"
@@ -32,6 +33,120 @@ static inline int is_proc_path(const char *s)
             s[3] == 'o' &&
             s[4] == 'c' &&
             s[5] == '/');
+}
+
+/* bubblewrap deliberately reaches the host procfs through the old-root
+ * alias (for example /oldroot/proc/self/fd/N).  Leaving that prefix in the
+ * path makes procfs resolve "self" against the outer neoproot process rather
+ * than the tracee.  Only the alias recorded by the emulated pivot_root is
+ * trusted here; ordinary /oldroot paths keep their normal binding semantics. */
+static const char *proc_path_after_alias(const Tracee *tracee,
+                                         const char *path)
+{
+    const char *alias;
+    size_t alias_len;
+
+    if (tracee == NULL || tracee->fs == NULL ||
+        tracee->fs->cwd_alias_prefix == NULL)
+        return NULL;
+
+    alias = tracee->fs->cwd_alias_prefix;
+    alias_len = strlen(alias);
+    if (alias_len == 0 || strncmp(path, alias, alias_len) != 0 ||
+        path[alias_len] != '/')
+        return NULL;
+
+    path += alias_len;
+    return is_proc_path(path) ? path : NULL;
+}
+
+static const char **proc_map_slot(Tracee *tracee, const char *path)
+{
+    static const char self_prefix[] = "/proc/self/";
+    char pid_prefix[32];
+    const char *entry = NULL;
+    int length;
+
+    if (strncmp(path, self_prefix, sizeof(self_prefix) - 1) == 0) {
+        entry = path + sizeof(self_prefix) - 1;
+    } else {
+        length = snprintf(pid_prefix, sizeof(pid_prefix), "/proc/%d/",
+                          tracee->pid);
+        if (length < 0 || (size_t)length >= sizeof(pid_prefix) ||
+            strncmp(path, pid_prefix, (size_t)length) != 0)
+            return NULL;
+        entry = path + length;
+    }
+
+    if (strcmp(entry, "uid_map") == 0)
+        return &tracee->fs->proc_uid_map;
+    if (strcmp(entry, "gid_map") == 0)
+        return &tracee->fs->proc_gid_map;
+    if (strcmp(entry, "setgroups") == 0)
+        return &tracee->fs->proc_setgroups;
+    return NULL;
+}
+
+static int translate_proc_passthrough(Tracee *tracee, char result[PATH_MAX],
+                                      const char *path)
+{
+    Binding *binding;
+    const char **map_slot;
+    const char *tmp;
+    int ret;
+
+    /* A specific binding must retain precedence over proc compatibility
+     * handling.  The plain /proc binding is intentionally passthrough. */
+    binding = get_binding(tracee, GUEST, path);
+    if (binding != NULL && is_proc_path(binding->guest.path) &&
+        strcmp(binding->guest.path, "/proc") != 0) {
+        strncpy(result, path, PATH_MAX - 1);
+        result[PATH_MAX - 1] = 0;
+        ret = substitute_binding(tracee, GUEST, result);
+        if (ret < 0)
+            return ret;
+        goto translated;
+    }
+
+    if (strcmp(path, "/proc/self/mountinfo") == 0 ||
+        strcmp(path, "/proc/thread-self/mountinfo") == 0) {
+        int len = snprintf(result, PATH_MAX, "/proc/%d/mountinfo", tracee->pid);
+        if (len < 0 || len >= PATH_MAX)
+            return -ENAMETOOLONG;
+        goto translated;
+    }
+
+    if (strncmp(path, "/proc/self/fd/", 14) == 0) {
+        const char *fd = path + 14;
+        char *end = NULL;
+        long n = strtol(fd, &end, 10);
+        if (*fd != 0 && *end == 0 && n >= 0) {
+            int len = snprintf(result, PATH_MAX, "/proc/%d/fd/%ld", tracee->pid, n);
+            if (len < 0 || len >= PATH_MAX)
+                return -ENAMETOOLONG;
+            goto translated;
+        }
+    }
+
+    map_slot = proc_map_slot(tracee, path);
+    if (map_slot != NULL) {
+        if (*map_slot == NULL)
+            *map_slot = create_temp_file(tracee->fs, "proc-map");
+        tmp = *map_slot;
+        if (tmp == NULL)
+            return -ENOMEM;
+        if (strlen(tmp) >= PATH_MAX)
+            return -ENAMETOOLONG;
+        strcpy(result, tmp);
+        goto translated;
+    }
+
+    strncpy(result, path, PATH_MAX - 1);
+    result[PATH_MAX - 1] = 0;
+
+translated:
+    ret = notify_extensions(tracee, TRANSLATED_PATH, (intptr_t)result, 0);
+    return ret < 0 ? ret : 0;
 }
 
 int join_paths(int number_paths, char result[PATH_MAX], ...)
@@ -189,13 +304,16 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
                    const char *user_path, bool deref_final)
 {
     char guest_path[PATH_MAX];
+    const char *proc_path;
     int ret;
 
     if (is_proc_path(user_path)) {
-        memcpy(result, user_path, PATH_MAX - 1);
-        result[PATH_MAX - 1] = '\0';
-        return 0;
+        return translate_proc_passthrough(tracee, result, user_path);
     }
+
+    proc_path = proc_path_after_alias(tracee, user_path);
+    if (proc_path != NULL)
+        return translate_proc_passthrough(tracee, result, proc_path);
 
     if (user_path[0] == '/') {
         result[0] = '/';
@@ -220,6 +338,14 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 
     ret = join_paths(2, guest_path, result, user_path);
     if (ret < 0) return ret;
+
+    if (is_proc_path(guest_path)) {
+        return translate_proc_passthrough(tracee, result, guest_path);
+    }
+
+    proc_path = proc_path_after_alias(tracee, guest_path);
+    if (proc_path != NULL)
+        return translate_proc_passthrough(tracee, result, proc_path);
 
     ret = canonicalize(tracee, guest_path, deref_final, result, 0);
     if (ret < 0) return ret;

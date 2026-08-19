@@ -36,7 +36,7 @@ void free_global_temp_ctx(void) {
 }
 
 const char *get_temp_directory(void) {
-    static const char *temp_dir = NULL;
+    static char *temp_dir = NULL;
     if (LIKELY(temp_dir))
         return temp_dir;
     const char *env_tmp = getenv("PROOT_TMP_DIR");
@@ -44,6 +44,11 @@ const char *get_temp_directory(void) {
         env_tmp = P_tmpdir;
     TALLOC_CTX *ctx = get_global_temp_ctx();
     temp_dir = talloc_strdup(ctx, env_tmp);
+    if (LIKELY(temp_dir)) {
+        size_t len = strlen(temp_dir);
+        while (len > 1 && temp_dir[len - 1] == '/')
+            temp_dir[--len] = '\0';
+    }
     if (UNLIKELY(!temp_dir)) {
         note(NULL, ERROR, INTERNAL, "failed to allocate temp directory");
         abort();

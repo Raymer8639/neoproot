@@ -124,6 +124,27 @@ static int map_segment(LoadInfo *info, const ProgramHeader *ph)
 	return 0;
 }
 
+static int translate_procfd_exec(Tracee *tr, char host[PATH_MAX], const char *user)
+{
+	static const char prefix[] = "/proc/self/fd/";
+	size_t prefix_len = sizeof(prefix) - 1;
+	const char *fd;
+	int status;
+
+	if (strncmp(user, prefix, prefix_len) != 0)
+		return 0;
+
+	fd = user + prefix_len;
+	if (fd[0] == 0 || strspn(fd, "0123456789") != strlen(fd))
+		return 0;
+
+	status = snprintf(host, PATH_MAX, "/proc/%d/fd/%s", tr->pid, fd);
+	if (status < 0 || status >= PATH_MAX)
+		return -ENAMETOOLONG;
+
+	return 1;
+}
+
 int translate_and_check_exec(Tracee *tr, char host[PATH_MAX], const char *user)
 {
 	int ret;
@@ -132,9 +153,14 @@ int translate_and_check_exec(Tracee *tr, char host[PATH_MAX], const char *user)
 	if (user[0] == '\0')
 		return -ENOEXEC;
 
-	ret = translate_path(tr, host, AT_FDCWD, user, true);
-	if (UNLIKELY(ret < 0))
+	ret = translate_procfd_exec(tr, host, user);
+	if (ret < 0)
 		return ret;
+	if (ret == 0) {
+		ret = translate_path(tr, host, AT_FDCWD, user, true);
+		if (UNLIKELY(ret < 0))
+			return ret;
+	}
 
 	if (access(host, F_OK | X_OK) < 0)
 		return (errno == ENOENT) ? -ENOENT : -EACCES;

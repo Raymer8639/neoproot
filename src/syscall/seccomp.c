@@ -229,6 +229,8 @@ static FilteredSysnum proot_sysnums[] = {
     { PR_bind,          0 },
     { PR_brk,           FILTER_SYSEXIT },
     { PR_chdir,         FILTER_SYSEXIT },
+    { PR_close,         0 },
+    { PR_close_range,   0 },
     { PR_chmod,         0 },
     { PR_chown,         0 },
     { PR_chown32,       0 },

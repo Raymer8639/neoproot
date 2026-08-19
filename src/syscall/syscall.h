@@ -38,6 +38,11 @@ extern int set_sysarg_data(Tracee *tracee, const void *tracer_ptr, word_t size, 
 extern void translate_syscall(Tracee *tracee);
 extern int  translate_syscall_enter(Tracee *tracee);
 extern void translate_syscall_exit(Tracee *tracee);
+extern const char *recall_proc_fd_path(pid_t pid, int fd);
+extern void forget_proc_fd_path(pid_t pid, int fd);
+extern void forget_proc_fd_paths_range(pid_t pid, unsigned int first, unsigned int last);
+extern void inherit_proc_fd_paths(pid_t parent_pid, pid_t child_pid);
+extern void clear_proc_fd_paths(pid_t pid);
 
 extern void handle_netlink_reply_exit(Tracee *tracee, word_t syscall_number);
 extern bool host_blocks_af_netlink(const Tracee *tracee);
