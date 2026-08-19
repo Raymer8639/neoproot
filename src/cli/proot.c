@@ -168,10 +168,23 @@ static int handle_option_S(Tracee *restrict t, const Cli *restrict c, const char
 }
 
 static int handle_option_link2symlink(Tracee *restrict t, const Cli *restrict c, const char *v) {
+	(void)c; (void)v;
+	int rc;
+	if (get_extension(t, link2symlink_callback) != NULL)
+		return 0;
+	rc = initialize_extension(t, link2symlink_callback, NULL);
+	if (UNLIKELY(rc < 0))
+		note(t, WARNING, INTERNAL, "link2symlink init failed");
+	return 0;
+}
+
+static int handle_option_link2symlink_dirent(Tracee *restrict t,
+					     const Cli *restrict c,
+					     const char *v) {
     (void)c; (void)v;
-    int rc = initialize_extension(t, link2symlink_callback, NULL);
+    int rc = link2symlink_enable_dirent(t);
     if (UNLIKELY(rc < 0))
-        note(t, WARNING, INTERNAL, "link2symlink init failed");
+        note(t, WARNING, INTERNAL, "link2symlink dirent mode init failed");
     return 0;
 }
 
