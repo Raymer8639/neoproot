@@ -3,6 +3,17 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.8.0] - 2026-08-19
+
+**Android/Termux 容器与 sandbox 兼容性发布**
+
+- bwrap / Codex sandbox：补齐 `clone`、`mount`、`pivot_root`、`/oldroot` 与显式 `/proc` binding 的用户态兼容路径，Android/Termux 下的 sandbox 可正常启动、读写和清理工作区文件。
+- procfs 与文件描述符：修复经 `/proc/self/fd/N` 的执行和 `readlink` 映射；补齐 `close`、`close_range`、`dup`、`exec`、fork 及进程退出后的缓存生命周期，避免陈旧 fd 路径和 PID 复用。
+- 模拟挂载：为运行时 `tmpfs` 补齐与 procfd 一致的 `/proc/self/mountinfo` 视图，修复 bwrap 对挂载点的检查；覆盖 `openat2` 和路径转义。
+- 网络与命名空间：选择性回移上游 AF_NETLINK 路由仿真、网络命名空间、挂载命名空间、`devtmpfs`/`devpts` 兼容改动，改善 Android 宿主上的容器程序兼容性。
+- 安全与回归：加固路径与 fake-id0 元数据处理；新增/扩展 Termux 下的安全、procfd、`close_range` 和 tmpfs/mountinfo 回归测试。
+- 验证：ARM64 CI 的 release / portable 两种构建均通过；Termux 真机验证覆盖 bwrap/Codex sandbox、procfd、`close_range`、fork map、tmpfs/mountinfo 和工作区读写删除。
+
 ## [v5.7.3] - 2026-08-15
 
 **neoproot 时代首个正式版（项目/二进制改名后）**
