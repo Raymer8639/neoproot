@@ -8,7 +8,10 @@
 #include <limits.h>
 #include <ctype.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <stdbool.h>     /* bool, */
+#include <stdint.h>
+#include <stddef.h>
 #include <talloc.h>      /* talloc_*, */
 
 #include "cli/note.h"
@@ -46,6 +49,10 @@
  * 返回 -EMLINK（与真硬链接超限同 errno），pnpm 等会自动 fallback copy。 */
 #define MAX_LINK_COUNT 9999
 #define SIZEOF_RELEVANT_STRUCT_STAT 72
+#define LINUX_DIRENT64_RECLEN_OFFSET 16
+#define LINUX_DIRENT64_D_TYPE_OFFSET 18
+#define LINUX_DIRENT64_NAME_OFFSET 19
+#define MAX_DIRENT_BUFFER (16U * 1024U * 1024U)
 
 static int decrement_link_count(Tracee *tracee, Reg sysarg);
 static bool is_l2s_internal_path(const char *path);
@@ -425,6 +432,9 @@ typedef struct {
 	/* 当前 syscall 被重定向走的假硬链接名；exit 阶段拿到 fd 号后
 	 * 登记进 fd_cache，然后清空。 */
 	char pending_link[PATH_MAX];
+
+	/* 仅由 --link2symlink-dirent 开启；默认路径不截获 getdents64。 */
+	bool dirent_enabled;
 } Link2SymlinkConfig;
 
 static FORCE_INLINE Link2SymlinkConfig *get_config(Extension *extension, bool allocate) {
@@ -493,6 +503,178 @@ static FORCE_INLINE int resolve_faked_hard_link(const char link[PATH_MAX], char 
     status = my_readlink(intermediate, final, PATH_MAX);
     if (UNLIKELY(status < 0)) return status;
     return parse_l2s_final_count(final, &(int){0}) ? 0 : -EINVAL;
+}
+
+static const FilteredSysnum link2symlink_filtered_sysnums[] = {
+	/* open 家族 FILTER_SYSEXIT（上游 7ff389a1 移植所需）：exit 停靠
+	 * 拿 fd 号登记 fd_cache。直接设 sysexit_pending 会在旧 seccomp
+	 * 模式触发 event.c IS_IN_SYSENTER 断言（真机复现）——fork 原生
+	 * 机制 = FILTER_SYSEXIT（flags 与基础列表按位或合并）。 */
+	{ PR_creat,       FILTER_SYSEXIT },
+	{ PR_open,        FILTER_SYSEXIT },
+	{ PR_openat,      FILTER_SYSEXIT },
+	{ PR_openat2,     FILTER_SYSEXIT },
+	{ PR_link,        FILTER_SYSEXIT },
+	{ PR_linkat,      FILTER_SYSEXIT },
+	{ PR_unlink,      FILTER_SYSEXIT },
+	{ PR_unlinkat,    FILTER_SYSEXIT },
+	{ PR_fstat,       FILTER_SYSEXIT },
+	{ PR_fstat64,     FILTER_SYSEXIT },
+	{ PR_fstatat64,   FILTER_SYSEXIT },
+	{ PR_lstat,       FILTER_SYSEXIT },
+	{ PR_lstat64,     FILTER_SYSEXIT },
+	{ PR_newfstatat,  FILTER_SYSEXIT },
+	{ PR_stat,        FILTER_SYSEXIT },
+	{ PR_stat64,      FILTER_SYSEXIT },
+	{ PR_rename,      FILTER_SYSEXIT },
+	{ PR_renameat,    FILTER_SYSEXIT },
+	{ PR_renameat2,   FILTER_SYSEXIT },
+	FILTERED_SYSNUM_END,
+};
+
+static const FilteredSysnum link2symlink_dirent_filtered_sysnums[] = {
+	/* Keep the normal link2symlink exit filters; add getdents64 only here. */
+	{ PR_creat,       FILTER_SYSEXIT },
+	{ PR_open,        FILTER_SYSEXIT },
+	{ PR_openat,      FILTER_SYSEXIT },
+	{ PR_openat2,     FILTER_SYSEXIT },
+	{ PR_link,        FILTER_SYSEXIT },
+	{ PR_linkat,      FILTER_SYSEXIT },
+	{ PR_unlink,      FILTER_SYSEXIT },
+	{ PR_unlinkat,    FILTER_SYSEXIT },
+	{ PR_fstat,       FILTER_SYSEXIT },
+	{ PR_fstat64,     FILTER_SYSEXIT },
+	{ PR_fstatat64,   FILTER_SYSEXIT },
+	{ PR_lstat,       FILTER_SYSEXIT },
+	{ PR_lstat64,     FILTER_SYSEXIT },
+	{ PR_newfstatat,  FILTER_SYSEXIT },
+	{ PR_stat,        FILTER_SYSEXIT },
+	{ PR_stat64,      FILTER_SYSEXIT },
+	{ PR_rename,      FILTER_SYSEXIT },
+	{ PR_renameat,    FILTER_SYSEXIT },
+	{ PR_renameat2,   FILTER_SYSEXIT },
+	{ PR_getdents64,  FILTER_SYSEXIT },
+	FILTERED_SYSNUM_END,
+};
+
+static bool is_l2s_fake_entry(const char *directory, const char *name,
+				      size_t name_len)
+{
+	char candidate[PATH_MAX] ALIGNED;
+	char final[PATH_MAX] ALIGNED;
+	struct stat statl;
+	int status;
+	size_t directory_len;
+
+	if (UNLIKELY(directory == NULL || name == NULL || name_len == 0))
+		return false;
+	if (UNLIKELY(name_len == 1 && name[0] == '.'))
+		return false;
+	if (UNLIKELY(name_len == 2 && name[0] == '.' && name[1] == '.'))
+		return false;
+	if (UNLIKELY(memchr(name, '/', name_len) != NULL))
+		return false;
+
+	directory_len = strlen(directory);
+	if (UNLIKELY(directory_len == 0))
+		return false;
+	if (UNLIKELY(directory_len + 1 + name_len >= PATH_MAX))
+		return false;
+	memcpy(candidate, directory, directory_len);
+	if (candidate[directory_len - 1] != '/')
+		candidate[directory_len++] = '/';
+	memcpy(candidate + directory_len, name, name_len);
+	candidate[directory_len + name_len] = '\0';
+
+	if (UNLIKELY(lstat(candidate, &statl) < 0 || !S_ISLNK(statl.st_mode)))
+		return false;
+	status = resolve_faked_hard_link(candidate, final);
+	if (UNLIKELY(status < 0))
+		return false;
+	return lstat(final, &statl) == 0 && S_ISREG(statl.st_mode);
+}
+
+static int fix_getdents64_dirent_types(Extension *extension)
+{
+	Tracee *tracee = TRACEE(extension);
+	word_t result_word = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+	word_t buffer_addr;
+	word_t count;
+	char directory[PATH_MAX] ALIGNED;
+	unsigned char *buffer;
+	size_t result;
+	size_t offset = 0;
+	bool changed = false;
+	int status = 0;
+
+	if ((int64_t) result_word <= 0)
+		return 0;
+	result = (size_t) result_word;
+	count = peek_reg(tracee, ORIGINAL, SYSARG_3);
+	if (result > count || result > MAX_DIRENT_BUFFER)
+		return 0;
+	status = readlink_proc_pid_fd(tracee->pid,
+			(int) peek_reg(tracee, ORIGINAL, SYSARG_1), directory);
+	if (UNLIKELY(status < 0))
+		return 0;
+
+	buffer = malloc(result);
+	if (UNLIKELY(buffer == NULL))
+		return -ENOMEM;
+	buffer_addr = peek_reg(tracee, ORIGINAL, SYSARG_2);
+	status = read_data(tracee, buffer, buffer_addr, result);
+	if (UNLIKELY(status < 0)) {
+		free(buffer);
+		return status;
+	}
+
+	while (offset < result) {
+		unsigned short reclen;
+		unsigned char *record = buffer + offset;
+		const unsigned char *name;
+		const unsigned char *nul;
+
+		if (result - offset < LINUX_DIRENT64_NAME_OFFSET)
+			break;
+        memcpy(&reclen, record + LINUX_DIRENT64_RECLEN_OFFSET,
+               sizeof(reclen));
+		if (reclen < LINUX_DIRENT64_NAME_OFFSET || reclen > result - offset)
+			break;
+		name = record + LINUX_DIRENT64_NAME_OFFSET;
+		nul = memchr(name, '\0', reclen - LINUX_DIRENT64_NAME_OFFSET);
+		if (nul != NULL && record[LINUX_DIRENT64_D_TYPE_OFFSET] == DT_LNK &&
+		    is_l2s_fake_entry(directory, (const char *)name,
+				      (size_t)(nul - name))) {
+			record[LINUX_DIRENT64_D_TYPE_OFFSET] = DT_REG;
+			changed = true;
+		}
+		offset += reclen;
+	}
+
+	if (changed)
+		status = write_data(tracee, buffer_addr, buffer, result);
+	free(buffer);
+	return status < 0 ? status : 0;
+}
+
+int link2symlink_enable_dirent(Tracee *tracee)
+{
+	Extension *extension;
+	Link2SymlinkConfig *config;
+
+	if (UNLIKELY(tracee == NULL))
+		return -EINVAL;
+
+	extension = get_extension(tracee, link2symlink_callback);
+	if (extension == NULL)
+		return initialize_extension(tracee, link2symlink_callback, "dirent");
+
+	config = get_config(extension, true);
+	if (UNLIKELY(config == NULL))
+		return -ENOMEM;
+	config->dirent_enabled = true;
+	extension->filtered_sysnums = link2symlink_dirent_filtered_sysnums;
+	return 0;
 }
 
 /* 经假硬链接打开的 fd 登记表：内核只知道 l2s 存储名，这里记住 tracee
@@ -910,11 +1092,25 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
             return 0;
         }
     }
+    case SYSCALL_CHAINED_EXIT: {
+		Link2SymlinkConfig *config = get_config(extension, false);
+		if (config != NULL && config->dirent_enabled
+		    && get_sysnum(tracee, ORIGINAL) == PR_getdents64)
+			return fix_getdents64_dirent_types(extension);
+		return 0;
+	}
     case SYSCALL_EXIT_END: {
+		Link2SymlinkConfig *config = get_config(extension, false);
+		Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
+		if (config != NULL && config->dirent_enabled &&
+		    sysnum == PR_getdents64) {
+			status = fix_getdents64_dirent_types(extension);
+			if (UNLIKELY(status < 0))
+				return status;
+		}
         /* open 类 syscall 的 exit 停靠只为拿 fd 号（上游 7ff389a1
          * 登记 fd_cache）；fd 可为任意非负值，先于其他 exit 处理。 */
-        if (UNLIKELY(is_open_syscall(get_sysnum(tracee, ORIGINAL)))) {
-            Link2SymlinkConfig *config = get_config(extension, false);
+        if (UNLIKELY(is_open_syscall(sysnum))) {
             word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
             if (config != NULL && config->pending_link[0] != '\0') {
                 if ((int) result >= 0)
@@ -926,33 +1122,17 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
         return handle_sysexit_end(extension);
     }
     case INITIALIZATION: {
-        static const FilteredSysnum filtered_sysnums[] = {
-            /* open 家族 FILTER_SYSEXIT（上游 7ff389a1 移植所需）：exit 停靠
-             * 拿 fd 号登记 fd_cache。直接设 sysexit_pending 会在旧 seccomp
-             * 模式触发 event.c IS_IN_SYSENTER 断言（真机复现）——fork 原生
-             * 机制 = FILTER_SYSEXIT（flags 与基础列表按位或合并）。 */
-            { PR_creat,       FILTER_SYSEXIT },
-            { PR_open,        FILTER_SYSEXIT },
-            { PR_openat,      FILTER_SYSEXIT },
-            { PR_openat2,     FILTER_SYSEXIT },
-            { PR_link,        FILTER_SYSEXIT },
-            { PR_linkat,      FILTER_SYSEXIT },
-            { PR_unlink,      FILTER_SYSEXIT },
-            { PR_unlinkat,    FILTER_SYSEXIT },
-            { PR_fstat,       FILTER_SYSEXIT },
-            { PR_fstat64,     FILTER_SYSEXIT },
-            { PR_fstatat64,   FILTER_SYSEXIT },
-            { PR_lstat,       FILTER_SYSEXIT },
-            { PR_lstat64,     FILTER_SYSEXIT },
-            { PR_newfstatat,  FILTER_SYSEXIT },
-            { PR_stat,        FILTER_SYSEXIT },
-            { PR_stat64,      FILTER_SYSEXIT },
-            { PR_rename,      FILTER_SYSEXIT },
-            { PR_renameat,    FILTER_SYSEXIT },
-            { PR_renameat2,   FILTER_SYSEXIT },
-            FILTERED_SYSNUM_END,
-        };
-        extension->filtered_sysnums = (FilteredSysnum *)filtered_sysnums;
+		const char *option = (const char *)data1;
+		bool dirent_enabled = option != NULL && strcmp(option, "dirent") == 0;
+		if (dirent_enabled) {
+			Link2SymlinkConfig *config = get_config(extension, true);
+			if (config == NULL)
+				return -ENOMEM;
+			config->dirent_enabled = true;
+		}
+		extension->filtered_sysnums = dirent_enabled
+			? link2symlink_dirent_filtered_sysnums
+			: link2symlink_filtered_sysnums;
         return 0;
     }
     case GUEST_PATH: {
@@ -1072,6 +1252,13 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
     case INHERIT_CHILD: {
         Extension *parent = (Extension *)data1;
         extension->filtered_sysnums = parent->filtered_sysnums;
+		Link2SymlinkConfig *parent_config = get_config(parent, false);
+		if (parent_config != NULL && parent_config->dirent_enabled) {
+			Link2SymlinkConfig *config = get_config(extension, true);
+			if (config == NULL)
+				return -ENOMEM;
+			config->dirent_enabled = true;
+		}
         return 0;
     }
     case SIGSYS_OCC:

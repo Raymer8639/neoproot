@@ -9,7 +9,8 @@ PROOT ?= ../src/neoproot
 TEST_PROGS = test_argv test_echo test_file_ops test_dir_ops test-openat2
 
 # 测试脚本列表
-TEST_SCRIPTS = basic_test.sh advanced_test.sh test-security-regressions.sh
+TEST_SCRIPTS = basic_test.sh advanced_test.sh test-security-regressions.sh \
+	test-link2symlink-dirent.sh
 
 # 默认目标
 all: $(TEST_PROGS)

@@ -58,6 +58,7 @@ static int handle_option_i(Tracee *, const Cli *, const char *);
 static int handle_option_R(Tracee *, const Cli *, const char *);
 static int handle_option_S(Tracee *, const Cli *, const char *);
 static int handle_option_link2symlink(Tracee *, const Cli *, const char *);
+static int handle_option_link2symlink_dirent(Tracee *, const Cli *, const char *);
 static int handle_option_ashmem_memfd(Tracee *, const Cli *, const char *);
 static int handle_option_sysvipc(Tracee *, const Cli *, const char *);
 static int handle_option_kill_on_exit(Tracee *, const Cli *, const char *);
@@ -206,6 +207,16 @@ static Cli proot_cli = {
             .handler = handle_option_i,
             .description = "Fake UID:GID.",
             .detail = ""
+        },
+        {
+            .class = "Extensions",
+            .arguments = {
+                { .name = "--link2symlink-dirent", 0, NULL },
+                { .name = NULL, 0, NULL }
+            },
+            .handler = handle_option_link2symlink_dirent,
+            .description = "Report emulated hardlinks as regular files in readdir().",
+            .detail = "Also enables --link2symlink. This opt-in mode intercepts getdents64."
         },
         {
             .class = "Extensions",
