@@ -12,7 +12,7 @@ fi
 
 # 创建复杂的测试环境
 TEST_ROOT=$(mktemp -d)
-mkdir -p "$TEST_ROOT"/{bin,lib,home,etc,usr/bin}
+mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/lib" "$TEST_ROOT/home" "$TEST_ROOT/etc" "$TEST_ROOT/usr/bin"
 
 # 创建测试程序
 cat > "$TEST_ROOT/test-script.sh" << 'EOF'
@@ -30,7 +30,16 @@ export TEST_VAR="SciCat_PRoot_Test_Value"
 
 # 测试 1: 复杂路径绑定
 echo "测试 1: 复杂路径绑定和环境变量"
-$PROOT -r "$TEST_ROOT" -w / -b "/tmp:/host-tmp" env TEST_VAR="$TEST_VAR" /test-script.sh
+if [ -n "${PREFIX:-}" ]; then
+    HOST_SH=$(readlink -f "$PREFIX/bin/sh")
+    RUNTIME_BINDS="-b $PREFIX:$PREFIX -b /system -b /apex"
+else
+    HOST_SH=$(readlink -f /bin/sh)
+    RUNTIME_BINDS="-b /usr -b /lib -b /lib64"
+fi
+ln -s "$HOST_SH" "$TEST_ROOT/bin/sh"
+
+$PROOT -r "$TEST_ROOT" -w / -b "/tmp:/host-tmp" $RUNTIME_BINDS env TEST_VAR="$TEST_VAR" /test-script.sh
 if [ $? -eq 0 ]; then
     echo "测试 1: 通过"
 else

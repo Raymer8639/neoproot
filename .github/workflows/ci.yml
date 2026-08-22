@@ -27,6 +27,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang llvm lld libtalloc-dev upx binutils
 
+      - name: Verify process_vm build
+        run: sh tests/test-process-vm-build.sh
+
       - name: Build neoproot
         run: |
           if [ "$MODE" = "release" ]; then
@@ -34,7 +37,7 @@ jobs:
             make -C src neoproot CC=clang CXX=clang++
           else
             # 通用构建（例如老设备可降级指令集），验证 MARCH 可覆盖性
-            make -C src neoproot CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
+            make -C src -B neoproot CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
           fi
 
       - name: Check binary
@@ -49,7 +52,6 @@ jobs:
           make -s all
           PROOT=../src/neoproot sh basic_test.sh
           PROOT=../src/neoproot sh advanced_test.sh
-          PROOT=../src/neoproot sh test-process-vm-build.sh
           PROOT=../src/neoproot sh test-bwrap-oldroot-bind.sh
           PROOT=../src/neoproot sh test-tracer-guard.sh
 
