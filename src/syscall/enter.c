@@ -108,7 +108,24 @@ static int translate_path2(Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg 
     if (path[0] == '\0')
         return 0;
 
-    status = translate_path(tracee, new_path, dir_fd, path, type != SYMLINK);
+    /* bwrap keeps an O_PATH fd for /proc across pivot_root and then opens
+     * self/mountinfo relative to that fd. A raw pass-through reaches the
+     * host mount table, which omits neoproot's virtual /oldroot. Reuse the
+     * existing virtual mountinfo generator with a stable tracee-pid path; its
+     * temporary absolute result also avoids the child PID namespace. */
+    if (is_proc_fd_mountinfo(tracee, dir_fd, path)) {
+        char mountinfo_path[64];
+        int length = snprintf(mountinfo_path, sizeof(mountinfo_path),
+                              "/proc/%d/mountinfo", tracee->pid);
+
+        if (length < 0 || (size_t)length >= sizeof(mountinfo_path))
+            return -ENAMETOOLONG;
+        status = translate_path(tracee, new_path, AT_FDCWD, mountinfo_path,
+                                type != SYMLINK);
+    } else {
+        status = translate_path(tracee, new_path, dir_fd, path,
+                                type != SYMLINK);
+    }
     if (status < 0)
         return status;
 
@@ -321,6 +338,22 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
         if (b == root_binding || strcmp(b->guest.path, "/") == 0)
             continue;
 
+        if (strcmp(b->guest.path, new_root_guest) == 0) {
+            if (have_put_old && b->covered != NULL) {
+                char aliased[PATH_MAX];
+                int written;
+
+                written = snprintf(aliased, sizeof(aliased), "%s%s",
+                                   put_old_after, b->guest.path);
+                if (written >= 0 && (size_t) written < sizeof(aliased))
+                    (void) insort_binding4(tracee, tracee->fs,
+                                           b->covered->host.path, aliased,
+                                           b->covered->mount_kind);
+            }
+            remove_binding_from_all_lists(tracee, b);
+            continue;
+        }
+
         blen = strlen(b->guest.path);
 
         /* new_root 下的 bind 随 pivot 一起移动：/newroot/usr -> /usr。 */
@@ -401,7 +434,7 @@ static void emulate_umount(Tracee *tracee, const char *target_user)
 
     if (strcmp(guest_path, "/oldroot") == 0)
         TALLOC_FREE(tracee->fs->cwd_alias_prefix);
-    remove_binding_from_all_lists(tracee, binding);
+    remove_binding_and_restore_covered(tracee, binding);
 }
 
 void apply_emulated_umount(Tracee *tracee)
