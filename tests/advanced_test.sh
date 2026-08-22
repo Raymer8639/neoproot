@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # SciCat PRoot 高级功能测试脚本
 # 测试复杂的路径绑定和环境变量
 
