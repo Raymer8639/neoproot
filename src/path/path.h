@@ -67,6 +67,8 @@ size_t substitute_path_prefix(char path[PATH_MAX], size_t old_prefix_length,
                               const char *new_prefix, size_t new_prefix_length);
 
 int readlink_proc_pid_fd(pid_t pid, int fd, char path[PATH_MAX]);
+bool is_proc_fd_mountinfo(const Tracee *tracee, int dir_fd,
+                          const char *user_path);
 
 #define AT_FD(dirfd, path) ((dirfd) != AT_FDCWD && ((path) != NULL && (path)[0] != '/'))
 
