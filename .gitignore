@@ -14,5 +14,6 @@
 /tests/test_file_ops
 /tests/test_dir_ops
 /tests/test_output.txt
+/.worktrees/
 
 *~
