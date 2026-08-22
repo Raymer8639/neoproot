@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # SciCat PRoot 功能测试脚本
 # 验证基本的路径重定向功能
 
