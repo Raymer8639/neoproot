@@ -44,6 +44,13 @@ HAVE_SECCOMP_FILTER := $(shell printf '#include <linux/seccomp.h>\n#include <lin
 ifeq ($(HAVE_SECCOMP_FILTER),1)
   CPPFLAGS += -DHAVE_SECCOMP_FILTER
 endif
+
+# process_vm_readv/writev avoids ptrace word-at-a-time memory access.  Keep the
+# probe under the same CPPFLAGS as the real build so _GNU_SOURCE is applied.
+HAVE_PROCESS_VM := $(shell $(CC) $(CPPFLAGS) -x c $(SRC).check_process_vm.c -o /dev/null 2>/dev/null && echo 1)
+ifeq ($(HAVE_PROCESS_VM),1)
+  CPPFLAGS += -DHAVE_PROCESS_VM
+endif
 ifeq ($(HAVE_LLD),)
 LDFLAGS := $(subst --icf=all,,$(LDFLAGS))
 else

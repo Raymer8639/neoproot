@@ -21,6 +21,8 @@ typedef struct binding {
 	bool need_substitution;
 	bool must_exist;
 	BindingMountKind mount_kind;
+	/* Strong reference to the exact guest binding hidden by this replacement. */
+	struct binding *covered;
 
 	struct {
 		CIRCLEQ_ENTRY(binding) pending;
@@ -51,5 +53,6 @@ const char *get_root(const Tracee *tracee);
 int substitute_binding(const Tracee *tracee, Side side, char path[PATH_MAX]);
 
 void remove_binding_from_all_lists(const Tracee *tracee, Binding *binding);
+void remove_binding_and_restore_covered(const Tracee *tracee, Binding *binding);
 
 #endif /* BINDING_H */

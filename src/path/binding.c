@@ -231,6 +231,8 @@ static void insort_binding(const Tracee *restrict tracee, Side side, Binding *re
 			}
 			if (tracee->verbose > 0 && getenv("PROOT_IGNORE_MISSING_BINDINGS") == NULL)
 				note(tracee, WARNING, USER, "duplicate binding, keeping last: %s", bp->path);
+			/* Keep the covered layer alive after its list references are removed. */
+			binding->covered = talloc_reference(binding, iterator);
 			CIRCLEQ_INSERT_AFTER_(tracee, iterator, binding, side);
 			remove_binding_from_all_lists(tracee, iterator);
 			return;
@@ -252,6 +254,15 @@ static void insort_binding2(const Tracee *restrict tracee, Binding *restrict bin
 	binding->need_substitution = (compare_paths(binding->host.path, binding->guest.path) != PATHS_ARE_EQUAL);
 	insort_binding(tracee, GUEST, binding);
 	insort_binding(tracee, HOST, binding);
+}
+
+void remove_binding_and_restore_covered(const Tracee *restrict tracee,
+					Binding *restrict binding) {
+	Binding *covered = binding->covered;
+
+	remove_binding_from_all_lists(tracee, binding);
+	if (covered != NULL)
+		insort_binding2(tracee, covered);
 }
 
 Binding *insort_binding4(const Tracee *restrict tracee, const TALLOC_CTX *restrict ctx,

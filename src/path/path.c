@@ -299,6 +299,23 @@ int readlink_proc_pid_fd(pid_t pid, int fd, char path[PATH_MAX])
     return 0;
 }
 
+bool is_proc_fd_mountinfo(const Tracee *tracee, int dir_fd,
+                          const char *user_path)
+{
+    char proc_path[PATH_MAX];
+
+    if (tracee == NULL || dir_fd == AT_FDCWD || user_path == NULL ||
+        user_path[0] == '/' ||
+        (strcmp(user_path, "self/mountinfo") != 0 &&
+         strcmp(user_path, "thread-self/mountinfo") != 0))
+        return false;
+
+    if (readlink_proc_pid_fd(tracee->pid, dir_fd, proc_path) < 0)
+        return false;
+
+    return strcmp(proc_path, "/proc") == 0;
+}
+
 // 仅修改了这个入口函数，兼容线程池+原版双逻辑
 int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
                    const char *user_path, bool deref_final)
@@ -321,11 +338,19 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
     }
     else if (dir_fd != AT_FDCWD) {
         ret = readlink_proc_pid_fd(tracee->pid, dir_fd, result);
-        if (ret < 0) return ret;
-        if (result[0] != '/') return -ENOTDIR;
+        if (ret < 0)
+            return ret;
+        if (result[0] != '/')
+            return -ENOTDIR;
 
-        ret = detranslate_path(tracee, result, NULL);
-        if (ret < 0) return ret;
+        /* A directory fd referencing the real host procfs must remain the
+         * guest /proc base even after pivot_root has exposed that same host
+         * path through /oldroot. */
+        if (strcmp(result, "/proc") != 0) {
+            ret = detranslate_path(tracee, result, NULL);
+            if (ret < 0)
+                return ret;
+        }
     }
     else {
         ret = getcwd2(tracee, result);
