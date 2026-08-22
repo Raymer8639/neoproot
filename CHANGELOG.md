@@ -3,6 +3,23 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.9.0] - 2026-08-23
+
+**Compatibility, safety, and regression coverage release**
+
+- link2symlink: add the opt-in `--link2symlink-dirent` mode, which reports
+  verified `.l2s` pseudo-hard-links as regular directory entries while keeping
+  the high-performance default unchanged.
+- Performance: restore Termux `HAVE_PROCESS_VM` build detection so eligible
+  builds use `process_vm_readv` and `process_vm_writev` instead of ptrace
+  word-at-a-time memory access.
+- bwrap/Codex sandbox: preserve covered bindings through pivot/oldroot and
+  provide the virtual mountinfo view for inherited `/proc` directory fds.
+- Safety: reject startup under a pre-existing ptrace tracer and direct users
+  to run neoproot from the Termux host rather than nesting PRoot.
+- CI: make basic and advanced smoke-script failures fatal and add process-vm,
+  covered-oldroot, and traced-startup regressions to both ARM64 build modes.
+
 ## [v5.8.0] - 2026-08-19
 
 **Android/Termux 容器与 sandbox 兼容性发布**
