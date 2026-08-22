@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <errno.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
@@ -18,8 +19,47 @@ static const char *find_shell(void)
     return "/system/bin/sh";
 }
 
+
+static int reject_traced_startup(void)
+{
+    FILE *status;
+    char line[128];
+
+    status = fopen("/proc/self/status", "r");
+    if (status == NULL)
+        return 0;
+
+    while (fgets(line, sizeof(line), status) != NULL) {
+        char *end;
+        long tracer_pid;
+
+        if (strncmp(line, "TracerPid:", sizeof("TracerPid:") - 1) != 0)
+            continue;
+        errno = 0;
+        tracer_pid = strtol(line + sizeof("TracerPid:") - 1, &end, 10);
+        fclose(status);
+        while (*end == 32 || *end == 9 || *end == 10)
+            end++;
+        if (errno != 0 || end == line + sizeof("TracerPid:") - 1
+            || *end != 0 || tracer_pid <= 0)
+            return 0;
+
+        fprintf(stderr,
+                "neoproot: refusing to start while already traced (TracerPid=%ld).\n"
+                "Run neoproot from the Termux host after exiting the current PRoot container.\n",
+                tracer_pid);
+        return 1;
+    }
+
+    fclose(status);
+    return 0;
+}
+
 int main(int argc, char *const argv[])
 {
+    if (reject_traced_startup())
+        return EXIT_FAILURE;
+
     // 要传递给termux的命令
     char *shell_cmd = 
         "termux-wake-lock 2>/dev/null; "
