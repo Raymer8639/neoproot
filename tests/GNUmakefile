@@ -12,7 +12,8 @@ TEST_PROGS = test_argv test_echo test_file_ops test_dir_ops test-openat2
 TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-runtime-bindings.sh test-security-regressions.sh \
 	test-link2symlink-dirent.sh test-bwrap-oldroot-bind.sh \
-	test-bwrap-proc-dirfd.sh test-tracer-guard.sh
+	test-bwrap-proc-dirfd.sh test-tracer-guard.sh \
+	test-8d3c07f5.sh
 
 # 默认目标
 all: $(TEST_PROGS)
@@ -47,7 +48,17 @@ test: all
 	done
 	@for script in $(TEST_SCRIPTS); do \
 		echo "运行测试脚本 $$script..."; \
-		sh "$$script"; \
+		if sh "$$script"; then \
+			:; \
+		else \
+			status=$$?; \
+			if [ "$$status" -eq 125 ]; then \
+				echo "跳过测试脚本 $$script（缺少前置条件）"; \
+			else \
+				echo "测试脚本 $$script 失败（退出码 $$status）"; \
+				exit "$$status"; \
+			fi; \
+		fi; \
 	done
 
 # 清理编译产物

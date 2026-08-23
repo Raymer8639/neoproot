@@ -58,9 +58,172 @@ static int decrement_link_count(Tracee *tracee, Reg sysarg);
 static bool is_l2s_internal_path(const char *path);
 static bool parse_l2s_final_count(const char *path, int *count);
 
+/* The backing directory is outside normal tracee path translation.  Cache its
+ * normalized name and anchor direct-child operations to the checked inode so
+ * replacing the pathname with a symlink cannot redirect host-side writes. */
+static char l2s_directory[PATH_MAX];
+static size_t l2s_directory_length;
+static int l2s_directory_fd = -1;
+static bool l2s_directory_known;
+
+static int l2s_access(const char *path) UNUSED;
+static int l2s_lstat(const char *path, struct stat *st) UNUSED;
+static int l2s_symlink(const char *target, const char *path) UNUSED;
+static int l2s_unlink(const char *path) UNUSED;
+static int l2s_rename(const char *old_path, const char *new_path) UNUSED;
+static int l2s_open(const char *path, int flags, mode_t mode) UNUSED;
+
+static bool get_l2s_directory(void) {
+    const char *value;
+    size_t length;
+
+    if (l2s_directory_known)
+        return l2s_directory[0] != '\0';
+
+    l2s_directory_known = true;
+    value = getenv("PROOT_L2S_DIR");
+    if (value == NULL || value[0] == '\0')
+        return false;
+
+    length = strlen(value);
+    if (length >= PATH_MAX)
+        return false;
+    while (length > 1 && value[length - 1] == '/')
+        length--;
+
+    /* A root backing directory is the legacy path-based mode. */
+    if (length == 1 && value[0] == '/')
+        return false;
+
+    memcpy(l2s_directory, value, length);
+    l2s_directory[length] = '\0';
+    l2s_directory_length = length;
+    return true;
+}
+
+static int open_l2s_directory(void) {
+    if (l2s_directory_fd >= 0)
+        return l2s_directory_fd;
+    if (!get_l2s_directory())
+        return -ENOENT;
+
+    l2s_directory_fd = open(l2s_directory,
+                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (l2s_directory_fd < 0)
+        return errno > 0 ? -errno : -ENOENT;
+    return l2s_directory_fd;
+}
+
+/* Select descriptor-relative addressing only for a direct child.  Nested
+ * paths and legacy chains retain their original pathname behavior. */
+static int l2s_entry(const char *path, int *dir_fd, const char **name) {
+    const char *base;
+    int fd;
+    size_t path_length;
+
+    if (UNLIKELY(path == NULL || dir_fd == NULL || name == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    *dir_fd = -1;
+    *name = path;
+
+    if (!get_l2s_directory())
+        return 0;
+    path_length = strlen(path);
+    if (path_length <= l2s_directory_length ||
+        strncmp(path, l2s_directory, l2s_directory_length) != 0 ||
+        path[l2s_directory_length] != '/')
+        return 0;
+
+    base = path + l2s_directory_length + 1;
+    if (base[0] == '\0' || strchr(base, '/') != NULL)
+        return 0;
+
+    fd = open_l2s_directory();
+    if (fd < 0) {
+        errno = -fd;
+        return -1;
+    }
+    *dir_fd = fd;
+    *name = base;
+    return 0;
+}
+
+static int l2s_access(const char *path) {
+    const char *name;
+    int dir_fd;
+
+    if (l2s_entry(path, &dir_fd, &name) < 0)
+        return -1;
+    return dir_fd < 0 ? access(path, F_OK) : faccessat(dir_fd, name, F_OK, 0);
+}
+
+static int l2s_lstat(const char *path, struct stat *st) {
+    const char *name;
+    int dir_fd;
+
+    if (l2s_entry(path, &dir_fd, &name) < 0)
+        return -1;
+    return dir_fd < 0 ? lstat(path, st)
+                      : fstatat(dir_fd, name, st, AT_SYMLINK_NOFOLLOW);
+}
+
+static ssize_t l2s_readlink(const char *path, char *buf, size_t size) {
+    const char *name;
+    int dir_fd;
+
+    if (l2s_entry(path, &dir_fd, &name) < 0)
+        return -errno;
+    return dir_fd < 0 ? readlink(path, buf, size) : readlinkat(dir_fd, name, buf, size);
+}
+
+static int l2s_symlink(const char *target, const char *path) {
+    const char *name;
+    int dir_fd;
+
+    if (l2s_entry(path, &dir_fd, &name) < 0)
+        return -1;
+    return dir_fd < 0 ? symlink(target, path) : symlinkat(target, dir_fd, name);
+}
+
+static int l2s_unlink(const char *path) {
+    const char *name;
+    int dir_fd;
+
+    if (l2s_entry(path, &dir_fd, &name) < 0)
+        return -1;
+    return dir_fd < 0 ? unlink(path) : unlinkat(dir_fd, name, 0);
+}
+
+static int l2s_rename(const char *old_path, const char *new_path) {
+    const char *old_name;
+    const char *new_name;
+    int old_dir_fd;
+    int new_dir_fd;
+
+    if (l2s_entry(old_path, &old_dir_fd, &old_name) < 0 ||
+        l2s_entry(new_path, &new_dir_fd, &new_name) < 0)
+        return -1;
+    if (old_dir_fd < 0 && new_dir_fd < 0)
+        return rename(old_path, new_path);
+    return renameat(old_dir_fd < 0 ? AT_FDCWD : old_dir_fd, old_name,
+                    new_dir_fd < 0 ? AT_FDCWD : new_dir_fd, new_name);
+}
+
+static int l2s_open(const char *path, int flags, mode_t mode) {
+    const char *name;
+    int dir_fd;
+
+    if (l2s_entry(path, &dir_fd, &name) < 0)
+        return -1;
+    return dir_fd < 0 ? open(path, flags, mode)
+                      : openat(dir_fd, name, flags, mode);
+}
+
 static FORCE_INLINE int my_readlink(const char *link_path, char *buf, size_t buf_size) {
     if (UNLIKELY(!link_path || !buf || buf_size < 1)) return -EINVAL;
-    ssize_t size = readlink(link_path, buf, buf_size - 1);
+    ssize_t size = l2s_readlink(link_path, buf, buf_size - 1);
     if (UNLIKELY(size < 0)) return -errno;
     if (UNLIKELY((size_t)size >= buf_size - 1)) return -ENAMETOOLONG;
     buf[size] = '\0';
@@ -90,7 +253,9 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
     char dest_path[PATH_MAX] ALIGNED;
     struct stat statl;
     char *filename;
-    const char *l2s_dir;
+    bool has_l2s_dir;
+    const char *configured_l2s_dir;
+    const char *raw_l2s_dir;
     size_t path_len, prefix_len;
     ssize_t size;
     int status, link_count, suffix = 1;
@@ -99,8 +264,12 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
     size = read_string(tracee, original, peek_reg(tracee, CURRENT, src_sysarg), PATH_MAX);
     if (UNLIKELY(size < 0)) return size;
     if (UNLIKELY(size >= PATH_MAX)) return -ENAMETOOLONG;
+    raw_l2s_dir = getenv("PROOT_L2S_DIR");
+    if (UNLIKELY(raw_l2s_dir != NULL && raw_l2s_dir[0] != '\0' &&
+                 strlen(raw_l2s_dir) >= PATH_MAX))
+        return -ENAMETOOLONG;
 
-    status = lstat(original, &statl);
+    status = l2s_lstat(original, &statl);
     if (UNLIKELY(status < 0)) return -errno;
     if (UNLIKELY(S_ISDIR(statl.st_mode))) return -EPERM;
 
@@ -115,10 +284,19 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
     } else {
         filename = get_filename(original, &path_len);
         prefix_len = path_len - strlen(filename);
-        l2s_dir = getenv("PROOT_L2S_DIR");
-        if (LIKELY(l2s_dir && l2s_dir[0])) {
-            size_t dir_len = strlen(l2s_dir);
-            if (UNLIKELY(dir_len + 1 + PREFIX_LEN + strlen(filename) + 5 >= PATH_MAX))
+        has_l2s_dir = get_l2s_directory();
+        configured_l2s_dir = raw_l2s_dir;
+        if (LIKELY(has_l2s_dir || (configured_l2s_dir != NULL &&
+                                   configured_l2s_dir[0] == '/' &&
+                                   configured_l2s_dir[1] == '\0'))) {
+            const char *l2s_dir = has_l2s_dir ? l2s_directory : "/";
+            size_t dir_len = has_l2s_dir ? l2s_directory_length : 1;
+            if (UNLIKELY(has_l2s_dir)) {
+                status = open_l2s_directory();
+                if (status < 0)
+                    return status;
+            }
+            if (UNLIKELY(dir_len + PREFIX_LEN + strlen(filename) + 11 >= PATH_MAX))
                 return -ENAMETOOLONG;
             strcpy(intermediate, l2s_dir);
             if (l2s_dir[dir_len - 1] != '/') strcat(intermediate, "/");
@@ -136,20 +314,20 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
         struct stat l2s_st;
         do {
             snprintf(new_intermediate, PATH_MAX, "%s%04d", intermediate, suffix++);
-        } while (lstat(new_intermediate, &l2s_st) == 0 && suffix < MAX_LINK_SUFFIX);
+        } while (l2s_lstat(new_intermediate, &l2s_st) == 0 && suffix < MAX_LINK_SUFFIX);
         /* 用 lstat（不跟随）替代 access：access 跟随 symlink，旧残留断链
          * （.l2s.xxxNNNN → 不存在的 final）会被误判为"名字可用"，随后
          * symlink 报 EEXIST（symlink 不跟随，能看见断链本身） */
         strcpy(intermediate, new_intermediate);
         snprintf(final, PATH_MAX, "%s.0002", intermediate);
-        status = rename(original, final);
+        status = l2s_rename(original, final);
         if (UNLIKELY(status < 0)) {
             /* 并发竞态：pnpm 多 worker 同时 link 同一 store 文件（内容寻址，
              * 多包共享同内容）。数据已被其他 worker rename 走（同 hash 链
              * 已建好）→ 直接把 dest 链接到已存在的中间链接，链内容相同安全 */
             if (errno == ENOENT) {
                 status = read_path(tracee, dest_path, peek_reg(tracee, CURRENT, dest_sysarg));
-                if (LIKELY(status >= 0) && lstat(intermediate, &l2s_st) == 0) {
+                if (LIKELY(status >= 0) && l2s_lstat(intermediate, &l2s_st) == 0) {
                     status = symlink(intermediate, dest_path);
                     if (LIKELY(status == 0)) {
                         poke_reg(tracee, SYSARG_RESULT, 0);
@@ -162,16 +340,16 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
         }
         status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t)original, (intptr_t)final);
         if (UNLIKELY(status < 0)) return status;
-        status = symlink(final, intermediate);
+        status = l2s_symlink(final, intermediate);
         if (UNLIKELY(status < 0)) {
             if (errno == EEXIST) {
                 /* 并发或残留：中间链接名已存在。检查它是否可用：
                  * lstat 确认存在 + readlink 目标存在 → 复用（同 hash 内容相同）；
                  * 断链（目标不存在）→ 删除重建 */
                 char existing[PATH_MAX] ALIGNED;
-                if (lstat(intermediate, &l2s_st) == 0 &&
+                if (l2s_lstat(intermediate, &l2s_st) == 0 &&
                     my_readlink(intermediate, existing, PATH_MAX) >= 0 &&
-                    access(existing, F_OK) == 0) {
+                    l2s_access(existing) == 0) {
                     /* 有效链：复用。数据同 hash 内容相同（我们的 rename
                      * 覆盖同内容无害）。重建 original 链接 + dest 链接 */
                     if (access(original, F_OK) != 0)
@@ -187,8 +365,8 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
                     }
                 } else {
                     /* 断链残留：删除后重建自己的链 */
-                    unlink(intermediate);
-                    if (symlink(final, intermediate) == 0) {
+                    l2s_unlink(intermediate);
+                    if (l2s_symlink(final, intermediate) == 0) {
                         status = symlink(intermediate, original);
                         if (UNLIKELY(status < 0 && errno != EEXIST)) return -errno;
                         goto dest_link;
@@ -212,14 +390,14 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
             return -EMLINK;
         strncpy(new_final, final, final_len - 4);
         snprintf(new_final + final_len - 4, 5, "%04d", link_count);
-        status = rename(final, new_final);
+        status = l2s_rename(final, new_final);
         if (UNLIKELY(status < 0)) return -errno;
         status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t)final, (intptr_t)new_final);
         if (UNLIKELY(status < 0)) return status;
         strcpy(final, new_final);
-        status = unlink(intermediate);
+        status = l2s_unlink(intermediate);
         if (UNLIKELY(status < 0)) return -errno;
-        status = symlink(final, intermediate);
+        status = l2s_symlink(final, intermediate);
         if (UNLIKELY(status < 0)) return -errno;
     }
 
@@ -253,7 +431,7 @@ static HOT int decrement_link_count(Tracee *restrict tracee, Reg path_sysarg) {
     if (UNLIKELY(size < 0)) return size;
     if (UNLIKELY(size >= PATH_MAX)) return -ENAMETOOLONG;
 
-    status = lstat(original, &statl);
+    status = l2s_lstat(original, &statl);
     if (UNLIKELY(status < 0 || !S_ISLNK(statl.st_mode))) return 0;
 
     status = my_readlink(original, intermediate, PATH_MAX);
@@ -273,19 +451,19 @@ static HOT int decrement_link_count(Tracee *restrict tracee, Reg path_sysarg) {
     if (LIKELY(link_count > 0)) {
         strncpy(new_final, final, final_len - 4);
         snprintf(new_final + final_len - 4, 5, "%04d", link_count);
-        status = rename(final, new_final);
+        status = l2s_rename(final, new_final);
         if (UNLIKELY(status < 0)) return -errno;
         status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t)final, (intptr_t)new_final);
         if (UNLIKELY(status < 0)) return status;
         strcpy(final, new_final);
-        status = unlink(intermediate);
+        status = l2s_unlink(intermediate);
         if (UNLIKELY(status < 0)) return -errno;
-        status = symlink(final, intermediate);
+        status = l2s_symlink(final, intermediate);
         if (UNLIKELY(status < 0)) return -errno;
     } else {
-        status = unlink(intermediate);
+        status = l2s_unlink(intermediate);
         if (UNLIKELY(status < 0)) return -errno;
-        status = unlink(final);
+        status = l2s_unlink(final);
         if (UNLIKELY(status < 0)) return -errno;
         status = notify_extensions(tracee, LINK2SYMLINK_UNLINK, (intptr_t)final, 0);
         if (UNLIKELY(status < 0)) return status;
@@ -349,7 +527,7 @@ static HOT int handle_sysexit_end(Extension *extension) {
     }
 
     filename = get_filename(original, NULL);
-    status = lstat(original, &statl);
+    status = l2s_lstat(original, &statl);
     if (UNLIKELY(status < 0)) return 0;
     if (is_l2s_internal_path(original)) {
         if (S_ISLNK(statl.st_mode)) {
@@ -372,7 +550,7 @@ proc_intermediate:
     if (UNLIKELY(size < 0)) return size;
 
 proc_final:
-    status = lstat(final, &final_stat);
+    status = l2s_lstat(final, &final_stat);
     if (UNLIKELY(status < 0)) return -errno;
     int final_count;
     if (UNLIKELY(!parse_l2s_final_count(final, &final_count))) return 0;
@@ -586,12 +764,12 @@ static bool is_l2s_fake_entry(const char *directory, const char *name,
 	memcpy(candidate + directory_len, name, name_len);
 	candidate[directory_len + name_len] = '\0';
 
-	if (UNLIKELY(lstat(candidate, &statl) < 0 || !S_ISLNK(statl.st_mode)))
+    if (UNLIKELY(l2s_lstat(candidate, &statl) < 0 || !S_ISLNK(statl.st_mode)))
 		return false;
 	status = resolve_faked_hard_link(candidate, final);
 	if (UNLIKELY(status < 0))
 		return false;
-	return lstat(final, &statl) == 0 && S_ISREG(statl.st_mode);
+    return l2s_lstat(final, &statl) == 0 && S_ISREG(statl.st_mode);
 }
 
 static int fix_getdents64_dirent_types(Extension *extension)
@@ -827,10 +1005,10 @@ static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *pa
     /* 链内容可能是 guest 路径（/.l2s/.l2s.<name>，proot-distro 时代造的旧链）
      * 或 host 绝对路径（neoproot 容器会话造的链）。neoproot 进程运行在 host（Termux）
      * 侧，guest 路径 /.l2s/... 不可见，必须用 PROOT_L2S_DIR（host 绝对路径）定位。 */
-    const char *l2s_dir = getenv("PROOT_L2S_DIR");
+    bool has_l2s_dir = get_l2s_directory();
     char inter_host[PATH_MAX] ALIGNED, final_host[PATH_MAX] ALIGNED;
-    if (LIKELY(l2s_dir && l2s_dir[0] && strcmp(l2s_dir, "/") != 0)) {
-        snprintf(inter_host, sizeof(inter_host), "%s/%s", l2s_dir, filename);
+    if (LIKELY(has_l2s_dir)) {
+        snprintf(inter_host, sizeof(inter_host), "%s/%s", l2s_directory, filename);
     } else {
         strcpy(inter_host, intermediate);
     }
@@ -841,13 +1019,13 @@ static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *pa
      * 但统一用 readlink 更简洁）。final 是普通文件组件，lstat 安全。 */
     status = my_readlink(inter_host, final, PATH_MAX);
     if (UNLIKELY(status < 0)) return 0;
-    if (LIKELY(l2s_dir && l2s_dir[0] && strcmp(l2s_dir, "/") != 0)) {
+    if (LIKELY(has_l2s_dir)) {
         char *final_name = get_filename(final, NULL);
-        snprintf(final_host, sizeof(final_host), "%s/%s", l2s_dir, final_name);
+        snprintf(final_host, sizeof(final_host), "%s/%s", l2s_directory, final_name);
     } else {
         strcpy(final_host, final);
     }
-    status = lstat(final_host, &statl);
+    status = l2s_lstat(final_host, &statl);
     if (UNLIKELY(status < 0 || !S_ISREG(statl.st_mode))) return 0;
 
     /* 物化改为【复制】而非移动：数据永远保留在 final（.l2s 目录），
@@ -860,7 +1038,7 @@ static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *pa
      * 空间代价：被物化的文件多一份副本（仅限 open/exec 的文件），
      * 正确性优先。 */
     unlink(path); /* 删除链（不跟随），副本作为普通文件创建 */
-    int in_fd = open(final_host, O_RDONLY);
+    int in_fd = l2s_open(final_host, O_RDONLY, 0);
     int out_fd = open(path, O_WRONLY | O_CREAT | O_EXCL, statl.st_mode & 07777);
     if (LIKELY(in_fd >= 0 && out_fd >= 0)) {
         char buf[65536];
@@ -906,15 +1084,15 @@ static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *pa
             char new_final[PATH_MAX] ALIGNED;
             strncpy(new_final, final_host, final_len - 4);
             snprintf(new_final + final_len - 4, 5, "%04d", link_count);
-            if (LIKELY(rename(final_host, new_final) == 0)) {
+            if (LIKELY(l2s_rename(final_host, new_final) == 0)) {
                 notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t)final_host, (intptr_t)new_final);
-                unlink(inter_host);
-                symlink(new_final, inter_host);
+                l2s_unlink(inter_host);
+                l2s_symlink(new_final, inter_host);
                 VERBOSE(tracee, 1, "link2symlink: materialize 退链：final 改名 %s -> %s", final_host, new_final);
             }
         } else {
-            unlink(inter_host);
-            unlink(final_host);
+            l2s_unlink(inter_host);
+            l2s_unlink(final_host);
             notify_extensions(tracee, LINK2SYMLINK_UNLINK, (intptr_t)final_host, 0);
             VERBOSE(tracee, 1, "link2symlink: materialize 退链：家族除名 %s", final_host);
         }
@@ -950,12 +1128,12 @@ static FORCE_INLINE void translated_path(Extension *restrict extension, char *re
          * 此时翻译路径落在 rootfs 内而真实文件在 PROOT_L2S_DIR（可能在 rootfs 之外），
          * 需要映射回真实位置，否则 open/stat/readlink 会 ENOENT。
          * 翻译路径自身存在（L2S_DIR 未设置、文件在原目录）时无需映射。 */
-        if (UNLIKELY(access(translated_path, F_OK) != 0)) {
+        if (UNLIKELY(l2s_access(translated_path) != 0)) {
             char alt[PATH_MAX] ALIGNED;
-            const char *l2s_dir = getenv("PROOT_L2S_DIR");
-            if (LIKELY(l2s_dir && l2s_dir[0] && strcmp(l2s_dir, "/") != 0)) {
-                snprintf(alt, sizeof(alt), "%s/%s", l2s_dir, filename);
-                if (LIKELY(access(alt, F_OK) == 0)) {
+            bool has_l2s_dir = get_l2s_directory();
+            if (LIKELY(has_l2s_dir)) {
+                snprintf(alt, sizeof(alt), "%s/%s", l2s_directory, filename);
+                if (LIKELY(l2s_access(alt) == 0)) {
                     /* 上游 7ff389a1：open 重定向到 l2s 数据文件，记原链名
                      * （供 /proc/<pid>/fd/<fd> readlink 换名） */
                     if (UNLIKELY(is_open_syscall(sysnum)))
@@ -966,7 +1144,7 @@ static FORCE_INLINE void translated_path(Extension *restrict extension, char *re
             }
             /* PROOT_L2S_DIR=/ 或变量不可见时的常见情况：文件位于 host 根目录 */
             snprintf(alt, sizeof(alt), "/%s", filename);
-            if (LIKELY(access(alt, F_OK) == 0)) {
+            if (LIKELY(l2s_access(alt) == 0)) {
                 if (UNLIKELY(is_open_syscall(sysnum)))
                     remember_opened_link(extension, alt);
                 strcpy(translated_path, alt);
@@ -1221,17 +1399,17 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
         char *filename = get_filename(user_path, NULL);
         if (UNLIKELY(is_l2s_internal_name(filename))) {
             char alt[PATH_MAX] ALIGNED;
-            const char *l2s_dir = getenv("PROOT_L2S_DIR");
-            if (LIKELY(l2s_dir && l2s_dir[0] && strcmp(l2s_dir, "/") != 0)) {
-                snprintf(alt, sizeof(alt), "%s/%s", l2s_dir, filename);
-                if (LIKELY(access(alt, F_OK) == 0)) {
+            bool has_l2s_dir = get_l2s_directory();
+            if (LIKELY(has_l2s_dir)) {
+                snprintf(alt, sizeof(alt), "%s/%s", l2s_directory, filename);
+                if (LIKELY(l2s_access(alt) == 0)) {
                     strcpy(result, alt);
                     return 1;
                 }
             }
             /* PROOT_L2S_DIR=/ 或变量不可见时的常见情况：文件位于 host 根目录 */
             snprintf(alt, sizeof(alt), "/%s", filename);
-            if (LIKELY(access(alt, F_OK) == 0)) {
+            if (LIKELY(l2s_access(alt) == 0)) {
                 strcpy(result, alt);
                 return 1;
             }
