@@ -40,7 +40,7 @@ if [ ! -x "$PROOT" ]; then
 	exit 1
 fi
 
-if ! MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -l --rootfs="$ROOTFS" \
+if MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -l --rootfs="$ROOTFS" \
 	/bin/busybox sh -c '
 		echo escaped > /original
 		/bin/busybox ln /original /warmup
@@ -55,7 +55,10 @@ if ! MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -l --rootfs="$ROOTFS" \
 		/bin/busybox test -L /link || exit 1
 		echo LINK_READY
 	'); then
-	printf '%s\n' "link2symlink tracee command failed; marker: $MARKER" >&2
+	TRACE_STATUS=0
+	else
+	TRACE_STATUS=$?
+	printf '%s\n' "link2symlink tracee command failed (status $TRACE_STATUS); marker: $MARKER" >&2
 	exit 1
 fi
 
