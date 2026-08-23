@@ -92,6 +92,8 @@ jobs:
             esac
           done
           ls -lh dist
+      - name: Generate checksums
+        run: sha256sum dist/neoproot dist/neoproot-portable > dist/SHA256SUMS
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
