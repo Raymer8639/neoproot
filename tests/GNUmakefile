@@ -48,7 +48,17 @@ test: all
 	done
 	@for script in $(TEST_SCRIPTS); do \
 		echo "运行测试脚本 $$script..."; \
-		sh "$$script"; \
+		if sh "$$script"; then \
+			:; \
+		else \
+			status=$$?; \
+			if [ "$$status" -eq 125 ]; then \
+				echo "跳过测试脚本 $$script（缺少前置条件）"; \
+			else \
+				echo "测试脚本 $$script 失败（退出码 $$status）"; \
+				exit "$$status"; \
+			fi; \
+		fi; \
 	done
 
 # 清理编译产物
