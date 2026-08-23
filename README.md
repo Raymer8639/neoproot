@@ -62,7 +62,7 @@ From sysbench high-load tests (on par with the official PRoot at low load, no ex
 
 ## Quick start
 
-### Option 1: use a release asset on glibc ARM64 Linux
+### Option 1: use a release asset on ARM64 Linux
 
 Download `neoproot` from [Releases](https://github.com/Raymer8639/neoproot/releases)
 for the optimized ARM64 build, or `neoproot-portable` for the ARMv8-A portable

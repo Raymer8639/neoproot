@@ -60,7 +60,7 @@ github.com/termux/proot（活跃维护）  ← 血缘源头 / 跟进目标
 
 ## 快速开始
 
-### 方式一：在 glibc ARM64 Linux 上使用已发布二进制
+### 方式一：在 ARM64 Linux 上使用已发布二进制
 
 从 [Releases](https://github.com/Raymer8639/neoproot/releases) 下载优化版 ARM64
 构建 `neoproot`，或下载面向 ARMv8-A 的便携版 `neoproot-portable`
