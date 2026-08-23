@@ -62,6 +62,7 @@ if MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -v 1 -l --rootfs="$ROOTFS" \
 	TRACE_STATUS=$?
 	printf '%s\n' "link2symlink tracee command failed (status $TRACE_STATUS); marker: $MARKER" >&2
 	cat "$TRACE_LOG" >&2
+	find "$ROOTFS" -maxdepth 2 -ls >&2 || true
 	exit 1
 fi
 
