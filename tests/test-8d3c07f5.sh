@@ -52,7 +52,7 @@ if ! MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -l --rootfs="$ROOTFS" \
 		/bin/busybox ln /original /link
 		/bin/busybox test -L /link || exit 1
 		echo LINK_READY
-	' 2>/dev/null); then
+	'); then
 	exit 1
 fi
 
