@@ -8,6 +8,9 @@ on:
     branches: [master, main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     # 本项目的构建目标是 ARMv8.2+ 的 Android/Termux 环境，
@@ -53,7 +56,10 @@ jobs:
           sh test-runtime-bindings.sh
           PROOT=../src/neoproot sh basic_test.sh
           PROOT=../src/neoproot sh advanced_test.sh
+          PROOT=../src/neoproot sh test-security-regressions.sh
+          PROOT=../src/neoproot sh test-link2symlink-dirent.sh
           PROOT=../src/neoproot sh test-bwrap-oldroot-bind.sh
+          PROOT=../src/neoproot sh test-bwrap-proc-dirfd.sh
           PROOT=../src/neoproot sh test-tracer-guard.sh
 
       - name: Upload artifact

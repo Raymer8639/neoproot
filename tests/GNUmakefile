@@ -45,10 +45,8 @@ test: all
 		fi; \
 	done
 	@for script in $(TEST_SCRIPTS); do \
-		if [ -x "$$script" ]; then \
-			echo "运行测试脚本 $$script..."; \
-			./$$script; \
-		fi \
+		echo "运行测试脚本 $$script..."; \
+		sh "$$script"; \
 	done
 
 # 清理编译产物

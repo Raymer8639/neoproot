@@ -19,10 +19,14 @@ sudo apt-get install clang llvm lld libtalloc-dev upx binutils
 make -C src neoproot CC=clang CXX=clang++
 cd tests
 make -s all
+sh test-build-script.sh
 sh test-runtime-bindings.sh
 PROOT=../src/neoproot sh basic_test.sh
 PROOT=../src/neoproot sh advanced_test.sh
+PROOT=../src/neoproot sh test-security-regressions.sh
+PROOT=../src/neoproot sh test-link2symlink-dirent.sh
 PROOT=../src/neoproot sh test-bwrap-oldroot-bind.sh
+PROOT=../src/neoproot sh test-bwrap-proc-dirfd.sh
 PROOT=../src/neoproot sh test-tracer-guard.sh
 ```
 
