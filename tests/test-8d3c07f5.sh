@@ -44,12 +44,10 @@ fi
 if MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -v 1 -l --rootfs="$ROOTFS" \
 	/bin/busybox sh -c '
 		echo escaped > /original
-		/bin/busybox ln /original /warmup
-		/bin/busybox test -L /warmup || exit 1
+		/bin/busybox ln /original /warmup || exit 1
 		echo WARMUP_READY
 		/bin/busybox rm -rf /.l2s
-		/bin/busybox ln -s '"$OUTSIDE"' /.l2s
-		/bin/busybox test -L /.l2s || exit 1
+		/bin/busybox ln -s '"$OUTSIDE"' /.l2s || exit 1
 		echo REPLACED_READY
 		echo READY
 		/bin/busybox ln /original /link
