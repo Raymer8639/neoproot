@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Support and usage questions
+    url: https://github.com/Raymer8639/neoproot/discussions
+    about: Ask setup and usage questions in GitHub Discussions.
+  - name: Report a vulnerability privately
+    url: https://github.com/Raymer8639/neoproot/security/advisories/new
+    about: Do not disclose vulnerabilities or exploit details in a public issue.

@@ -1,4 +1,4 @@
-**English** | [简体中文](README.zh-CN.md)
+[English](README.md) | **简体中文**
 
 # neoproot（二进制与项目同名；历史名 proot-scicat / uproot）
 
@@ -55,31 +55,44 @@ github.com/termux/proot（活跃维护）  ← 血缘源头 / 跟进目标
 
 ## 环境要求
 
-- 64 位 ARM 设备（aarch64 / ARMv8.2+ 指令集，覆盖绝大多数 Android 手机）
-- Termux（或等效 Android Linux 环境）
-- **不适用于 x86_64**（代码刻意裁剪掉通用架构支持）
+- ARM64 Linux 或 Termux（aarch64 / arm64）；主要运行目标为 Android/Termux。
+- **不支持 x86_64**（代码刻意裁剪掉通用架构支持）。
 
 ## 快速开始
 
-### 方式一：使用已发布二进制（推荐）
+### 方式一：在 ARM64 Linux 上使用已发布二进制
 
-从 [Releases](https://github.com/Raymer8639/neoproot/releases) 下载 `neoproot`，放入 `$PREFIX/bin` 并赋予执行权限：
+从 [Releases](https://github.com/Raymer8639/neoproot/releases) 下载优化版 ARM64
+构建 `neoproot`，或下载面向 ARMv8-A 的便携版 `neoproot-portable`
+（`-march=armv8-a -mtune=generic`）。这些资产在 Ubuntu ARM64 上构建。
+便携版只放宽 CPU 指令集要求，不保证兼容所有 libc 或操作系统。替换源码
+构建前，请先在你的主机上验证 Release 资产。
+
+在 ARM64 Linux 主机上安装前请校验文件：
 
 ```sh
-chmod +x neoproot
-mv neoproot $PREFIX/bin/
+binary=neoproot  # 或 neoproot-portable
+sha256sum "$binary"
+sudo install -m 755 "$binary" /usr/local/bin/neoproot
 ```
+
+将输出的 SHA256 与 Release 页面公布的校验值比对；也可以安装到已加入 `PATH`
+的用户自管目录。
 
 ### 方式二：Termux 内源码构建
 
+原生 Termux 使用 Bionic。如果 Release 资产无法在你的设备上运行，请在
+Termux 内从源码构建：
+
 ```sh
-pkg install clang make llvm binutils talloc upx
+pkg install clang make llvm binutils pkg-config talloc
 git clone https://github.com/Raymer8639/neoproot.git
 cd neoproot
 sh build.sh install     # 构建并安装到 $PREFIX/bin
 ```
 
-> `upx` 可选：用于压缩二进制减小体积（`--ultra-brute --lzma` 压缩后通常只有 1~2 MB）。
+> `sh build.sh` 只构建 `src/neoproot`；`sh build.sh install` 还会安装为
+> `$PREFIX/bin/neoproot`。`upx` 为可选依赖，可用于压缩二进制。
 > 也可用 `make -C src neoproot MARCH="-march=native"` 针对你的 CPU 定制指令集。
 
 ## 使用容器
@@ -94,7 +107,13 @@ neoproot -0 -r /data/data/com.termux/files/home/rootfs \
 
 与官方 PRoot 用法完全一致，但 **无需** 手动 `unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW` —— `neoproot` 主程序会自动处理。
 
-详细说明与 FAQ（node 报错 13、性能对比、VNC 等）见 [help.md](help.md)。
+## 文档
+
+- [变更历史](CHANGELOG.md)
+- [使用说明与 FAQ](help.md)
+- [安全策略](SECURITY.md)
+- [参与贡献](CONTRIBUTING.md)
+- [获取支持](SUPPORT.md)
 
 ## 版本命名
 
@@ -102,7 +121,7 @@ neoproot -0 -r /data/data/com.termux/files/home/rootfs \
 
 ## 构建产物说明
 
-- 编译目标默认 `-march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto`（可用 `MARCH=` 覆盖）
+- 编译目标默认 `-march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto`（可用 `MARCH=` 覆盖）；便携版 Release 使用 `-march=armv8-a -mtune=generic`
 - 链接选项：`-flto=thin`、`--gc-sections`、`--icf=all`、RELRO/NOW、去符号
 - 依赖：`libtalloc`（Termux 包名 `talloc`）
 

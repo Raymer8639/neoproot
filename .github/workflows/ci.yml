@@ -8,6 +8,9 @@ on:
     branches: [master, main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     # 本项目的构建目标是 ARMv8.2+ 的 Android/Termux 环境，
@@ -25,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang llvm lld libtalloc-dev upx binutils
+          sudo apt-get install -y -qq clang llvm lld libtalloc-dev pkg-config upx binutils
 
       - name: Verify process_vm build
         run: sh tests/test-process-vm-build.sh
@@ -50,10 +53,14 @@ jobs:
         run: |
           cd tests
           make -s all
+          sh test-build-script.sh
           sh test-runtime-bindings.sh
           PROOT=../src/neoproot sh basic_test.sh
           PROOT=../src/neoproot sh advanced_test.sh
+          PROOT=../src/neoproot sh test-security-regressions.sh
+          PROOT=../src/neoproot sh test-link2symlink-dirent.sh
           PROOT=../src/neoproot sh test-bwrap-oldroot-bind.sh
+          PROOT=../src/neoproot sh test-bwrap-proc-dirfd.sh
           PROOT=../src/neoproot sh test-tracer-guard.sh
 
       - name: Upload artifact
@@ -85,6 +92,8 @@ jobs:
             esac
           done
           ls -lh dist
+      - name: Generate checksums
+        run: (cd dist && sha256sum neoproot neoproot-portable > SHA256SUMS)
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

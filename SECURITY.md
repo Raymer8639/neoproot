@@ -1,15 +1,27 @@
-# 安全策略
+# Security Policy
 
-## 报告安全漏洞
+## Supported versions
 
-- 通过 [GitHub Security Advisories](https://github.com/Raymer8639/neoproot/security/advisories/new) 私下报告漏洞（推荐）
-- 或通过 [Issues](https://github.com/Raymer8639/neoproot/issues) 提交（请勿包含利用细节）
+Security fixes are currently provided on the `v5.9.x` release line of
+neoproot.
 
-我们会在确认后尽快修复并发布。
+## Reporting a vulnerability
 
-## 运行安全
+Use a private [GitHub Security Advisory](https://github.com/Raymer8639/neoproot/security/advisories/new)
+to report a vulnerability. Do not publish exploit details, proof-of-concept
+code, or other sensitive details in public issues, discussions, or pull
+requests before a fix is available.
 
-uproot 与官方 PRoot 一样通过 ptrace 模拟 chroot/root，**不提供真正的内核级隔离**。
-请仅运行你信任的 rootfs，不要把 untrusted 用户放进来。
+Include the neoproot version, CPU architecture, host system, rootfs,
+command line, complete reproduction steps, and enough output to reproduce the
+problem. Maintainers will respond on a best-effort basis and coordinate a fix
+or disclosure through the advisory.
 
-另请参阅 Termux 安全策略：https://termux.dev/security
+## Isolation limitations
+
+neoproot, like PRoot, uses ptrace to emulate chroot/root. It **does not provide
+kernel-level isolation** and must not be used as a security boundary for
+untrusted users or root filesystems.
+
+See the [Termux security policy](https://termux.dev/security) for host-level
+guidance.

@@ -17,8 +17,10 @@
   provide the virtual mountinfo view for inherited `/proc` directory fds.
 - Safety: reject startup under a pre-existing ptrace tracer and direct users
   to run neoproot from the Termux host rather than nesting PRoot.
-- CI: make basic and advanced smoke-script failures fatal and add process-vm,
-  covered-oldroot, and traced-startup regressions to both ARM64 build modes.
+- CI: make basic and advanced smoke-script failures fatal; run process-vm,
+  covered-oldroot, and traced-startup regressions in both ARM64 build modes.
+- Release artifacts: publish the optimized ARM64 `neoproot` binary and the
+  `neoproot-portable` build using `-march=armv8-a -mtune=generic`.
 
 ## [v5.8.0] - 2026-08-19
 
