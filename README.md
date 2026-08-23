@@ -74,8 +74,9 @@ release asset on your host before replacing a source build.
 Verify the file before installing it on an ARM64 Linux host:
 
 ```sh
-sha256sum neoproot
-sudo install -m 755 neoproot /usr/local/bin/neoproot
+binary=neoproot  # or neoproot-portable
+sha256sum "$binary"
+sudo install -m 755 "$binary" /usr/local/bin/neoproot
 ```
 
 Compare the SHA256 output with the checksum published on the release page. You

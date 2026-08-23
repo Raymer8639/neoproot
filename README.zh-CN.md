@@ -71,8 +71,9 @@ github.com/termux/proot（活跃维护）  ← 血缘源头 / 跟进目标
 在 ARM64 Linux 主机上安装前请校验文件：
 
 ```sh
-sha256sum neoproot
-sudo install -m 755 neoproot /usr/local/bin/neoproot
+binary=neoproot  # 或 neoproot-portable
+sha256sum "$binary"
+sudo install -m 755 "$binary" /usr/local/bin/neoproot
 ```
 
 将输出的 SHA256 与 Release 页面公布的校验值比对；也可以安装到已加入 `PATH`
