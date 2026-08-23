@@ -24,7 +24,6 @@ esac
 DIR=/tmp/$(mcookie).l2s
 ROOTFS="$DIR/rootfs"
 OUTSIDE="$DIR/outside"
-TRACE_LOG="$DIR/trace.log"
 
 cleanup() {
 	rm -rf "$DIR"
@@ -41,7 +40,7 @@ if [ ! -x "$PROOT" ]; then
 	exit 1
 fi
 
-if MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -v 1 -l --rootfs="$ROOTFS" \
+if MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -l --rootfs="$ROOTFS" \
 	/bin/busybox sh -c '
 		echo escaped > /original
 		# A lookup of an internal name opens and caches the protected
@@ -56,13 +55,9 @@ if MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -v 1 -l --rootfs="$ROOTFS" \
 		link_status=$?
 		echo LINK_STATUS=$link_status
 		echo LINK_ATTEMPTED
-	' 2>"$TRACE_LOG"); then
-	TRACE_STATUS=0
+	' 2>/dev/null); then
+	:
 	else
-	TRACE_STATUS=$?
-	printf '%s\n' "link2symlink tracee command failed (status $TRACE_STATUS); marker: $MARKER" >&2
-	cat "$TRACE_LOG" >&2
-	find "$ROOTFS" -maxdepth 2 -ls >&2 || true
 	exit 1
 fi
 
