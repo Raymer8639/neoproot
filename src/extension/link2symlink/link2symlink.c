@@ -209,9 +209,15 @@ static int l2s_rename(const char *old_path, const char *new_path) {
         return rename(old_path, new_path);
     int result = renameat(old_dir_fd < 0 ? AT_FDCWD : old_dir_fd, old_name,
                           new_dir_fd < 0 ? AT_FDCWD : new_dir_fd, new_name);
-    if (result < 0)
-        fprintf(stderr, "link2symlink debug: renameat oldfd=%d old=%s newfd=%d new=%s dir=%s: %s\n",
-                old_dir_fd, old_name, new_dir_fd, new_name, l2s_directory, strerror(errno));
+    if (result < 0) {
+        struct stat source_stat;
+        struct stat directory_stat;
+        int source_status = stat(old_path, &source_stat);
+        int directory_status = fstat(new_dir_fd, &directory_stat);
+        fprintf(stderr, "link2symlink debug: renameat oldfd=%d old=%s newfd=%d new=%s dir=%s source_stat=%d directory_stat=%d: %s\n",
+                old_dir_fd, old_name, new_dir_fd, new_name, l2s_directory,
+                source_status, directory_status, strerror(errno));
+    }
     return result;
 }
 
