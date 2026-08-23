@@ -11,7 +11,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"$CC" -std=c23 -Wall -Wextra -O2 -o "$ROOT/probe" \
+"$CC" -std=c11 -Wall -Wextra -O2 -o "$ROOT/probe" \
     "$SCRIPT_DIR/test-tracer-guard.c"
 "$ROOT/probe" "$PROOT"
 printf "%s\n" "nested tracer guard regression passed"
