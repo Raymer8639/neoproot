@@ -15,10 +15,21 @@ TEST_ROOT=$(mktemp -d)
 TEST_DIR="$TEST_ROOT/test-dir"
 mkdir -p "$TEST_DIR"
 
+RUNTIME_BINDS=""
+add_runtime_bind() {
+    runtime_source=$(readlink -f "$1")
+    [ -d "$runtime_source" ] || return 0
+    RUNTIME_BINDS="${RUNTIME_BINDS}${RUNTIME_BINDS:+ }-b $runtime_source:$1"
+}
+
 if [ -n "${PREFIX:-}" ]; then
-    RUNTIME_BINDS="-b $PREFIX:$PREFIX -b /system -b /apex"
+    add_runtime_bind "$PREFIX"
+    add_runtime_bind /system
+    add_runtime_bind /apex
 else
-    RUNTIME_BINDS="-b /usr -b /lib -b /lib64"
+    add_runtime_bind /usr
+    add_runtime_bind /lib
+    add_runtime_bind /lib64
 fi
 
 echo "使用测试根目录: $TEST_ROOT"
