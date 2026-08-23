@@ -1,4 +1,4 @@
-[English](README.md) | [简体中文](README.zh-CN.md)
+**English** | [简体中文](README.zh-CN.md)
 
 # neoproot (binary and project share the name; formerly proot-scicat / uproot)
 
@@ -62,21 +62,28 @@ From sysbench high-load tests (on par with the official PRoot at low load, no ex
 
 ## Quick start
 
-### Option 1: use a released binary (recommended)
+### Option 1: use a release asset on glibc ARM64 Linux
 
 Download `neoproot` from [Releases](https://github.com/Raymer8639/neoproot/releases)
 for the optimized ARM64 build, or `neoproot-portable` for the ARMv8-A portable
-build (`-march=armv8-a -mtune=generic`). Verify the file before installing it:
+build (`-march=armv8-a -mtune=generic`). These assets are built on Ubuntu ARM64
+and require glibc. The portable variant relaxes only the CPU instruction-set
+requirement; it does not change libc or operating-system compatibility.
+
+Verify the file before installing it on a glibc ARM64 Linux host:
 
 ```sh
 sha256sum neoproot
-chmod +x neoproot
-mv neoproot $PREFIX/bin/
+sudo install -m 755 neoproot /usr/local/bin/neoproot
 ```
 
-Compare the SHA256 output with the checksum published on the release page.
+Compare the SHA256 output with the checksum published on the release page. You
+can instead install it in a user-controlled directory that is on your `PATH`.
 
 ### Option 2: build from source inside Termux
+
+Native Termux uses Bionic, so it cannot run the published glibc release assets.
+Build from source in Termux until a Bionic/Termux artifact is provided:
 
 ```sh
 pkg install clang make llvm binutils talloc

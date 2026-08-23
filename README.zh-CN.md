@@ -1,4 +1,4 @@
-**English** | [简体中文](README.zh-CN.md)
+[English](README.md) | **简体中文**
 
 # neoproot（二进制与项目同名；历史名 proot-scicat / uproot）
 
@@ -60,21 +60,27 @@ github.com/termux/proot（活跃维护）  ← 血缘源头 / 跟进目标
 
 ## 快速开始
 
-### 方式一：使用已发布二进制（推荐）
+### 方式一：在 glibc ARM64 Linux 上使用已发布二进制
 
 从 [Releases](https://github.com/Raymer8639/neoproot/releases) 下载优化版 ARM64
 构建 `neoproot`，或下载面向 ARMv8-A 的便携版 `neoproot-portable`
-（`-march=armv8-a -mtune=generic`）。安装前请校验文件：
+（`-march=armv8-a -mtune=generic`）。这些资产在 Ubuntu ARM64 上构建，依赖
+glibc。便携版只放宽 CPU 指令集要求，不改变 libc 或操作系统兼容性。
+
+在 glibc ARM64 Linux 主机上安装前请校验文件：
 
 ```sh
 sha256sum neoproot
-chmod +x neoproot
-mv neoproot $PREFIX/bin/
+sudo install -m 755 neoproot /usr/local/bin/neoproot
 ```
 
-将输出的 SHA256 与 Release 页面公布的校验值比对。
+将输出的 SHA256 与 Release 页面公布的校验值比对；也可以安装到已加入 `PATH`
+的用户自管目录。
 
 ### 方式二：Termux 内源码构建
+
+原生 Termux 使用 Bionic，不能直接运行已发布的 glibc 资产。在提供
+Bionic/Termux 资产前，请在 Termux 内从源码构建：
 
 ```sh
 pkg install clang make llvm binutils talloc
