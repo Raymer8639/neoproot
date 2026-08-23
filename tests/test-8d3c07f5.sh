@@ -24,6 +24,7 @@ esac
 DIR=/tmp/$(mcookie).l2s
 ROOTFS="$DIR/rootfs"
 OUTSIDE="$DIR/outside"
+TRACE_LOG="$DIR/trace.log"
 
 cleanup() {
 	rm -rf "$DIR"
@@ -40,7 +41,7 @@ if [ ! -x "$PROOT" ]; then
 	exit 1
 fi
 
-if MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -l --rootfs="$ROOTFS" \
+if MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -v 1 -l --rootfs="$ROOTFS" \
 	/bin/busybox sh -c '
 		echo escaped > /original
 		/bin/busybox ln /original /warmup
@@ -54,11 +55,12 @@ if MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -l --rootfs="$ROOTFS" \
 		/bin/busybox ln /original /link
 		/bin/busybox test -L /link || exit 1
 		echo LINK_READY
-	'); then
+	' 2>"$TRACE_LOG"); then
 	TRACE_STATUS=0
 	else
 	TRACE_STATUS=$?
 	printf '%s\n' "link2symlink tracee command failed (status $TRACE_STATUS); marker: $MARKER" >&2
+	cat "$TRACE_LOG" >&2
 	exit 1
 fi
 
