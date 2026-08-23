@@ -38,8 +38,8 @@ make -C src -B neoproot CC=clang CXX=clang++ \
 ```
 
 On Termux, install `clang make llvm binutils talloc` and use `sh build.sh`.
-The published release assets are built for glibc ARM64 Linux and are not a
-substitute for a native Termux build.
+The published release assets are built on Ubuntu ARM64; a native Termux build
+is the compatibility fallback when a release asset does not run on a device.
 
 ## Pull requests
 

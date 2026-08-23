@@ -66,11 +66,12 @@ From sysbench high-load tests (on par with the official PRoot at low load, no ex
 
 Download `neoproot` from [Releases](https://github.com/Raymer8639/neoproot/releases)
 for the optimized ARM64 build, or `neoproot-portable` for the ARMv8-A portable
-build (`-march=armv8-a -mtune=generic`). These assets are built on Ubuntu ARM64
-and require glibc. The portable variant relaxes only the CPU instruction-set
-requirement; it does not change libc or operating-system compatibility.
+build (`-march=armv8-a -mtune=generic`). These assets are built on Ubuntu ARM64.
+The portable variant relaxes only the CPU instruction-set requirement; it does
+not guarantee compatibility with every libc or operating system. Test a
+release asset on your host before replacing a source build.
 
-Verify the file before installing it on a glibc ARM64 Linux host:
+Verify the file before installing it on an ARM64 Linux host:
 
 ```sh
 sha256sum neoproot
@@ -82,8 +83,8 @@ can instead install it in a user-controlled directory that is on your `PATH`.
 
 ### Option 2: build from source inside Termux
 
-Native Termux uses Bionic, so it cannot run the published glibc release assets.
-Build from source in Termux until a Bionic/Termux artifact is provided:
+Native Termux uses Bionic. If a release asset does not run on your device,
+build from source in Termux:
 
 ```sh
 pkg install clang make llvm binutils talloc

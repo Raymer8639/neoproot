@@ -64,10 +64,11 @@ github.com/termux/proot（活跃维护）  ← 血缘源头 / 跟进目标
 
 从 [Releases](https://github.com/Raymer8639/neoproot/releases) 下载优化版 ARM64
 构建 `neoproot`，或下载面向 ARMv8-A 的便携版 `neoproot-portable`
-（`-march=armv8-a -mtune=generic`）。这些资产在 Ubuntu ARM64 上构建，依赖
-glibc。便携版只放宽 CPU 指令集要求，不改变 libc 或操作系统兼容性。
+（`-march=armv8-a -mtune=generic`）。这些资产在 Ubuntu ARM64 上构建。
+便携版只放宽 CPU 指令集要求，不保证兼容所有 libc 或操作系统。替换源码
+构建前，请先在你的主机上验证 Release 资产。
 
-在 glibc ARM64 Linux 主机上安装前请校验文件：
+在 ARM64 Linux 主机上安装前请校验文件：
 
 ```sh
 sha256sum neoproot
@@ -79,8 +80,8 @@ sudo install -m 755 neoproot /usr/local/bin/neoproot
 
 ### 方式二：Termux 内源码构建
 
-原生 Termux 使用 Bionic，不能直接运行已发布的 glibc 资产。在提供
-Bionic/Termux 资产前，请在 Termux 内从源码构建：
+原生 Termux 使用 Bionic。如果 Release 资产无法在你的设备上运行，请在
+Termux 内从源码构建：
 
 ```sh
 pkg install clang make llvm binutils talloc
