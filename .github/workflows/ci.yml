@@ -50,6 +50,7 @@ jobs:
         run: |
           cd tests
           make -s all
+          sh test-runtime-bindings.sh
           PROOT=../src/neoproot sh basic_test.sh
           PROOT=../src/neoproot sh advanced_test.sh
           PROOT=../src/neoproot sh test-bwrap-oldroot-bind.sh

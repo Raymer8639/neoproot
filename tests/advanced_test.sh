@@ -30,12 +30,23 @@ export TEST_VAR="SciCat_PRoot_Test_Value"
 
 # 测试 1: 复杂路径绑定
 echo "测试 1: 复杂路径绑定和环境变量"
+RUNTIME_BINDS=""
+add_runtime_bind() {
+    runtime_source=$(readlink -f "$1")
+    [ -d "$runtime_source" ] || return 0
+    RUNTIME_BINDS="${RUNTIME_BINDS}${RUNTIME_BINDS:+ }-b $runtime_source:$1"
+}
+
 if [ -n "${PREFIX:-}" ]; then
     HOST_SH=$(readlink -f "$PREFIX/bin/sh")
-    RUNTIME_BINDS="-b $PREFIX:$PREFIX -b /system -b /apex"
+    add_runtime_bind "$PREFIX"
+    add_runtime_bind /system
+    add_runtime_bind /apex
 else
     HOST_SH=$(readlink -f /bin/sh)
-    RUNTIME_BINDS="-b /usr -b /lib -b /lib64"
+    add_runtime_bind /usr
+    add_runtime_bind /lib
+    add_runtime_bind /lib64
 fi
 ln -s "$HOST_SH" "$TEST_ROOT/bin/sh"
 
@@ -51,7 +62,7 @@ echo "测试 2: 多层路径绑定"
 NESTED_DIR=$(mktemp -d)
 mkdir -p "$NESTED_DIR/nested/subdir"
 echo "多层绑定测试" > "$NESTED_DIR/nested/subdir/deep-file.txt"
-$PROOT -r "$TEST_ROOT" -b "$NESTED_DIR:/nested" cat /nested/nested/subdir/deep-file.txt
+$PROOT -r "$TEST_ROOT" $RUNTIME_BINDS -b "$NESTED_DIR:/nested" cat /nested/nested/subdir/deep-file.txt
 if [ $? -eq 0 ]; then
     echo "测试 2: 通过"
 else
