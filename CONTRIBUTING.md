@@ -20,6 +20,7 @@ make -C src neoproot CC=clang CXX=clang++
 cd tests
 make -s all
 sh test-build-script.sh
+sh test-process-vm-build.sh
 sh test-runtime-bindings.sh
 PROOT=../src/neoproot sh basic_test.sh
 PROOT=../src/neoproot sh advanced_test.sh
