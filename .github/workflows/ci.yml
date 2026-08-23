@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang llvm lld libtalloc-dev pkg-config upx binutils
+          sudo apt-get install -y -qq clang llvm lld libtalloc-dev pkg-config upx binutils busybox-static
 
       - name: Verify process_vm build
         run: sh tests/test-process-vm-build.sh
@@ -62,6 +62,7 @@ jobs:
           PROOT=../src/neoproot sh test-bwrap-oldroot-bind.sh
           PROOT=../src/neoproot sh test-bwrap-proc-dirfd.sh
           PROOT=../src/neoproot sh test-tracer-guard.sh
+          PROOT=../src/neoproot sh test-8d3c07f5.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
