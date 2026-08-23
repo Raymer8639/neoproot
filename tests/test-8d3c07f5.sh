@@ -53,6 +53,7 @@ if ! MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -l --rootfs="$ROOTFS" \
 		/bin/busybox test -L /link || exit 1
 		echo LINK_READY
 	'); then
+	printf '%s\n' "link2symlink tracee command failed; marker: $MARKER" >&2
 	exit 1
 fi
 
