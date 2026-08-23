@@ -47,6 +47,7 @@ if MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -v 1 -l --rootfs="$ROOTFS" \
 		echo warmup > /warmup_source
 		/bin/busybox ln /warmup_source /warmup || exit 1
 		echo WARMUP_READY
+		/bin/busybox rm -f /warmup /warmup_source || exit 1
 		/bin/busybox rm -rf /.l2s
 		/bin/busybox ln -s '"$OUTSIDE"' /.l2s || exit 1
 		echo REPLACED_READY
