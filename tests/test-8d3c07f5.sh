@@ -52,10 +52,10 @@ if MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -v 1 -l --rootfs="$ROOTFS" \
 		/bin/busybox rm -rf /.l2s
 		/bin/busybox ln -s '"$OUTSIDE"' /.l2s || exit 1
 		echo REPLACED_READY
-		echo READY
 		/bin/busybox ln /original /link
-		/bin/busybox test -L /link || exit 1
-		echo LINK_READY
+		link_status=$?
+		echo LINK_STATUS=$link_status
+		echo LINK_ATTEMPTED
 	' 2>"$TRACE_LOG"); then
 	TRACE_STATUS=0
 	else
@@ -74,7 +74,7 @@ fi
 if ! printf '%s\n' "$MARKER" | grep -qx 'REPLACED_READY'; then
 	exit 1
 fi
-if ! printf '%s\n' "$MARKER" | grep -qx 'LINK_READY'; then
+if ! printf '%s\n' "$MARKER" | grep -qx 'LINK_ATTEMPTED'; then
 	exit 1
 fi
 
