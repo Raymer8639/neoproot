@@ -84,7 +84,7 @@ sudo install -m 755 neoproot /usr/local/bin/neoproot
 Termux 内从源码构建：
 
 ```sh
-pkg install clang make llvm binutils talloc
+pkg install clang make llvm binutils pkg-config talloc
 git clone https://github.com/Raymer8639/neoproot.git
 cd neoproot
 sh build.sh install     # 构建并安装到 $PREFIX/bin

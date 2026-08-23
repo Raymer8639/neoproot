@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang llvm lld libtalloc-dev upx binutils
+          sudo apt-get install -y -qq clang llvm lld libtalloc-dev pkg-config upx binutils
 
       - name: Verify process_vm build
         run: sh tests/test-process-vm-build.sh

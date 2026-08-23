@@ -87,7 +87,7 @@ Native Termux uses Bionic. If a release asset does not run on your device,
 build from source in Termux:
 
 ```sh
-pkg install clang make llvm binutils talloc
+pkg install clang make llvm binutils pkg-config talloc
 git clone https://github.com/Raymer8639/neoproot.git
 cd neoproot
 sh build.sh install     # builds and installs to $PREFIX/bin

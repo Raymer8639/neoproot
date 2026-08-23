@@ -66,7 +66,7 @@ fi
 
 if [ -n "$MISSING" ]; then
     echo "==> 缺少依赖:$MISSING"
-    echo "    请先安装: pkg install clang make llvm binutils talloc"
+    echo "    请先安装: pkg install clang make llvm binutils pkg-config talloc"
     echo "    （可选: pkg install upx，可显著减小二进制体积）"
     exit 1
 fi

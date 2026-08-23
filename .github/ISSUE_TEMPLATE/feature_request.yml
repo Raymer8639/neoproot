@@ -16,10 +16,24 @@ body:
     validations:
       required: true
   - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: Describe the workflow, users, or environments that need this improvement.
+    validations:
+      required: true
+  - type: textarea
     id: proposal
     attributes:
-      label: Proposed change
-      description: Describe the expected behavior and any alternatives considered.
+      label: Proposed change and alternatives
+      description: Describe the expected behavior and the alternatives you considered.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Compatibility and performance impact
+      description: Describe expected effects on supported ARM64 environments, compatibility, and performance.
     validations:
       required: true
   - type: input
@@ -30,6 +44,13 @@ body:
       placeholder: Termux on Android 16 / aarch64
     validations:
       required: true
+  - type: checkboxes
+    id: testing
+    attributes:
+      label: Testing
+      options:
+        - label: I can test this change on a supported ARM64 Linux or native Termux environment.
+          required: true
   - type: checkboxes
     id: sensitive-data
     attributes:

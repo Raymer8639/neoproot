@@ -15,7 +15,7 @@ Build and test on a native ARM64 Linux host with the same commands used by CI:
 
 ```sh
 sudo apt-get update
-sudo apt-get install clang llvm lld libtalloc-dev upx binutils
+sudo apt-get install clang llvm lld libtalloc-dev pkg-config upx binutils
 make -C src neoproot CC=clang CXX=clang++
 cd tests
 make -s all
@@ -38,7 +38,7 @@ make -C src -B neoproot CC=clang CXX=clang++ \
   MARCH="-march=armv8-a -mtune=generic"
 ```
 
-On Termux, install `clang make llvm binutils talloc` and use `sh build.sh`.
+On Termux, install `clang make llvm binutils pkg-config talloc` and use `sh build.sh`.
 The published release assets are built on Ubuntu ARM64; a native Termux build
 is the compatibility fallback when a release asset does not run on a device.
 
