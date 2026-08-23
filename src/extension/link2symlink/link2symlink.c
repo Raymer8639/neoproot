@@ -255,6 +255,7 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
     char *filename;
     bool has_l2s_dir;
     const char *configured_l2s_dir;
+    const char *raw_l2s_dir;
     size_t path_len, prefix_len;
     ssize_t size;
     int status, link_count, suffix = 1;
@@ -263,6 +264,10 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
     size = read_string(tracee, original, peek_reg(tracee, CURRENT, src_sysarg), PATH_MAX);
     if (UNLIKELY(size < 0)) return size;
     if (UNLIKELY(size >= PATH_MAX)) return -ENAMETOOLONG;
+    raw_l2s_dir = getenv("PROOT_L2S_DIR");
+    if (UNLIKELY(raw_l2s_dir != NULL && raw_l2s_dir[0] != '\0' &&
+                 strlen(raw_l2s_dir) >= PATH_MAX))
+        return -ENAMETOOLONG;
 
     status = l2s_lstat(original, &statl);
     if (UNLIKELY(status < 0)) return -errno;
@@ -280,7 +285,7 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
         filename = get_filename(original, &path_len);
         prefix_len = path_len - strlen(filename);
         has_l2s_dir = get_l2s_directory();
-        configured_l2s_dir = getenv("PROOT_L2S_DIR");
+        configured_l2s_dir = raw_l2s_dir;
         if (LIKELY(has_l2s_dir || (configured_l2s_dir != NULL &&
                                    configured_l2s_dir[0] == '/' &&
                                    configured_l2s_dir[1] == '\0'))) {
