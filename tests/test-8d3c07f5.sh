@@ -45,9 +45,11 @@ if ! MARKER=$(PROOT_L2S_DIR="$ROOTFS/.l2s" "$PROOT" -l --rootfs="$ROOTFS" \
 		echo escaped > /original
 		/bin/busybox ln /original /warmup
 		/bin/busybox test -L /warmup || exit 1
+		echo WARMUP_READY
 		/bin/busybox rm -rf /.l2s
 		/bin/busybox ln -s '"$OUTSIDE"' /.l2s
 		/bin/busybox test -L /.l2s || exit 1
+		echo REPLACED_READY
 		echo READY
 		/bin/busybox ln /original /link
 		/bin/busybox test -L /link || exit 1
@@ -59,7 +61,10 @@ fi
 
 # The tracee must have replaced the directory, or the test could pass without
 # exercising the vulnerable path.
-if ! printf '%s\n' "$MARKER" | grep -qx 'READY'; then
+if ! printf '%s\n' "$MARKER" | grep -qx 'WARMUP_READY'; then
+	exit 1
+fi
+if ! printf '%s\n' "$MARKER" | grep -qx 'REPLACED_READY'; then
 	exit 1
 fi
 if ! printf '%s\n' "$MARKER" | grep -qx 'LINK_READY'; then
