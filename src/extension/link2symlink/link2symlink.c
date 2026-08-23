@@ -58,9 +58,150 @@ static int decrement_link_count(Tracee *tracee, Reg sysarg);
 static bool is_l2s_internal_path(const char *path);
 static bool parse_l2s_final_count(const char *path, int *count);
 
+/* The backing directory is outside normal tracee path translation.  Cache its
+ * normalized name and anchor direct-child operations to the checked inode so
+ * replacing the pathname with a symlink cannot redirect host-side writes. */
+static char l2s_directory[PATH_MAX];
+static size_t l2s_directory_length;
+static int l2s_directory_fd = -1;
+static bool l2s_directory_known;
+
+static int l2s_access(const char *path) UNUSED;
+static int l2s_symlink(const char *target, const char *path) UNUSED;
+static int l2s_unlink(const char *path) UNUSED;
+static int l2s_rename(const char *old_path, const char *new_path) UNUSED;
+
+static bool get_l2s_directory(void) {
+    const char *value;
+    size_t length;
+
+    if (l2s_directory_known)
+        return l2s_directory[0] != '\0';
+
+    l2s_directory_known = true;
+    value = getenv("PROOT_L2S_DIR");
+    if (value == NULL || value[0] == '\0')
+        return false;
+
+    length = strlen(value);
+    if (length >= PATH_MAX)
+        return false;
+    while (length > 1 && value[length - 1] == '/')
+        length--;
+
+    /* A root backing directory is the legacy path-based mode. */
+    if (length == 1 && value[0] == '/')
+        return false;
+
+    memcpy(l2s_directory, value, length);
+    l2s_directory[length] = '\0';
+    l2s_directory_length = length;
+    return true;
+}
+
+static int open_l2s_directory(void) {
+    if (l2s_directory_fd >= 0)
+        return l2s_directory_fd;
+    if (!get_l2s_directory())
+        return -ENOENT;
+
+    l2s_directory_fd = open(l2s_directory,
+                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (l2s_directory_fd < 0)
+        return errno > 0 ? -errno : -ENOENT;
+    return l2s_directory_fd;
+}
+
+/* Select descriptor-relative addressing only for a direct child.  Nested
+ * paths and legacy chains retain their original pathname behavior. */
+static int l2s_entry(const char *path, int *dir_fd, const char **name) {
+    const char *base;
+    int fd;
+    size_t path_length;
+
+    if (UNLIKELY(path == NULL || dir_fd == NULL || name == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    *dir_fd = -1;
+    *name = path;
+
+    if (!get_l2s_directory())
+        return 0;
+    path_length = strlen(path);
+    if (path_length <= l2s_directory_length ||
+        strncmp(path, l2s_directory, l2s_directory_length) != 0 ||
+        path[l2s_directory_length] != '/')
+        return 0;
+
+    base = path + l2s_directory_length + 1;
+    if (base[0] == '\0' || strchr(base, '/') != NULL)
+        return 0;
+
+    fd = open_l2s_directory();
+    if (fd < 0) {
+        errno = -fd;
+        return -1;
+    }
+    *dir_fd = fd;
+    *name = base;
+    return 0;
+}
+
+static int l2s_access(const char *path) {
+    const char *name;
+    int dir_fd;
+
+    if (l2s_entry(path, &dir_fd, &name) < 0)
+        return -1;
+    return dir_fd < 0 ? access(path, F_OK) : faccessat(dir_fd, name, F_OK, 0);
+}
+
+static ssize_t l2s_readlink(const char *path, char *buf, size_t size) {
+    const char *name;
+    int dir_fd;
+
+    if (l2s_entry(path, &dir_fd, &name) < 0)
+        return -errno;
+    return dir_fd < 0 ? readlink(path, buf, size) : readlinkat(dir_fd, name, buf, size);
+}
+
+static int l2s_symlink(const char *target, const char *path) {
+    const char *name;
+    int dir_fd;
+
+    if (l2s_entry(path, &dir_fd, &name) < 0)
+        return -1;
+    return dir_fd < 0 ? symlink(target, path) : symlinkat(target, dir_fd, name);
+}
+
+static int l2s_unlink(const char *path) {
+    const char *name;
+    int dir_fd;
+
+    if (l2s_entry(path, &dir_fd, &name) < 0)
+        return -1;
+    return dir_fd < 0 ? unlink(path) : unlinkat(dir_fd, name, 0);
+}
+
+static int l2s_rename(const char *old_path, const char *new_path) {
+    const char *old_name;
+    const char *new_name;
+    int old_dir_fd;
+    int new_dir_fd;
+
+    if (l2s_entry(old_path, &old_dir_fd, &old_name) < 0 ||
+        l2s_entry(new_path, &new_dir_fd, &new_name) < 0)
+        return -1;
+    if (old_dir_fd < 0 && new_dir_fd < 0)
+        return rename(old_path, new_path);
+    return renameat(old_dir_fd < 0 ? AT_FDCWD : old_dir_fd, old_name,
+                    new_dir_fd < 0 ? AT_FDCWD : new_dir_fd, new_name);
+}
+
 static FORCE_INLINE int my_readlink(const char *link_path, char *buf, size_t buf_size) {
     if (UNLIKELY(!link_path || !buf || buf_size < 1)) return -EINVAL;
-    ssize_t size = readlink(link_path, buf, buf_size - 1);
+    ssize_t size = l2s_readlink(link_path, buf, buf_size - 1);
     if (UNLIKELY(size < 0)) return -errno;
     if (UNLIKELY((size_t)size >= buf_size - 1)) return -ENAMETOOLONG;
     buf[size] = '\0';
