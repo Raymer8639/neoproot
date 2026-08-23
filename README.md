@@ -8,7 +8,7 @@
 ![Platform](https://img.shields.io/badge/platform-ARM64%20%2F%20Android-blue)
 ![Language](https://img.shields.io/badge/C%2FC%2B%2B-C23%20%2F%20C%2B%2B23-orange)
 ![License](https://img.shields.io/badge/license-GPLv2-green)
-![AI](https://img.shields.io/badge/AI-assisted-100%25-purple.svg)
+![AI](https://img.shields.io/badge/AI--assisted-100%25-purple.svg)
 
 > **🤖 AI statement: all code in this project (including every modification, fix and optimization made during maintenance) was written/reviewed with AI assistance.**
 
