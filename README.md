@@ -55,31 +55,38 @@ From sysbench high-load tests (on par with the official PRoot at low load, no ex
 
 ## Requirements
 
-- 64-bit ARM device (aarch64 / ARMv8.2+ instruction set, covering the vast majority of Android phones)
-- Termux (or an equivalent Android Linux environment)
-- **Not for x86_64** (generic architecture support is deliberately trimmed)
+- ARM64 Linux or Termux (aarch64 / arm64); the primary runtime target is
+  Android/Termux.
+- **x86_64 is unsupported.** Generic architecture support is deliberately
+  trimmed.
 
 ## Quick start
 
 ### Option 1: use a released binary (recommended)
 
-Download `neoproot` from [Releases](https://github.com/Raymer8639/neoproot/releases), put it in `$PREFIX/bin` and make it executable:
+Download `neoproot` from [Releases](https://github.com/Raymer8639/neoproot/releases)
+for the optimized ARM64 build, or `neoproot-portable` for the ARMv8-A portable
+build (`-march=armv8-a -mtune=generic`). Verify the file before installing it:
 
 ```sh
+sha256sum neoproot
 chmod +x neoproot
 mv neoproot $PREFIX/bin/
 ```
 
+Compare the SHA256 output with the checksum published on the release page.
+
 ### Option 2: build from source inside Termux
 
 ```sh
-pkg install clang make llvm binutils talloc upx
+pkg install clang make llvm binutils talloc
 git clone https://github.com/Raymer8639/neoproot.git
 cd neoproot
 sh build.sh install     # builds and installs to $PREFIX/bin
 ```
 
-> `upx` is optional: it shrinks the binary (usually to 1–2 MB with `--ultra-brute --lzma`).
+> `sh build.sh` builds `src/neoproot`; `sh build.sh install` also installs it as
+> `$PREFIX/bin/neoproot`. `upx` is optional and shrinks the binary.
 > You can also use `make -C src neoproot MARCH="-march=native"` to target your CPU's instruction set.
 
 ## Using a container
@@ -94,7 +101,13 @@ neoproot -0 -r /data/data/com.termux/files/home/rootfs \
 
 Usage is identical to the official PRoot, but **no** manual `unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW` is needed — the `neoproot` main program handles it automatically.
 
-See [help.md](help.md) for details and FAQs (node error 13, performance comparisons, VNC, etc.).
+## Documentation
+
+- [Change history](CHANGELOG.md)
+- [Usage and FAQ](help.md)
+- [Security policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- [Support](SUPPORT.md)
 
 ## Versioning
 
@@ -102,7 +115,7 @@ Version numbers follow the termux/proot style (e.g. `5.1.107.90`). Releases befo
 
 ## Build notes
 
-- Default compile target: `-march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto` (overridable via `MARCH=`)
+- Default compile target: `-march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto` (overridable via `MARCH=`); the portable release target is `-march=armv8-a -mtune=generic`
 - Link options: `-flto=thin`, `--gc-sections`, `--icf=all`, RELRO/NOW, stripped
 - Dependency: `libtalloc` (Termux package name `talloc`)
 
