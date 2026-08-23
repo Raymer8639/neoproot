@@ -270,7 +270,10 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
         return -ENAMETOOLONG;
 
     status = l2s_lstat(original, &statl);
-    if (UNLIKELY(status < 0)) return -errno;
+    if (UNLIKELY(status < 0)) {
+        VERBOSE(tracee, 1, "link2symlink debug: lstat source %s failed: %s", original, strerror(errno));
+        return -errno;
+    }
     if (UNLIKELY(S_ISDIR(statl.st_mode))) return -EPERM;
 
     if (S_ISLNK(statl.st_mode)) {
@@ -322,6 +325,7 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
         snprintf(final, PATH_MAX, "%s.0002", intermediate);
         status = l2s_rename(original, final);
         if (UNLIKELY(status < 0)) {
+            VERBOSE(tracee, 1, "link2symlink debug: rename %s -> %s failed: %s", original, final, strerror(errno));
             /* 并发竞态：pnpm 多 worker 同时 link 同一 store 文件（内容寻址，
              * 多包共享同内容）。数据已被其他 worker rename 走（同 hash 链
              * 已建好）→ 直接把 dest 链接到已存在的中间链接，链内容相同安全 */
@@ -342,6 +346,7 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
         if (UNLIKELY(status < 0)) return status;
         status = l2s_symlink(final, intermediate);
         if (UNLIKELY(status < 0)) {
+            VERBOSE(tracee, 1, "link2symlink debug: symlink %s -> %s failed: %s", final, intermediate, strerror(errno));
             if (errno == EEXIST) {
                 /* 并发或残留：中间链接名已存在。检查它是否可用：
                  * lstat 确认存在 + readlink 目标存在 → 复用（同 hash 内容相同）；
@@ -402,10 +407,15 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
     }
 
 dest_link:
-    status = read_path(tracee, dest_path, peek_reg(tracee, CURRENT, dest_sysarg));
+        status = read_path(tracee, dest_path, peek_reg(tracee, CURRENT, dest_sysarg));
+    if (UNLIKELY(status < 0))
+        VERBOSE(tracee, 1, "link2symlink debug: read destination failed: %s", strerror(errno));
     if (LIKELY(status >= 0)) {
         status = symlink(intermediate, dest_path);
-        if (UNLIKELY(status < 0)) status = -errno;
+        if (UNLIKELY(status < 0)) {
+            VERBOSE(tracee, 1, "link2symlink debug: guest symlink %s -> %s failed: %s", intermediate, dest_path, strerror(errno));
+            status = -errno;
+        }
     }
     if (UNLIKELY(status < 0)) {
         decrement_link_count(tracee, src_sysarg);
