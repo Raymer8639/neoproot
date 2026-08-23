@@ -5,6 +5,35 @@
 
 set -e
 
+usage() {
+    echo "Usage: sh build.sh [install]" >&2
+}
+
+install_requested=0
+case $# in
+    0)
+        ;;
+    1)
+        if [ "$1" != "install" ]; then
+            usage
+            exit 2
+        fi
+        install_requested=1
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac
+
+if [ "$install_requested" -eq 1 ]; then
+    if [ -z "${PREFIX:-}" ] || [ ! -d "$PREFIX/bin" ]; then
+        echo "错误: install 需要已存在的 PREFIX/bin 目录" >&2
+        usage
+        exit 2
+    fi
+fi
+
 echo "==> neoproot 构建脚本"
 echo "    平台: $(uname -m) / $(uname -s)"
 
@@ -49,10 +78,20 @@ echo ""
 echo "==> 构建完成: $(pwd)/src/neoproot"
 ls -lh src/neoproot
 
-if [ "$1" = "install" ]; then
+if [ "$install_requested" -eq 1 ]; then
     echo ""
     echo "==> 安装到 $PREFIX/bin/neoproot ..."
-    cp src/neoproot "$PREFIX/bin/neoproot"
-    chmod 755 "$PREFIX/bin/neoproot"
+
+    install_tmp=$(mktemp "$PREFIX/bin/.neoproot-install.XXXXXX")
+    cleanup_install_tmp() {
+        rm -f "$install_tmp"
+    }
+    trap cleanup_install_tmp EXIT INT TERM
+
+    cp src/neoproot "$install_tmp"
+    chmod 755 "$install_tmp"
+    mv -f "$install_tmp" "$PREFIX/bin/neoproot"
+
+    trap - EXIT INT TERM
     echo "==> 安装完成！使用 neoproot 命令启动容器。"
 fi
