@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible defect on a supported ARM64 environment.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, tokens, private rootfs files, or vulnerability details.
+        Security reports must use the private advisory process in SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: neoproot version
+      description: Include `neoproot --version` or the release tag/commit.
+      placeholder: v5.9.0
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host environment
+      description: Host OS, ARM64 device or CPU, and whether this is native Termux or glibc Linux.
+      placeholder: Android 16 / Termux / aarch64
+    validations:
+      required: true
+  - type: input
+    id: rootfs
+    attributes:
+      label: Rootfs
+      description: Distribution and version only; do not attach private rootfs files.
+      placeholder: Debian 13 arm64
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command and sanitized output
+      description: Include the command, expected result, actual result, and relevant output.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction steps
+    validations:
+      required: true
+  - type: checkboxes
+    id: sensitive-data
+    attributes:
+      label: Sensitive data check
+      options:
+        - label: I removed secrets, personal data, private paths, and exploit details.
+          required: true
+        - label: This is not a security vulnerability report.
+          required: true
