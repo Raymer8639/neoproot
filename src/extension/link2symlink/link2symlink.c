@@ -207,8 +207,12 @@ static int l2s_rename(const char *old_path, const char *new_path) {
         return -1;
     if (old_dir_fd < 0 && new_dir_fd < 0)
         return rename(old_path, new_path);
-    return renameat(old_dir_fd < 0 ? AT_FDCWD : old_dir_fd, old_name,
-                    new_dir_fd < 0 ? AT_FDCWD : new_dir_fd, new_name);
+    int result = renameat(old_dir_fd < 0 ? AT_FDCWD : old_dir_fd, old_name,
+                          new_dir_fd < 0 ? AT_FDCWD : new_dir_fd, new_name);
+    if (result < 0)
+        fprintf(stderr, "link2symlink debug: renameat oldfd=%d old=%s newfd=%d new=%s dir=%s: %s\n",
+                old_dir_fd, old_name, new_dir_fd, new_name, l2s_directory, strerror(errno));
+    return result;
 }
 
 static int l2s_open(const char *path, int flags, mode_t mode) {
