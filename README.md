@@ -1,141 +1,89 @@
-**English** | [简体中文](README.zh-CN.md)
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-# neoproot (binary and project share the name; formerly proot-scicat / uproot)
+# neoproot
 
-> A next-generation semi-native lightweight container: faster, more stable and smaller than the official PRoot, optimized for **ARM64 / Android (Termux)**.
+An ARM64-focused PRoot fork for Android/Termux containers. neoproot targets developers who run Debian/Ubuntu userspaces on phones and tablets, especially Node.js, pnpm, TypeScript, nvim, bwrap, and other syscall-heavy workflows.
+
+Current stable binaries: [latest release](https://github.com/Raymer8639/neoproot/releases/latest).
 
 [![CI](https://github.com/Raymer8639/neoproot/actions/workflows/ci.yml/badge.svg)](https://github.com/Raymer8639/neoproot/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-ARM64%20%2F%20Android-blue)
 ![Language](https://img.shields.io/badge/C%2FC%2B%2B-C23%20%2F%20C%2B%2B23-orange)
 ![License](https://img.shields.io/badge/license-GPLv2-green)
-![AI](https://img.shields.io/badge/AI--assisted-100%25-purple.svg)
 
-> **🤖 AI statement: all code in this project (including every modification, fix and optimization made during maintenance) was written/reviewed with AI assistance.**
+## Start in Termux
 
-## Upstream relationship (three-way lineage)
-
-```
-proot-me/proot (original PRoot, unmaintained)
-        │
-        ▼ fork: C23/C++23 + full ARMv8.2 performance + trimmed compatibility
-gitee.com/scicat-team/proot-scicat (uproot, stale since 2026-05)  ← direct ancestor (fork base)
-        │
-        ▼ took over maintenance: fixes + performance + compatibility (42+ commits)
-Raymer8639/neoproot (this project)
-        ▲
-        │ keeps tracking & backporting fixes (e.g. link2symlink proc-fd name substitution, 7ff389a1)
-github.com/termux/proot (actively maintained)  ← lineage origin / tracking target
-```
-
-- **Original PRoot**: [proot-me/proot](https://github.com/proot-me/proot) (effectively unmaintained upstream)
-- **Direct ancestor (former upstream)**: [gitee.com/scicat-team/proot-scicat](https://gitee.com/scicat-team/proot-scicat) (**uproot**, extreme-performance C23/C++23 fork; stale since 2026-05)
-- **Lineage origin / tracking target**: [github.com/termux/proot](https://github.com/termux/proot) (actively maintained by the Termux team; this project targets the ARM64/Termux use case and shares its origin and ecosystem)
-- **This project**: maintained since 2026-02 on top of uproot, **under active development**; fixes and optimizations are original to this project, with fixes backported from termux/proot as needed
-
-## Key features
-
-- ✅ Built-in automatic high-priority scheduling (`setpriority(-20)`) — stronger CPU resource affinity without ROOT
-- ✅ Fixes "legacy bugs" such as Chinese VNC exit hangs and logout requiring background switching
-- ✅ Eliminates the `signal 11` warning on process exit; adds process liveness checks
-- ✅ Max latency down 40%+, smoother; fairer threads, less jitter
-- ✅ Modern lean C23/C++23 architecture, trading generic compatibility for full ARMv8.2 performance
-- ✅ Built-in `neoproot.c` main program: automatic Termux environment initialization (wake-lock, fd limit, LD_* cleanup) — no manual startup flags needed
-- ✅ Removed the upstream-forked path translation thread pool (cond_wait round-trip overhead): on-device syscall handling now matches the official PRoot (lstat 304µs/call vs original 293–312µs), fixing jank in high-frequency operations like nvim
-- ✅ link2symlink hard-link emulation fully compatible with pnpm / tsc (tsgo) — the materialization mechanism plus /proc/&lt;pid&gt;/fd/&lt;fd&gt; name substitution (backported from termux/proot 7ff389a1) resolves tsgo's O_PATH+readlink real-path probing (TS2307/TS6054/panic all solved)
-
-## Performance
-
-From sysbench high-load tests (on par with the official PRoot at low load, no extra overhead):
-
-| Load | vs official PRoot |
-|------|-------------------|
-| Low (primes ≤ 10000) | On par (within noise) |
-| Medium-high (50000) | **Ahead by 2.9%** |
-| Extreme (100000) | **Ahead by 7.2%** |
-
-## Requirements
-
-- ARM64 Linux or Termux (aarch64 / arm64); the primary runtime target is
-  Android/Termux.
-- **x86_64 is unsupported.** Generic architecture support is deliberately
-  trimmed.
-
-## Quick start
-
-### Option 1: use a release asset on ARM64 Linux
-
-Download `neoproot` from [Releases](https://github.com/Raymer8639/neoproot/releases)
-for the optimized ARM64 build, or `neoproot-portable` for the ARMv8-A portable
-build (`-march=armv8-a -mtune=generic`). These assets are built on Ubuntu ARM64.
-The portable variant relaxes only the CPU instruction-set requirement; it does
-not guarantee compatibility with every libc or operating system. Test a
-release asset on your host before replacing a source build.
-
-Verify the file before installing it on an ARM64 Linux host:
-
-```sh
-binary=neoproot  # or neoproot-portable
-sha256sum "$binary"
-sudo install -m 755 "$binary" /usr/local/bin/neoproot
-```
-
-Compare the SHA256 output with the checksum published on the release page. You
-can instead install it in a user-controlled directory that is on your `PATH`.
-
-### Option 2: build from source inside Termux
-
-Native Termux uses Bionic. If a release asset does not run on your device,
-build from source in Termux:
+Use a release binary when it runs on your device; otherwise build the Termux-native binary:
 
 ```sh
 pkg install clang make llvm binutils pkg-config talloc
 git clone https://github.com/Raymer8639/neoproot.git
 cd neoproot
-sh build.sh install     # builds and installs to $PREFIX/bin
+sh build.sh install
 ```
 
-> `sh build.sh` builds `src/neoproot`; `sh build.sh install` also installs it as
-> `$PREFIX/bin/neoproot`. `upx` is optional and shrinks the binary.
-> You can also use `make -C src neoproot MARCH="-march=native"` to target your CPU's instruction set.
+The installer places `neoproot` in `$PREFIX/bin`. For ARM64 Linux, download `neoproot` or the lower-instruction-set `neoproot-portable` from [Releases](https://github.com/Raymer8639/neoproot/releases), verify its SHA256, and install it in your `PATH`.
 
-## Using a container
+## Why neoproot
+
+- Automatic Termux host setup: wake-lock, file-descriptor limits, and `LD_*` cleanup are handled by the `neoproot` launcher.
+- link2symlink hard-link emulation works with pnpm and TypeScript/tsgo workflows that probe real paths through `/proc/<pid>/fd/<fd>`.
+- High-frequency path operations avoid the fork's removed translation-thread-pool overhead, keeping nvim and package-manager workflows responsive.
+- Built-in high-priority scheduling (`setpriority(-20)`) improves CPU availability without root access.
+- Fixes include Chinese VNC exit hangs, logout/background-switch issues, and the misleading `signal 11` exit warning.
+- The codebase uses a lean C23/C++23 implementation tuned for ARMv8.2, trading generic architecture coverage for ARM64 performance.
+
+## Supported environments
+
+- 64-bit ARM Linux (`aarch64` / ARMv8.2+), with Android/Termux as the primary target.
+- Termux or an equivalent Android Linux environment, or an ARM64 Linux host.
+- The optimized build is intentionally **not supported on x86_64**. Use an ARM64 machine for the published binaries.
+
+## Container example
 
 ```sh
-# Enter a Debian/Ubuntu container as root (requires a prepared rootfs)
 neoproot -0 -r /data/data/com.termux/files/home/rootfs \
     -b /dev -b /proc -b /sys -b /sdcard \
     /usr/bin/env -i HOME=/root TERM=${TERM} PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     /bin/bash --login
 ```
 
-Usage is identical to the official PRoot, but **no** manual `unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW` is needed — the `neoproot` main program handles it automatically.
+The command-line interface follows official PRoot conventions. You do not need to manually unset `LD_PRELOAD`, `LD_LIBRARY_PATH`, or `LD_BIND_NOW`; the launcher handles those variables before entering the guest.
 
-## Documentation
+## Performance evidence
 
-- [Change history](CHANGELOG.md)
-- [Usage and FAQ](help.md)
-- [Security policy](SECURITY.md)
-- [Contributing](CONTRIBUTING.md)
-- [Support](SUPPORT.md)
+The table below is from the repository's sysbench workload on an ARM64 device. Results vary with SoC, thermal state, rootfs, and workload; treat them as a reproducible starting point, not a universal guarantee.
 
-## Versioning
+| Load | vs official PRoot |
+|------|-------------------|
+| Low (primes <= 10000) | On par (within noise) |
+| Medium-high (50000) | **Ahead by 2.9%** |
+| Extreme (100000) | **Ahead by 7.2%** |
 
-Version numbers follow the termux/proot style (e.g. `5.1.107.90`). Releases before 2026-08-15 kept the historical `-scicat` suffix (e.g. `v5.7.2-scicat`); starting with `v5.7.3` (2026-08-15) the suffix is dropped. See [CHANGELOG.md](CHANGELOG.md) for the change history.
+When reporting a result, include the device/SoC, Android and Termux versions, exact command, baseline version, and repeated measurements. Use the [performance report form](https://github.com/Raymer8639/neoproot/issues/new?template=performance_report.yml) so results can be compared.
 
 ## Build notes
 
-- Default compile target: `-march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto` (overridable via `MARCH=`); the portable release target is `-march=armv8-a -mtune=generic`
-- Link options: `-flto=thin`, `--gc-sections`, `--icf=all`, RELRO/NOW, stripped
-- Dependency: `libtalloc` (Termux package name `talloc`)
+- Default target: `-march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto` (override with `MARCH=`).
+- Portable releases use `-march=armv8-a -mtune=generic`; this relaxes CPU instructions but does not promise libc or kernel compatibility.
+- Link options include ThinLTO, section garbage collection, identical-code folding, RELRO/NOW, and stripping.
+- The build depends on `libtalloc` (Termux package: `talloc`). `upx` is optional.
 
-## Maintenance
+## Project lineage
 
-This project is community-maintained. Welcome to:
+neoproot was renamed from `proot-scicat` / `uproot` and continues to track useful fixes from [termux/proot](https://github.com/termux/proot). The original implementation is [proot-me/proot](https://github.com/proot-me/proot); the direct fork ancestor is [scicat-team/proot-scicat](https://gitee.com/scicat-team/proot-scicat). See [CHANGELOG.md](CHANGELOG.md) for version history and attribution.
 
-- Report issues via [Issue](https://github.com/Raymer8639/neoproot/issues)
-- Submit PRs for bug fixes and performance improvements
-- Discuss at [Discussions](https://github.com/Raymer8639/neoproot/discussions)
+## Contributing and support
+
+- [Report a bug](https://github.com/Raymer8639/neoproot/issues/new?template=bug_report.yml)
+- [Request a feature](https://github.com/Raymer8639/neoproot/issues/new?template=feature_request.yml)
+- [Ask a usage question](https://github.com/Raymer8639/neoproot/discussions)
+- Read [help.md](help.md), [SUPPORT.md](SUPPORT.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md)
+
+## Versioning
+
+Versions follow the termux/proot style. Releases before 2026-08-15 used the historical `-scicat` suffix; `v5.7.3` and later releases use the `neoproot` name without that suffix.
 
 ## License
 
-GPLv2, see [COPYING](COPYING).
+GPLv2; see [COPYING](COPYING).
