@@ -602,6 +602,12 @@ static FORCE_INLINE bool is_l2s_internal_name(const char *name) {
  * （typescript-go、musl realpath(3)）因此拿到内部名。本机制记住 tracee
  * 打开描述符时用的链名，readlink 出口换回（事件 READLINK_PROC_FD）。 */
 
+typedef enum {
+	L2S_STAT_EXIT_FALLBACK,
+	L2S_STAT_EXIT_SKIP,
+	L2S_STAT_EXIT_FIX,
+} L2SStatExitDisposition;
+
 typedef struct {
 	/* 正在翻译路径的最后一个组件被解引用前的 host 路径（链名）；
 	 * 空 = 本次路径的末组件不是 l2s 链。 */
@@ -613,6 +619,15 @@ typedef struct {
 
 	/* 仅由 --link2symlink-dirent 开启；默认路径不截获 getdents64。 */
 	bool dirent_enabled;
+
+	/* 路径型 stat 的出口处理：默认保守回退，只有已确认普通路径才跳过。 */
+	L2SStatExitDisposition stat_exit_disposition;
+
+	/* 只由回归测试环境变量开启，不影响正常运行时输出。 */
+	bool stat_exit_guard_test;
+	bool stat_exit_guard_test_initialized;
+	unsigned int stat_exit_checked;
+	unsigned int stat_exit_skipped;
 } Link2SymlinkConfig;
 
 static FORCE_INLINE Link2SymlinkConfig *get_config(Extension *extension, bool allocate) {
@@ -638,6 +653,25 @@ static FORCE_INLINE bool is_open_syscall(Sysnum sysnum) {
 	}
 }
 
+static FORCE_INLINE bool is_path_stat_syscall(Sysnum sysnum) {
+	switch (sysnum) {
+	case PR_stat:
+	case PR_stat64:
+	case PR_lstat:
+	case PR_lstat64:
+	case PR_fstatat64:
+	case PR_newfstatat:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static FORCE_INLINE bool is_l2s_stat_syscall(Sysnum sysnum) {
+	return is_path_stat_syscall(sysnum) || sysnum == PR_fstat ||
+		sysnum == PR_fstat64;
+}
+
 /* host_path 是否为 l2s 目录里的【最终数据文件】".l2s.<name><NNNN>.0002"
  * （中间链接 ".l2s.<name><NNNN>" 数字前无点，这里排除） */
 static FORCE_INLINE bool is_l2s_file(const char *host_path) {
@@ -654,6 +688,40 @@ static FORCE_INLINE bool is_l2s_file(const char *host_path) {
 static bool is_l2s_internal_path(const char *path) {
     char *name = get_filename((char *)path, NULL);
     return is_l2s_internal_name(name);
+}
+
+static FORCE_INLINE void initialize_stat_exit_guard_test(Link2SymlinkConfig *config) {
+	if (config == NULL || config->stat_exit_guard_test_initialized)
+		return;
+	config->stat_exit_guard_test =
+		getenv("NEOPROOT_TEST_L2S_STAT_EXIT_COUNTER") != NULL;
+	config->stat_exit_guard_test_initialized = true;
+}
+
+static FORCE_INLINE void classify_path_stat_exit(Extension *extension,
+							 Sysnum sysnum, const char *path) {
+	Link2SymlinkConfig *config;
+
+	if (!is_path_stat_syscall(sysnum))
+		return;
+	config = get_config(extension, true);
+	if (UNLIKELY(config == NULL))
+		return;
+	initialize_stat_exit_guard_test(config);
+	config->stat_exit_disposition =
+		(is_l2s_file(path) || is_l2s_internal_path(path))
+		? L2S_STAT_EXIT_FIX : L2S_STAT_EXIT_SKIP;
+}
+
+static FORCE_INLINE void fallback_path_stat_exit(Extension *extension,
+							Sysnum sysnum) {
+	Link2SymlinkConfig *config;
+
+	if (!is_path_stat_syscall(sysnum))
+		return;
+	config = get_config(extension, false);
+	if (config != NULL)
+		config->stat_exit_disposition = L2S_STAT_EXIT_FALLBACK;
 }
 
 static bool parse_l2s_final_count(const char *path, int *count) {
@@ -1121,6 +1189,9 @@ static FORCE_INLINE void translated_path(Extension *restrict extension, char *re
     }
     if (UNLIKELY(should_skip_file_access_due_to_f2fs_bug(tracee, translated_path))) return;
 
+    /* Earlier returns retain FALLBACK and therefore preserve the old exit path. */
+    classify_path_stat_exit(extension, sysnum, translated_path);
+
     char *filename = get_filename(translated_path, NULL);
     if (UNLIKELY(is_l2s_internal_name(filename))) {
         /* 进程可能通过 realpath/readlink 拿到 link2symlink 内部文件名后再次访问
@@ -1166,6 +1237,8 @@ static FORCE_INLINE void translated_path(Extension *restrict extension, char *re
     int status = my_readlink(translated_path, link_target, PATH_MAX);
     if (UNLIKELY(status < 0)) return;
     if (UNLIKELY(!is_l2s_internal_path(link_target))) return;
+    /* A broken or malformed L2S chain must retain the pre-existing exit path. */
+    fallback_path_stat_exit(extension, sysnum);
     status = my_readlink(link_target, final_target, PATH_MAX);
     if (UNLIKELY(status < 0)) return;
     if (UNLIKELY(!parse_l2s_final_count(final_target, &(int){0}))) return;
@@ -1174,6 +1247,41 @@ static FORCE_INLINE void translated_path(Extension *restrict extension, char *re
     if (UNLIKELY(is_open_syscall(sysnum)))
         remember_opened_link(extension, final_target);
     strcpy(translated_path, final_target);
+    classify_path_stat_exit(extension, sysnum, translated_path);
+}
+
+/* canonicalize checks each component before TRANSLATED_PATH is emitted.  An
+ * absolute backing path outside the rootfs would otherwise be prefixed with
+ * the rootfs and fail before the normal L2S remap can run. */
+static FORCE_INLINE void map_external_l2s_host_path(char *host_path) {
+    char alt[PATH_MAX] ALIGNED;
+    const char *filename;
+    size_t filename_length;
+
+    if (UNLIKELY(host_path == NULL || !get_l2s_directory()))
+        return;
+    filename = get_filename(host_path, NULL);
+    if (UNLIKELY(!is_l2s_internal_name(filename)))
+        return;
+    int host_access = l2s_access(host_path);
+    if (LIKELY(host_access == 0)) {
+        /* Symlink targets are canonicalized component by component.  An
+         * external absolute target would fail on its first parent component;
+         * collapse it to a root-level guest name for the recursive pass. */
+        if (strncmp(host_path, l2s_directory, l2s_directory_length) == 0 &&
+            host_path[l2s_directory_length] == '/') {
+            snprintf(alt, sizeof(alt), "/%s", filename);
+            strcpy(host_path, alt);
+        }
+        return;
+    }
+    filename_length = strlen(filename);
+    if (UNLIKELY(l2s_directory_length + 1 + filename_length >= PATH_MAX))
+        return;
+    snprintf(alt, sizeof(alt), "%s/%s", l2s_directory, filename);
+    if (LIKELY(l2s_access(alt) == 0)) {
+        strcpy(host_path, alt);
+    }
 }
 
 static FORCE_INLINE int handle_linkat_from_proc_fd(Tracee *restrict tracee) {
@@ -1230,8 +1338,10 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
     case SYSCALL_ENTER_START: {
         /* 忘掉未被 exit 阶段消费的解引用记录（上游 7ff389a1） */
         Link2SymlinkConfig *config = get_config(extension, false);
-        if (config != NULL)
+        if (config != NULL) {
             config->pending_link[0] = '\0';
+            config->stat_exit_disposition = L2S_STAT_EXIT_FALLBACK;
+        }
         return 0;
     }
     case SYSCALL_ENTER_END: {
@@ -1297,6 +1407,18 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
             }
             return 0;
         }
+		if (config != NULL && is_path_stat_syscall(sysnum) &&
+		    config->stat_exit_disposition == L2S_STAT_EXIT_SKIP) {
+			if (config->stat_exit_guard_test)
+				config->stat_exit_skipped++;
+			return 0;
+		}
+		if (config != NULL && is_l2s_stat_syscall(sysnum) &&
+		    peek_reg(tracee, CURRENT, SYSARG_RESULT) == 0) {
+			initialize_stat_exit_guard_test(config);
+			if (config->stat_exit_guard_test)
+				config->stat_exit_checked++;
+		}
         return handle_sysexit_end(extension);
     }
     case INITIALIZATION: {
@@ -1419,6 +1541,9 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
     case TRANSLATED_PATH:
         translated_path(extension, (char *)data1);
         return 0;
+    case HOST_PATH:
+        map_external_l2s_host_path((char *)data1);
+        return 0;
     case STATX_SYSCALL:
         link2symlink_handle_statx((struct statx_syscall_state *)data1);
         return 0;
@@ -1439,6 +1564,13 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
 		}
         return 0;
     }
+    case REMOVED: {
+		Link2SymlinkConfig *config = get_config(extension, false);
+		if (config != NULL && config->stat_exit_guard_test)
+			fprintf(stderr, "neoproot l2s-stat-exit guard: checked=%u skipped=%u\n",
+				config->stat_exit_checked, config->stat_exit_skipped);
+		return 0;
+	}
     case SIGSYS_OCC:
         if (get_sysnum(tracee, CURRENT) == PR_memfd_create)
             return handle_linkat_from_proc_fd(tracee);

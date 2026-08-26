@@ -119,11 +119,11 @@ static int substitute_binding_stat(Tracee *restrict tracee, Finality finality,
     neon_strcpy_fast(host_path, guest_path);
     res = substitute_binding(tracee, GUEST, host_path);
     if (UNLIKELY(res < 0)) return res;
-    if (tracee->glue_type == 0) {
-        res = notify_extensions(tracee, HOST_PATH, (intptr_t)host_path,
-                                IS_FINAL(finality) && recursion_level == 0);
-        if (UNLIKELY(res < 0)) return res;
-    }
+    /* Extensions may need to resolve host-only paths even when procfs glue is
+     * active; link2symlink uses this during recursive external-chain lookup. */
+    res = notify_extensions(tracee, HOST_PATH, (intptr_t)host_path,
+                            IS_FINAL(finality) && recursion_level == 0);
+    if (UNLIKELY(res < 0)) return res;
     if (should_skip_file_access_due_to_f2fs_bug(tracee, host_path)) {
         res = -ENOENT;
     } else {
@@ -221,6 +221,12 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
         if (UNLIKELY((size_t)res >= PATH_MAX)) return -ENAMETOOLONG;
         scratch_path[res] = '\0';
         res = detranslate_path(tracee, scratch_path, host_path);
+        if (UNLIKELY(res < 0)) return res;
+        /* The symlink target may point into an external L2S backing directory.
+         * Give extensions one more chance to remap that host-only component
+         * before recursively canonicalizing it under the guest root. */
+        res = notify_extensions(tracee, HOST_PATH, (intptr_t)scratch_path,
+                                IS_FINAL(fin) && recursion_level == 0);
         if (UNLIKELY(res < 0)) return res;
 canon_symlink:
         /* 上游 d86f355：顺序符号链接也计入 MAXSYMLINKS（单路径内多条

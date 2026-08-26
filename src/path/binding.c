@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <limits.h>
 #include <errno.h>
+#include <stdio.h>
 #include <sys/queue.h>
 #include <talloc.h>
 #include <stdlib.h>
@@ -82,7 +83,7 @@
 	talloc_unlink((tracee)->fs->bindings.name, binding);		\
 } while (0)
 
-typedef struct {
+typedef struct binding_cache {
 	Binding **entries;
 	size_t count;
 	const char *cached_root;
@@ -91,10 +92,27 @@ typedef struct {
 static ALWAYS_INLINE BindingCache *get_binding_cache(const Tracee *restrict tracee) {
 	if (UNLIKELY(!tracee || !tracee->fs))
 		return NULL;
-	BindingCache *cache = talloc_find_parent_bytype(tracee->fs, BindingCache);
+	BindingCache *cache = tracee->fs->binding_cache;
+	if (LIKELY(cache))
+		return cache;
+	cache = talloc_zero(tracee->fs, BindingCache);
 	if (UNLIKELY(!cache))
-		cache = talloc_zero(tracee->fs, BindingCache);
+		return NULL;
+	if (getenv("NEOPROOT_TEST_BINDING_CACHE_COUNTER") != NULL)
+		fprintf(stderr, "neoproot binding cache: allocate\n");
+	tracee->fs->binding_cache = cache;
 	return cache;
+}
+
+static ALWAYS_INLINE void invalidate_binding_cache(const Tracee *restrict tracee) {
+	if (UNLIKELY(!tracee || !tracee->fs))
+		return;
+	BindingCache *cache = tracee->fs->binding_cache;
+	if (UNLIKELY(!cache))
+		return;
+	TALLOC_FREE(cache->entries);
+	cache->count = 0;
+	cache->cached_root = NULL;
 }
 
 static int compare_by_desc_length(const void *a, const void *b) {
@@ -103,7 +121,7 @@ static int compare_by_desc_length(const void *a, const void *b) {
 	return (ssize_t)((*bb)->guest.length - (*ba)->guest.length);
 }
 
-static void build_guest_binding_cache(Tracee *restrict tracee) {
+static void build_guest_binding_cache(const Tracee *restrict tracee) {
 	BindingCache *cache = get_binding_cache(tracee);
 	if (UNLIKELY(!cache || cache->entries))
 		return;
@@ -123,7 +141,9 @@ static void build_guest_binding_cache(Tracee *restrict tracee) {
 }
 
 static Binding *find_best_prefix(const Tracee *restrict tracee, const char *restrict path, size_t path_len) {
-	const BindingCache *cache = get_binding_cache(tracee);
+	BindingCache *cache = get_binding_cache(tracee);
+	if (UNLIKELY(cache && !cache->entries))
+		build_guest_binding_cache(tracee);
 	if (UNLIKELY(!cache || !cache->entries || cache->count == 0))
 		return NULL;
 	const char path_first = path[0];
@@ -210,6 +230,7 @@ int substitute_binding(const Tracee *restrict tracee, Side side, char path[PATH_
 }
 
 void remove_binding_from_all_lists(const Tracee *restrict tracee, Binding *restrict binding) {
+	invalidate_binding_cache(tracee);
 	if (IS_LINKED(binding, link.pending))
 		CIRCLEQ_REMOVE_(tracee, binding, pending);
 	if (IS_LINKED(binding, link.guest))
@@ -219,6 +240,8 @@ void remove_binding_from_all_lists(const Tracee *restrict tracee, Binding *restr
 }
 
 static void insort_binding(const Tracee *restrict tracee, Side side, Binding *restrict binding) {
+	if (side == GUEST)
+		invalidate_binding_cache(tracee);
 	Binding *iterator, *prev = NULL, *next = CIRCLEQ_FIRST(HEAD(tracee, side));
 	CIRCLEQ_FOREACH_(tracee, iterator, side) {
 		const Path *bp = (side == GUEST || side == PENDING) ? &binding->guest : &binding->host;
