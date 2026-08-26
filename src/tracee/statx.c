@@ -1,6 +1,8 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/sysmacros.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <string.h>
 
@@ -14,6 +16,23 @@
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #define ALWAYS_INLINE __attribute__((always_inline, flatten)) inline
 #define HOT __attribute__((hot))
+
+static int statx_host_path(const char *path, int flags, unsigned int mask,
+                           struct statx *buffer)
+{
+#if defined(SYS_statx)
+    return syscall(SYS_statx, AT_FDCWD, path, flags & ~AT_EMPTY_PATH, mask, buffer);
+#elif defined(__NR_statx)
+    return syscall(__NR_statx, AT_FDCWD, path, flags & ~AT_EMPTY_PATH, mask, buffer);
+#else
+    (void)path;
+    (void)flags;
+    (void)mask;
+    (void)buffer;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
 
 // 常量定义，避免魔法数
 #define STATX_ALL_SUPPORTED_MASK ( \
@@ -40,8 +59,8 @@ int handle_statx_syscall(Tracee *restrict tracee, bool from_sigsys)
     const word_t reg2 = peek_reg(tracee, reg_ver, SYSARG_2);
     const word_t reg3 = peek_reg(tracee, reg_ver, SYSARG_3);
     const word_t reg4 = peek_reg(tracee, reg_ver, SYSARG_4);
-    // 统一使用ORIGINAL寄存器的用户态地址，避免中间逻辑修改寄存器导致写错地址
-    const word_t statx_addr = peek_reg(tracee, ORIGINAL, SYSARG_5);
+    /* SIGSYS handling rewrites the live register set before emulation. */
+    const word_t statx_addr = peek_reg(tracee, reg_ver, SYSARG_5);
 
     const int dirfd     = (int)reg1;
     const word_t path_addr = reg2;
@@ -67,7 +86,22 @@ int handle_statx_syscall(Tracee *restrict tracee, bool from_sigsys)
         if (UNLIKELY(status < 0)) {
             return status;
         }
-        // 空路径仅支持stat，不支持lstat
+
+        // Preserve mount metadata such as STATX_MNT_ID when emulating an
+        // empty-path lookup. Fall back to stat(2) on older host kernels.
+        status = statx_host_path(state.host_path, flags, (unsigned int)mask,
+                                 &state.statx_buf);
+        if (status == 0) {
+            state.updated_stats = 1;
+            status = notify_extensions(tracee, STATX_SYSCALL, (intptr_t)&state, 0);
+            if (UNLIKELY(status < 0)) {
+                return status;
+            }
+            return write_data(tracee, statx_addr, &state.statx_buf,
+                              sizeof(struct statx));
+        }
+
+        // Empty path only supports stat semantics in the legacy fallback.
         status = stat(state.host_path, &st);
         if (UNLIKELY(status < 0)) {
             return -errno;

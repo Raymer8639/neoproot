@@ -59,6 +59,8 @@ jobs:
           PROOT=../src/neoproot sh advanced_test.sh
           PROOT=../src/neoproot sh test-security-regressions.sh
           PROOT=../src/neoproot sh test-link2symlink-dirent.sh
+          PROOT=../src/neoproot sh test-link2symlink-stat-guard.sh
+          PROOT=../src/neoproot sh test-link2symlink-node-workflow.sh
           PROOT=../src/neoproot sh test-bwrap-oldroot-bind.sh
           PROOT=../src/neoproot sh test-bwrap-proc-dirfd.sh
           PROOT=../src/neoproot sh test-tracer-guard.sh

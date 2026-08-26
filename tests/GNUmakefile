@@ -11,9 +11,13 @@ TEST_PROGS = test_argv test_echo test_file_ops test_dir_ops test-openat2
 # 测试脚本列表
 TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-runtime-bindings.sh test-security-regressions.sh \
-	test-link2symlink-dirent.sh test-bwrap-oldroot-bind.sh \
+	test-link2symlink-dirent.sh test-link2symlink-stat-guard.sh \
+	test-link2symlink-node-workflow.sh \
+	test-binding-cache.sh \
+	test-bwrap-oldroot-bind.sh \
 	test-bwrap-proc-dirfd.sh test-tracer-guard.sh \
-	test-8d3c07f5.sh
+	test-8d3c07f5.sh \
+	test-statx-empty-path-mount-id.sh
 
 # 默认目标
 all: $(TEST_PROGS)
