@@ -1,0 +1,89 @@
+name: Performance report
+description: Share a reproducible ARM64/Android/Termux performance result.
+title: "perf: "
+labels: [performance]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        English is preferred. 中文可直接写在 English 后面。
+        Do not include credentials, private rootfs files, personal data, or vulnerability details.
+  - type: input
+    id: version
+    attributes:
+      label: neoproot version / 版本
+      description: Include `neoproot --version`, release tag, or commit.
+      placeholder: v5.9.1
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device and SoC / 设备与 SoC
+      description: Phone/tablet model and chip; include thermal or power mode if relevant.
+      placeholder: Pixel 8 / Tensor G3 / performance mode
+    validations:
+      required: true
+  - type: input
+    id: android
+    attributes:
+      label: Android and Termux / Android 与 Termux
+      description: Android release, Termux source, and Termux version.
+      placeholder: Android 16 / F-Droid Termux 0.119 / aarch64
+    validations:
+      required: true
+  - type: input
+    id: rootfs
+    attributes:
+      label: Rootfs / 用户空间
+      description: Distribution and version only; do not attach private rootfs files.
+      placeholder: Debian 13 arm64
+    validations:
+      required: true
+  - type: textarea
+    id: workload
+    attributes:
+      label: Workload and exact command / 工作负载与完整命令
+      description: Include the command, working directory shape, and any relevant environment variables.
+      placeholder: |
+        pnpm install
+        neoproot -r ... /usr/bin/time -v pnpm install
+    validations:
+      required: true
+  - type: textarea
+    id: baseline
+    attributes:
+      label: Baseline / 对照组
+      description: State the official PRoot version or other baseline and use the same rootfs and command.
+      placeholder: official termux/proot 5.1.107, same rootfs and command
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Repeated results / 多次结果
+      description: Provide at least three runs for each binary and include units. Note cold/warm cache state.
+      placeholder: |
+        neoproot: 1.20s, 1.18s, 1.21s
+        official PRoot: 1.25s, 1.27s, 1.24s
+        cold cache / warm cache: ...
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Sanitized output / 脱敏输出
+      description: Paste relevant output only; remove usernames, tokens, private paths, and personal data.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks / 提交检查
+      options:
+        - label: I used the same workload and rootfs for the comparison. / 我对比时使用了相同的工作负载和用户空间。
+          required: true
+        - label: I removed secrets, personal data, private paths, and exploit details. / 我已移除密钥、个人数据、私有路径和漏洞细节。
+          required: true
+        - label: This is not a security vulnerability report. / 这不是安全漏洞报告。
+          required: true
