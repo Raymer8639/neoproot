@@ -88,10 +88,10 @@
 
   Confirm no source files, Chinese study files, or unrelated generated files are staged.
 
-- [ ] **Step 3: Commit and push**
+- [x] **Step 3: Commit and push**
 
   Commit as `docs: improve English-first project discoverability` and push `codex/english-discoverability`.
 
-- [ ] **Step 4: Open a draft PR**
+- [x] **Step 4: Open a draft PR**
 
   Create a draft PR targeting `master` with a body describing the English-first README, Chinese parity, announcement, issue form, metadata, and validation commands.
