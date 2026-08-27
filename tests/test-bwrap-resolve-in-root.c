@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
+#include <limits.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +37,32 @@ static int openat_in_root(int dirfd, const char *path)
     return syscall(SYS_openat2, dirfd, path, &how, sizeof(how));
 }
 
+static int check_reported_cwd(void)
+{
+    char cwd[PATH_MAX];
+    char proc_cwd[PATH_MAX];
+    ssize_t length;
+
+    if (getcwd(cwd, sizeof(cwd)) == NULL)
+        return fail("getcwd after bwrap pivot");
+    if (strcmp(cwd, "/cwd-probe") != 0) {
+        fprintf(stderr, "getcwd reported %s, expected /cwd-probe\n", cwd);
+        return 1;
+    }
+
+    length = readlink("/proc/self/cwd", proc_cwd, sizeof(proc_cwd) - 1);
+    if (length < 0)
+        return fail("readlink /proc/self/cwd after bwrap pivot");
+    proc_cwd[length] = '\0';
+    if (strcmp(proc_cwd, "/cwd-probe") != 0) {
+        fprintf(stderr, "/proc/self/cwd reported %s, expected /cwd-probe\n",
+                proc_cwd);
+        return 1;
+    }
+
+    return 0;
+}
+
 static int bwrap_like_child(void *opaque)
 {
     char source_proc_path[64];
@@ -58,6 +85,8 @@ static int bwrap_like_child(void *opaque)
         return fail("pivot_root /tmp /tmp/oldroot");
     if (chdir("/") < 0)
         return fail("chdir after pivot_root");
+    if (make_dir("/oldroot/cwd-probe") != 0)
+        return 1;
     if (make_dir("/proc") != 0)
         return 1;
     if (mount("oldroot/proc", "proc", NULL, MS_BIND | MS_REC | MS_SILENT,
@@ -102,6 +131,11 @@ static int bwrap_like_child(void *opaque)
         return fail("second pivot_root bwrap newroot");
     if (chdir("/") < 0)
         return fail("chdir after second pivot_root");
+
+    if (chdir("/oldroot/cwd-probe") < 0)
+        return fail("chdir oldroot cwd probe");
+    if (check_reported_cwd() != 0)
+        return 1;
 
     fd = open("/probe", O_RDONLY | O_CLOEXEC);
     if (fd < 0)

@@ -253,16 +253,7 @@ void translate_syscall_exit(Tracee *tracee)
         if (status < 0)
             break;
 
-        reported_cwd = tracee->fs->cwd;
-        if (tracee->fs->cwd_alias_prefix != NULL) {
-            size_t prefix_len = strlen(tracee->fs->cwd_alias_prefix);
-            if (strncmp(reported_cwd, tracee->fs->cwd_alias_prefix,
-                        prefix_len) == 0 &&
-                (reported_cwd[prefix_len] == 0 ||
-                 reported_cwd[prefix_len] == '/'))
-                reported_cwd = reported_cwd[prefix_len] == 0
-                    ? "/" : reported_cwd + prefix_len;
-        }
+        reported_cwd = get_reported_cwd(tracee);
 
         new_size = strlen(reported_cwd) + 1;
         if (size < new_size) {

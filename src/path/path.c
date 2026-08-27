@@ -274,6 +274,23 @@ int getcwd2(Tracee *tracee, char guest_path[PATH_MAX])
     return 0;
 }
 
+const char *get_reported_cwd(const Tracee *tracee)
+{
+    const char *cwd = tracee->fs->cwd;
+    const char *alias = tracee->fs->cwd_alias_prefix;
+    size_t alias_len;
+
+    if (alias == NULL)
+        return cwd;
+
+    alias_len = strlen(alias);
+    if (strncmp(cwd, alias, alias_len) != 0 ||
+        (cwd[alias_len] != '\0' && cwd[alias_len] != '/'))
+        return cwd;
+
+    return cwd[alias_len] == '\0' ? "/" : cwd + alias_len;
+}
+
 void chop_finality(char *path)
 {
     size_t len = strlen(path);
