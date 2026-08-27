@@ -22,6 +22,10 @@
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #define ALWAYS_INLINE __attribute__((always_inline)) inline
 
+#ifndef RESOLVE_IN_ROOT
+#define RESOLVE_IN_ROOT 0x10
+#endif
+
 #define TRANSFORM_TO_AT_SYS(new_sys, fd, path, ...) do { \
     set_sysnum(tracee, new_sys); \
     poke_reg(tracee, SYSARG_1, fd); \
@@ -173,6 +177,8 @@ static int handle_seccomp_event_common(Tracee *restrict tracee) {
                 set_result_after_seccomp(tracee, status);
                 break;
             }
+            tracee->openat2_resolve_in_root =
+                (how.resolve & RESOLVE_IN_ROOT) != 0;
             set_sysnum(tracee, PR_openat);
             poke_reg(tracee, SYSARG_3, how.flags);
             poke_reg(tracee, SYSARG_4, how.mode);

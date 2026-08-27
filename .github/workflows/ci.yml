@@ -63,6 +63,8 @@ jobs:
           PROOT=../src/neoproot sh test-link2symlink-node-workflow.sh
           PROOT=../src/neoproot sh test-bwrap-oldroot-bind.sh
           PROOT=../src/neoproot sh test-bwrap-proc-dirfd.sh
+          PROOT=../src/neoproot sh test-bwrap-procfd-mount-target.sh
+          PROOT=../src/neoproot sh test-bwrap-resolve-in-root.sh
           PROOT=../src/neoproot sh test-tracer-guard.sh
           PROOT=../src/neoproot sh test-8d3c07f5.sh
 

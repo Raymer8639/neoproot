@@ -11,6 +11,7 @@
 #include <sys/time.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/mount.h>
@@ -46,6 +47,10 @@
 #include "path/temp.h"
 #include "arch.h"
 #include "attribute.h"
+
+#ifndef RESOLVE_IN_ROOT
+#define RESOLVE_IN_ROOT 0x10
+#endif
 
 /* 上游 064617f：bubblewrap 等需要剥离命名空间 flag */
 #ifndef CLONE_NEWTIME
@@ -209,6 +214,49 @@ static int guest_canonicalize(Tracee *tracee, const char *user_path,
     return 0;
 }
 
+/* bwrap mounts through /proc/self/fd/N after pivot_root. The kernel uses
+ * that fd's real path, so the emulated binding must do the same. */
+static bool parse_tracee_proc_fd(const Tracee *tracee, const char *path,
+                                 int *fd)
+{
+    const char *number;
+    char *end;
+    long value;
+
+    if (strncmp(path, "/proc/self/fd/", 14) == 0) {
+        number = path + 14;
+    }
+    else if (strncmp(path, "/proc/", 6) == 0) {
+        long pid = strtol(path + 6, &end, 10);
+
+        if (end == path + 6 || pid != tracee->pid ||
+            strncmp(end, "/fd/", 4) != 0)
+            return false;
+        number = end + 4;
+    }
+    else {
+        return false;
+    }
+
+    errno = 0;
+    value = strtol(number, &end, 10);
+    if (errno != 0 || end == number || *end != '\0' ||
+        value < 0 || value > INT_MAX)
+        return false;
+
+    *fd = (int) value;
+    return true;
+}
+
+static bool resolve_tracee_proc_fd(const Tracee *tracee, const char *path,
+                                   char host_path[PATH_MAX])
+{
+    int fd;
+
+    return parse_tracee_proc_fd(tracee, path, &fd) &&
+        readlink_proc_pid_fd(tracee->pid, fd, host_path) == 0;
+}
+
 static void emulate_mount(Tracee *tracee, const char *src_user,
                           const char *target_user, const char *fstype,
                           unsigned long flags)
@@ -222,7 +270,8 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
         return;
 
     if ((flags & MS_BIND) != 0) {
-        if (translate_path(tracee, host_path, AT_FDCWD, src_user, true) < 0)
+        if (!resolve_tracee_proc_fd(tracee, src_user, host_path) &&
+            translate_path(tracee, host_path, AT_FDCWD, src_user, true) < 0)
             return;
     }
     else if (strcmp(fstype, "proc") == 0)
@@ -251,8 +300,17 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
             host_path[--host_len] = '\0';
     }
 
-    if (guest_canonicalize(tracee, target_user, guest_path) < 0)
+    if (resolve_tracee_proc_fd(tracee, target_user, guest_path)) {
+        int status;
+
+        chop_finality(guest_path);
+        status = detranslate_path(tracee, guest_path, NULL);
+        if (status < 0)
+            return;
+    }
+    else if (guest_canonicalize(tracee, target_user, guest_path) < 0) {
         return;
+    }
 
     (void) insort_binding4(tracee, tracee->fs, host_path, guest_path, mount_kind);
 }
@@ -279,6 +337,14 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
     chop_finality(new_root_host);
 
     if (guest_canonicalize(tracee, new_root_user, new_root_guest) < 0)
+        return;
+
+    /* bubblewrap has already assembled the virtual root through bindings,
+     * then uses pivot_root(".", ".") from /newroot only to detach its
+     * temporary construction tree.  Rebinding root to that physical tmpfs
+     * directory discards the completed virtual root. */
+    if (strcmp(new_root_user, ".") == 0 && strcmp(put_old_user, ".") == 0 &&
+        strcmp(new_root_guest, "/newroot") == 0)
         return;
 
     if (put_old_user[0] == '/')
@@ -2291,8 +2357,12 @@ int translate_syscall_enter(Tracee *tracee)
         if (how_size > sizeof(how))
             how_size = sizeof(how);
         status = read_data(tracee, &how, peek_reg(tracee, CURRENT, SYSARG_3), how_size);
-        if (status < 0)
+        if (status < 0) {
+            tracee->openat2_resolve_in_root = false;
             break;
+        }
+        tracee->openat2_resolve_in_root =
+            (how.resolve & RESOLVE_IN_ROOT) != 0;
         set_sysnum(tracee, PR_openat);
         poke_reg(tracee, SYSARG_3, how.flags);
         poke_reg(tracee, SYSARG_4, how.mode);
@@ -2303,12 +2373,15 @@ int translate_syscall_enter(Tracee *tracee)
         flags = peek_reg(tracee, CURRENT, SYSARG_3);
 
         status = get_sysarg_path(tracee, path, SYSARG_2);
-        if (status < 0)
+        if (status < 0) {
+            tracee->openat2_resolve_in_root = false;
             break;
+        }
 
         /* auxv 通道 2 修复：同 PR_open（openat2 已改写为 openat，
          * 也走这里） */
         if (is_proc_self_auxv(tracee, path) && tracee->auxv_host_path != NULL) {
+            tracee->openat2_resolve_in_root = false;
             status = set_sysarg_path(tracee, tracee->auxv_host_path, SYSARG_2);
             if (status < 0)
                 break;
@@ -2317,9 +2390,41 @@ int translate_syscall_enter(Tracee *tracee)
 
         if ((flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) != 0) {
             status = check_bind_readonly(tracee, path);
-            if (status < 0)
+            if (status < 0) {
+                tracee->openat2_resolve_in_root = false;
                 break;
+            }
         }
+
+        if (tracee->openat2_resolve_in_root && dirfd != AT_FDCWD &&
+            path[0] == '/') {
+            char dir_path[PATH_MAX];
+            int dir_status = readlink_proc_pid_fd(tracee->pid, dirfd, dir_path);
+            bool dir_is_newroot = false;
+
+            if (dir_status == 0) {
+                dir_status = detranslate_path(tracee, dir_path, NULL);
+                dir_is_newroot = dir_status >= 0 &&
+                    strcmp(dir_path, "/newroot") == 0;
+            }
+            if (dir_is_newroot) {
+                /* bwrap builds its future root through this fd.  Keep its
+                 * mounts at the current virtual root so later setup syscalls
+                 * observe them before the second pivot_root. */
+                dirfd = AT_FDCWD;
+                poke_reg(tracee, SYSARG_1, dirfd);
+            } else {
+                /* RESOLVE_IN_ROOT interprets absolute paths below dirfd.  In
+                 * particular, '/' means the fd itself, not the current root. */
+                const char *relative_path = path[1] == '\0' ? "." : path + 1;
+
+                status = set_sysarg_path(tracee, relative_path, SYSARG_2);
+                if (status < 0)
+                    break;
+                memmove(path, relative_path, strlen(relative_path) + 1);
+            }
+        }
+        tracee->openat2_resolve_in_root = false;
 
         if (((flags & O_NOFOLLOW) != 0) || ((flags & O_EXCL) != 0 && (flags & O_CREAT) != 0))
             status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);

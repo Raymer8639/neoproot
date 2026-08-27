@@ -2,12 +2,15 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int fail(const char *message)
@@ -59,15 +62,15 @@ static int mountinfo_has_mountpoint(int fd, const char *expected)
     return found;
 }
 
-int main(void)
-{
+struct probe_context {
     int proc_fd;
+};
+
+static int probe_mountinfo(void *opaque)
+{
+    const struct probe_context *context = opaque;
     int fd;
     int present;
-
-    proc_fd = open("/proc", O_PATH | O_DIRECTORY | O_CLOEXEC);
-    if (proc_fd < 0)
-        return fail("open /proc");
 
     if (mount("tmpfs", "/tmp", "tmpfs", 0, NULL) < 0)
         return fail("mount tmpfs /tmp");
@@ -88,12 +91,12 @@ int main(void)
     if (mount("proc", "/proc", "proc", 0, NULL) < 0)
         return fail("mount proc /proc");
 
-    fd = openat(proc_fd, "self", O_PATH | O_CLOEXEC);
+    fd = openat(context->proc_fd, "self", O_PATH | O_CLOEXEC);
     if (fd < 0)
         return fail("openat inherited /proc self");
     close(fd);
 
-    fd = openat(proc_fd, "self/mountinfo", O_RDONLY | O_CLOEXEC);
+    fd = openat(context->proc_fd, "self/mountinfo", O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return fail("openat inherited /proc fd");
     present = mountinfo_has_mountpoint(fd, "/oldroot");
@@ -101,6 +104,41 @@ int main(void)
         return fail("read inherited mountinfo");
     if (present == 0) {
         fprintf(stderr, "inherited mountinfo misses /oldroot\n");
+        return 1;
+    }
+
+    return 0;
+}
+
+int main(void)
+{
+    struct probe_context context;
+    void *stack;
+    pid_t child;
+    int status;
+
+    context.proc_fd = open("/proc", O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (context.proc_fd < 0)
+        return fail("open /proc");
+
+    stack = malloc(1024 * 1024);
+    if (stack == NULL)
+        return fail("allocate clone stack");
+
+    child = clone(probe_mountinfo, (char *) stack + 1024 * 1024,
+                  CLONE_NEWNS | CLONE_NEWPID | SIGCHLD, &context);
+    if (child < 0) {
+        free(stack);
+        return fail("clone mount namespace child");
+    }
+    if (waitpid(child, &status, 0) < 0) {
+        free(stack);
+        return fail("wait for mount namespace child");
+    }
+    free(stack);
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "mount namespace child failed (status %d)\n", status);
         return 1;
     }
 

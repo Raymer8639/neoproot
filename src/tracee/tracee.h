@@ -70,6 +70,9 @@ typedef struct tracee {
 
 	/* 上游 87af48f：CLONE_NEWNET 被剥掉时置位，传给子进程成为 fake_netns。 */
 	bool         clone_stripped_newnet;
+	/* openat2 RESOLVE_IN_ROOT is preserved while the syscall is lowered to
+	 * openat, whose ABI has no equivalent resolve flag. */
+	bool         openat2_resolve_in_root;
 
 	/* 上游 87af48f：该 tracee 认为自己拥有独立网络命名空间。 */
 	bool         fake_netns;

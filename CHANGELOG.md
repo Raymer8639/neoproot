@@ -3,6 +3,19 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.9.2] - 2026-08-27
+
+**Codex bubblewrap root-bind compatibility patch**
+
+- bwrap/Codex sandbox: preserve `openat2(..., RESOLVE_IN_ROOT, "/")`
+  semantics while lowering to `openat`, so bwrap resolves the original root
+  through its `/oldroot` descriptor rather than the temporary tmpfs root.
+- bwrap/Codex sandbox: retain the already-assembled virtual binding tree when
+  bwrap performs its final `pivot_root(".", ".")`, keeping the Codex executable
+  and home tree available to the sandboxed process.
+- Tests/CI: register procfd mount targets and the `RESOLVE_IN_ROOT` root-bind
+  sequence in the release and portable ARM64 workflows.
+
 ## [v5.9.0] - 2026-08-23
 
 **Compatibility, safety, and regression coverage release**
