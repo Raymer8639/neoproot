@@ -101,7 +101,7 @@ Action readlink_proc(const Tracee *tracee, char result[PATH_MAX],
 		/* Substitute link "/proc/<PID>/???" with the content
 		 * of tracee->???.  */
 		SUBSTITUTE(exe, known_tracee->exe);
-		SUBSTITUTE(cwd, get_reported_cwd(known_tracee));
+		SUBSTITUTE(cwd, known_tracee->fs->cwd);
 		SUBSTITUTE(root, get_root(known_tracee));
 #undef SUBSTITUTE
 		return DEFAULT;

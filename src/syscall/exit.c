@@ -643,6 +643,32 @@ void translate_syscall_exit(Tracee *tracee)
             }
         }
 
+        {
+            bool is_cwd_link = (strcmp(referer, "/proc/self/cwd") == 0);
+            if (!is_cwd_link) {
+                char proc_cwd[PATH_MAX];
+                int n = snprintf(proc_cwd, sizeof(proc_cwd), "/proc/%d/cwd", tracee->pid);
+                if (n > 0 && (size_t) n < sizeof(proc_cwd))
+                    is_cwd_link = (strcmp(referer, proc_cwd) == 0);
+            }
+            if (is_cwd_link) {
+                const char *reported_cwd = get_reported_cwd(tracee);
+                size_t len = strlen(reported_cwd);
+                size_t write_size;
+
+                if (len >= PATH_MAX) {
+                    status = -ENAMETOOLONG;
+                    break;
+                }
+                write_size = len < max_size ? len : max_size;
+                status = write_data(tracee, output, reported_cwd, write_size);
+                if (status < 0)
+                    break;
+                status = write_size;
+                break;
+            }
+        }
+
         /* Linux readlink 在用户缓冲不足时静默截断并返回 bufsiz（"缓冲满"
          * 语义，调用方凭返回值扩大缓冲重试，如 tsgo realpath 的 O_PATH +
          * readlink(/proc/self/fd/N) 技巧）。截断内容经 detranslate 缩短后

@@ -39,13 +39,17 @@ static int openat_in_root(int dirfd, const char *path)
 
 static int check_reported_cwd(void)
 {
+    static const char expected[] = "/cwd-probe";
     char cwd[PATH_MAX];
     char proc_cwd[PATH_MAX];
+    char proc_pid[64];
+    char exact[sizeof(expected)];
+    char truncated[4];
     ssize_t length;
 
     if (getcwd(cwd, sizeof(cwd)) == NULL)
         return fail("getcwd after bwrap pivot");
-    if (strcmp(cwd, "/cwd-probe") != 0) {
+    if (strcmp(cwd, expected) != 0) {
         fprintf(stderr, "getcwd reported %s, expected /cwd-probe\n", cwd);
         return 1;
     }
@@ -54,9 +58,33 @@ static int check_reported_cwd(void)
     if (length < 0)
         return fail("readlink /proc/self/cwd after bwrap pivot");
     proc_cwd[length] = '\0';
-    if (strcmp(proc_cwd, "/cwd-probe") != 0) {
+    if (strcmp(proc_cwd, expected) != 0) {
         fprintf(stderr, "/proc/self/cwd reported %s, expected /cwd-probe\n",
                 proc_cwd);
+        return 1;
+    }
+
+    length = readlink("/proc/self/cwd", exact, sizeof(exact));
+    if (length != (ssize_t)strlen(expected) ||
+        memcmp(exact, expected, strlen(expected)) != 0) {
+        fprintf(stderr, "/proc/self/cwd exact buffer returned %zd\n", length);
+        return 1;
+    }
+
+    length = readlink("/proc/self/cwd", truncated, sizeof(truncated));
+    if (length != (ssize_t)sizeof(truncated) ||
+        memcmp(truncated, expected, sizeof(truncated)) != 0) {
+        fprintf(stderr, "/proc/self/cwd truncated buffer returned %zd\n", length);
+        return 1;
+    }
+
+    if (snprintf(proc_pid, sizeof(proc_pid), "/proc/%d/cwd", getpid()) >=
+        (int)sizeof(proc_pid))
+        return fail("format /proc/pid/cwd");
+    length = readlink(proc_pid, exact, sizeof(exact));
+    if (length != (ssize_t)strlen(expected) ||
+        memcmp(exact, expected, strlen(expected)) != 0) {
+        fprintf(stderr, "/proc/pid/cwd exact buffer returned %zd\n", length);
         return 1;
     }
 
@@ -131,6 +159,9 @@ static int bwrap_like_child(void *opaque)
         return fail("second pivot_root bwrap newroot");
     if (chdir("/") < 0)
         return fail("chdir after second pivot_root");
+
+    if (mount("proc", "/proc", "proc", 0, NULL) < 0)
+        return fail("mount fresh proc after second pivot_root");
 
     if (chdir("/oldroot/cwd-probe") < 0)
         return fail("chdir oldroot cwd probe");

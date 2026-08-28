@@ -20,9 +20,10 @@ case "$ROOT" in
         ;;
 esac
 
-mkdir -p "$ROOT/tmp"
+mkdir -p "$ROOT/tmp" "$ROOT/.l2s"
 "$CC" -O2 -o "$ROOT/probe" "$SCRIPT_DIR/test-bwrap-resolve-in-root.c"
 
-PROOT_UNSET_DONE=1 "$PROOT" -r "$ROOT" -b /dev -b /proc -b "$PREFIX:$PREFIX" \
+PROOT_UNSET_DONE=1 PROOT_L2S_DIR="$ROOT/.l2s" "$PROOT" --link2symlink \
+    -r "$ROOT" -b /dev -b /proc -b "$PREFIX:$PREFIX" \
     -b /system -b /apex /probe
 printf '%s\n' 'bwrap RESOLVE_IN_ROOT root-bind regression passed'
