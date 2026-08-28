@@ -26,7 +26,11 @@ while [ "$#" -gt 0 ]; do
                 echo "unresolved runtime bind: $1" >&2
                 exit 1
                 ;;
-            */lib:/lib|*/lib64:/lib64)
+            /lib:/lib|/lib64:/lib64)
+                echo "unresolved runtime bind: $1" >&2
+                exit 1
+                ;;
+            /*:/lib|/*:/lib64)
                 has_runtime_bind=1
                 ;;
         esac
