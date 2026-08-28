@@ -535,10 +535,51 @@ skip:
     return 0;
 }
 
+static int normalize_cwd_alias_path(const Tracee *tracee, char path[PATH_MAX])
+{
+    const char *alias;
+    Binding *binding;
+    size_t alias_len;
+    ssize_t new_len;
+
+    if (tracee == NULL || tracee->fs == NULL ||
+        tracee->fs->cwd_alias_prefix == NULL)
+        return 0;
+
+    /* After bwrap detaches its old root, directory fds inherited from its
+     * final chdir can still be reported through /oldroot.  This alias has
+     * already been verified by refresh_cwd_alias_prefix(), so it is a guest
+     * path, not a host path to detranslate again. */
+    alias = tracee->fs->cwd_alias_prefix;
+    alias_len = strlen(alias);
+    if (alias_len == 0)
+        return 0;
+    if (strncmp(path, alias, alias_len) != 0 ||
+        (path[alias_len] != '\0' && path[alias_len] != '/'))
+        return 0;
+
+    /* Do not collapse a more-specific binding below /oldroot.  It can be a
+     * distinct bwrap mount whose guest path must retain the old-root prefix. */
+    binding = get_binding(tracee, GUEST, path);
+    if (binding == NULL || strcmp(binding->guest.path, alias) != 0)
+        return 0;
+
+    if (path[alias_len] == '\0') {
+        path[0] = '/';
+        path[1] = '\0';
+        return 2;
+    }
+
+    new_len = strlen(path) - alias_len;
+    memmove(path, path + alias_len, new_len + 1);
+    return new_len + 1;
+}
+
 int detranslate_path(Tracee *tracee, char path[PATH_MAX], const char t_referrer[PATH_MAX])
 {
     size_t root_len, prefix_len;
     ssize_t new_len;
+    int status;
 
     if (strnlen(path, PATH_MAX) >= PATH_MAX)
         return -ENAMETOOLONG;
@@ -571,7 +612,10 @@ int detranslate_path(Tracee *tracee, char path[PATH_MAX], const char t_referrer[
     if (follow_binding) {
         int st = substitute_binding(tracee, HOST, path);
         if (st == 0) return 0;
-        if (st == 1) return strlen(path) + 1;
+        if (st == 1) {
+            status = normalize_cwd_alias_path(tracee, path);
+            return status != 0 ? status : strlen(path) + 1;
+        }
     }
 
     switch (compare_paths(get_root(tracee), path)) {
