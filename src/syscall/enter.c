@@ -348,7 +348,10 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
      * directory discards the completed virtual root. */
     if (strcmp(new_root_user, ".") == 0 && strcmp(put_old_user, ".") == 0 &&
         strcmp(new_root_guest, "/newroot") == 0) {
-        refresh_cwd_alias_prefix(tracee);
+        /* /oldroot was already unmounted by bwrap, but its verified alias
+         * is still needed when bwrap fchdirs through the saved old-root fd
+         * immediately after this pivot.  Refreshing here would see only
+         * the covering root binding and discard that relation. */
         (void) rebase_cwd_alias(tracee);
         return;
     }
