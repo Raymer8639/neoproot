@@ -50,6 +50,8 @@ int which(Tracee *tracee, const char *paths, char host_path[PATH_MAX], const cha
 int realpath2(Tracee *tracee, char host_path[PATH_MAX], const char *path, bool deref_final);
 int getcwd2(Tracee *tracee, char guest_path[PATH_MAX]);
 const char *get_reported_cwd(const Tracee *tracee);
+void refresh_cwd_alias_prefix(Tracee *tracee);
+int rebase_cwd_alias(Tracee *tracee);
 void chop_finality(char *path);
 
 int translate_path(Tracee *tracee, char host_path[PATH_MAX],

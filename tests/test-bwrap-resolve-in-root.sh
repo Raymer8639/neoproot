@@ -20,7 +20,8 @@ case "$ROOT" in
         ;;
 esac
 
-mkdir -p "$ROOT/tmp" "$ROOT/.l2s"
+mkdir -p "$ROOT/tmp" "$ROOT/.l2s" "$ROOT/cwd-probe"
+: > "$ROOT/cwd-probe/relative-probe"
 "$CC" -O2 -o "$ROOT/probe" "$SCRIPT_DIR/test-bwrap-resolve-in-root.c"
 
 PROOT_UNSET_DONE=1 PROOT_L2S_DIR="$ROOT/.l2s" "$PROOT" --link2symlink \
