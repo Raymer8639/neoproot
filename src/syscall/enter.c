@@ -257,6 +257,170 @@ static bool resolve_tracee_proc_fd(const Tracee *tracee, const char *path,
         readlink_proc_pid_fd(tracee->pid, fd, host_path) == 0;
 }
 
+typedef struct {
+    char host_path[PATH_MAX];
+    char guest_suffix[PATH_MAX];
+    BindingMountKind mount_kind;
+} RecursiveBinding;
+
+/* A recursive bind carries nested mountpoints with it.  Runtime bindings
+ * represent mounts in userspace, so copy their visible descendants before
+ * adding the covering destination binding. */
+static RecursiveBinding *snapshot_recursive_bindings(Tracee *tracee,
+                                                      const char *source_host,
+                                                      size_t *count)
+{
+    char source_guest[PATH_MAX];
+    Binding *binding;
+    RecursiveBinding *snapshot;
+    size_t source_length;
+    size_t index = 0;
+
+    *count = 0;
+    strncpy(source_guest, source_host, sizeof(source_guest) - 1);
+    source_guest[sizeof(source_guest) - 1] = '\0';
+    if (detranslate_path(tracee, source_guest, NULL) < 0)
+        return NULL;
+    chop_finality(source_guest);
+    source_length = strlen(source_guest);
+
+    for (binding = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+         binding != (void *) tracee->fs->bindings.guest;
+         binding = CIRCLEQ_NEXT(binding, link.guest)) {
+        if (compare_paths(source_guest, binding->guest.path) == PATH1_IS_PREFIX)
+            (*count)++;
+    }
+    if (*count == 0)
+        return NULL;
+
+    snapshot = talloc_array(tracee->ctx, RecursiveBinding, *count);
+    if (snapshot == NULL) {
+        *count = 0;
+        return NULL;
+    }
+
+    for (binding = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+         binding != (void *) tracee->fs->bindings.guest;
+         binding = CIRCLEQ_NEXT(binding, link.guest)) {
+        const char *suffix;
+
+        if (compare_paths(source_guest, binding->guest.path) != PATH1_IS_PREFIX)
+            continue;
+
+        suffix = binding->guest.path + source_length;
+        if (source_length == 1)
+            suffix = binding->guest.path;
+        strncpy(snapshot[index].host_path, binding->host.path,
+                sizeof(snapshot[index].host_path) - 1);
+        snapshot[index].host_path[sizeof(snapshot[index].host_path) - 1] = '\0';
+        strncpy(snapshot[index].guest_suffix, suffix,
+                sizeof(snapshot[index].guest_suffix) - 1);
+        snapshot[index].guest_suffix[sizeof(snapshot[index].guest_suffix) - 1] = '\0';
+        snapshot[index].mount_kind = binding->mount_kind;
+        index++;
+    }
+
+    return snapshot;
+}
+
+static void replay_recursive_bindings(Tracee *tracee,
+                                      const RecursiveBinding *snapshot,
+                                      size_t count,
+                                      const char *target_guest)
+{
+    size_t index;
+
+    for (index = 0; index < count; index++) {
+        char guest_path[PATH_MAX];
+
+        if (join_paths(2, guest_path, target_guest,
+                       snapshot[index].guest_suffix) < 0)
+            continue;
+        (void) insort_binding4(tracee, tracee->fs,
+                               snapshot[index].host_path, guest_path,
+                               snapshot[index].mount_kind);
+    }
+}
+
+/* A bwrap mount target is commonly an fd opened below its new root.  During
+ * root construction that physical path can still have an /oldroot alias;
+ * resolve it through the current root instead of reviving the stale alias. */
+static bool detranslate_mount_target_in_current_root(const Tracee *tracee,
+                                                      const char *host_path,
+                                                      char guest_path[PATH_MAX])
+{
+    const char *root = get_root(tracee);
+    size_t root_length;
+    const char *suffix;
+
+    if (root == NULL ||
+        (compare_paths(root, host_path) != PATH1_IS_PREFIX &&
+         compare_paths(root, host_path) != PATHS_ARE_EQUAL))
+        return false;
+
+    root_length = strlen(root);
+    suffix = host_path + (root_length == 1 ? 0 : root_length);
+    if (suffix[0] == '\0')
+        suffix = "/";
+    if (strlen(suffix) >= PATH_MAX)
+        return false;
+    strcpy(guest_path, suffix);
+    return true;
+}
+
+static bool guest_path_is_oldroot(const char *path)
+{
+    return strncmp(path, "/oldroot/", 9) == 0;
+}
+
+/* When a recursive root bind is pivoted, its nested mount can retain an
+ * /oldroot guest name while the covered binding names the current root view.
+ * FD mount targets belong to the current view, so follow that covered layer. */
+static bool collapse_oldroot_tmpfs_target(const char *fstype,
+                                          char guest_path[PATH_MAX])
+{
+    const char *suffix;
+
+    if (strcmp(fstype, "tmpfs") != 0 || !guest_path_is_oldroot(guest_path))
+        return false;
+
+    suffix = guest_path + strlen("/oldroot");
+    return strlen(suffix) < PATH_MAX &&
+        (strcpy(guest_path, suffix), true);
+}
+
+/* bwrap opens device sources below an old-root fd with RESOLVE_IN_ROOT after
+ * it has mounted a replacement /dev at the current root. */
+static int translate_oldroot_fd_path(Tracee *tracee, const char *relative_path,
+                                     char host_path[PATH_MAX])
+{
+    char guest_path[PATH_MAX];
+    Binding *binding;
+
+    if (join_paths(2, guest_path, "/oldroot", relative_path) < 0)
+        return -ENAMETOOLONG;
+
+    for (;;) {
+        char *slash;
+        const char *suffix;
+
+        binding = get_binding(tracee, GUEST, guest_path);
+        if (binding != NULL &&
+            compare_paths(binding->guest.path, guest_path) != PATHS_ARE_NOT_COMPARABLE) {
+            suffix = guest_path + binding->guest.length;
+            return join_paths(2, host_path, binding->host.path,
+                              suffix) < 0 ? -ENAMETOOLONG : 0;
+        }
+
+        slash = strrchr(guest_path, '/');
+        if (slash == NULL || slash == guest_path)
+            break;
+        *slash = '\0';
+    }
+
+    return -ENOENT;
+}
+
 static void emulate_mount(Tracee *tracee, const char *src_user,
                           const char *target_user, const char *fstype,
                           unsigned long flags)
@@ -265,6 +429,8 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
     char guest_path[PATH_MAX];
     const char *tmpdir;
     BindingMountKind mount_kind = BINDING_MOUNT_NONE;
+    RecursiveBinding *recursive_bindings = NULL;
+    size_t recursive_binding_count = 0;
 
     if ((flags & MS_REMOUNT) != 0)
         return;
@@ -304,18 +470,29 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
         int status;
 
         chop_finality(guest_path);
-        status = detranslate_path(tracee, guest_path, NULL);
-        if (status < 0)
-            return;
+        if (!detranslate_mount_target_in_current_root(tracee, guest_path,
+                                                       guest_path)) {
+            status = detranslate_path(tracee, guest_path, NULL);
+            if (status < 0)
+                return;
+            (void) collapse_oldroot_tmpfs_target(fstype, guest_path);
+        }
     }
     else if (guest_canonicalize(tracee, target_user, guest_path) < 0) {
         return;
     }
 
+    if ((flags & (MS_BIND | MS_REC)) == (MS_BIND | MS_REC))
+        recursive_bindings = snapshot_recursive_bindings(tracee, host_path,
+                                                         &recursive_binding_count);
+
     if (insort_binding4(tracee, tracee->fs, host_path, guest_path, mount_kind) != NULL) {
+        replay_recursive_bindings(tracee, recursive_bindings,
+                                  recursive_binding_count, guest_path);
         refresh_cwd_alias_prefix(tracee);
         (void) rebase_cwd_alias(tracee);
     }
+    TALLOC_FREE(recursive_bindings);
 }
 
 static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
@@ -2391,10 +2568,19 @@ int translate_syscall_enter(Tracee *tracee)
         if (tracee->openat2_resolve_in_root && dirfd != AT_FDCWD &&
             path[0] == '/') {
             char dir_path[PATH_MAX];
+            char dir_host_path[PATH_MAX];
+            char oldroot_host_path[PATH_MAX];
+            const char *remembered_dir = recall_proc_fd_path(tracee->pid,
+                                                              (int)dirfd);
             int dir_status = readlink_proc_pid_fd(tracee->pid, dirfd, dir_path);
             bool dir_is_newroot = false;
+            bool dir_is_oldroot = remembered_dir != NULL &&
+                (strcmp(remembered_dir, "/oldroot") == 0 ||
+                 strncmp(remembered_dir, "/oldroot/", 9) == 0);
 
             if (dir_status == 0) {
+                strncpy(dir_host_path, dir_path, sizeof(dir_host_path) - 1);
+                dir_host_path[sizeof(dir_host_path) - 1] = '\0';
                 dir_status = detranslate_path(tracee, dir_path, NULL);
                 dir_is_newroot = dir_status >= 0 &&
                     strcmp(dir_path, "/newroot") == 0;
@@ -2409,6 +2595,19 @@ int translate_syscall_enter(Tracee *tracee)
                 /* RESOLVE_IN_ROOT interprets absolute paths below dirfd.  In
                  * particular, '/' means the fd itself, not the current root. */
                 const char *relative_path = path[1] == '\0' ? "." : path + 1;
+
+                if (dir_status >= 0 && dir_is_oldroot &&
+                    compare_paths(get_root(tracee), dir_host_path) == PATHS_ARE_EQUAL &&
+                    translate_oldroot_fd_path(tracee, relative_path,
+                                              oldroot_host_path) == 0) {
+                    status = set_sysarg_path(tracee, oldroot_host_path, SYSARG_2);
+                    if (status < 0)
+                        break;
+                    dirfd = AT_FDCWD;
+                    poke_reg(tracee, SYSARG_1, dirfd);
+                    tracee->openat2_resolve_in_root = false;
+                    break;
+                }
 
                 status = set_sysarg_path(tracee, relative_path, SYSARG_2);
                 if (status < 0)

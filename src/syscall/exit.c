@@ -473,9 +473,17 @@ void translate_syscall_exit(Tracee *tracee)
             char opened_path[PATH_MAX];
             Reg path_reg = (syscall_number == PR_creat || syscall_number == PR_open)
                 ? SYSARG_1 : SYSARG_2;
-            word_t input = peek_reg(tracee, MODIFIED, path_reg);
+            /* Keep an absolute guest spelling when available.  Relative opens
+             * still need the translated path so their fd cache remains useful
+             * to the existing /proc/self/fd handling. */
+            word_t input = peek_reg(tracee, ORIGINAL, path_reg);
 
-            if (read_path(tracee, opened_path, input) >= 0)
+            if (read_path(tracee, opened_path, input) < 0 || opened_path[0] != '/') {
+                input = peek_reg(tracee, MODIFIED, path_reg);
+                if (read_path(tracee, opened_path, input) < 0)
+                    goto end;
+            }
+            if (opened_path[0] == '/')
                 remember_proc_fd_path(tracee->pid, (int)syscall_result, opened_path);
         }
         goto end;
