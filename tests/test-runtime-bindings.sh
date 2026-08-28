@@ -6,6 +6,14 @@ set -e
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$SCRIPT_DIR"
 
+# This fixture forces basic_test.sh and advanced_test.sh down their Linux
+# runtime-binding path.  Termux has no host /usr, /lib, or /lib64 tree, so
+# there is no Linux path layout to validate there.
+if [ ! -d /usr ] || { [ ! -d /lib ] && [ ! -d /lib64 ]; }; then
+    printf '%s\n' 'SKIP: runtime binding test requires a Linux /usr and /lib or /lib64'
+    exit 125
+fi
+
 TEST_ROOT=$(mktemp -d "$PWD/.test-runtime-bindings.XXXXXX")
 FAKE_PROOT="$TEST_ROOT/fake-proot"
 
@@ -26,11 +34,7 @@ while [ "$#" -gt 0 ]; do
                 echo "unresolved runtime bind: $1" >&2
                 exit 1
                 ;;
-            /lib:/lib|/lib64:/lib64)
-                echo "unresolved runtime bind: $1" >&2
-                exit 1
-                ;;
-            /*:/lib|/*:/lib64)
+            */lib:/lib|*/lib64:/lib64)
                 has_runtime_bind=1
                 ;;
         esac
