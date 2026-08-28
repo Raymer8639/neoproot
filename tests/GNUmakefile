@@ -6,7 +6,7 @@ CFLAGS ?= -Wall -O2 -g
 PROOT ?= ../src/neoproot
 
 # 测试程序列表
-TEST_PROGS = test_argv test_echo test_file_ops test_dir_ops test-openat2
+TEST_PROGS = test_argv test_echo test_file_ops test_dir_ops
 
 # 测试脚本列表
 TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
@@ -14,6 +14,7 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-link2symlink-dirent.sh test-link2symlink-stat-guard.sh \
 	test-link2symlink-node-workflow.sh \
 	test-binding-cache.sh \
+	test-openat2.sh \
 	test-bwrap-oldroot-bind.sh \
 	test-bwrap-proc-dirfd.sh test-bwrap-procfd-mount-target.sh \
 	test-bwrap-resolve-in-root.sh test-bwrap-cwd-dirfd.sh \
@@ -46,7 +47,10 @@ test: all
 	@echo "运行 SciCat PRoot 测试..."
 	@for prog in $(TEST_PROGS); do \
 		echo "运行 $$prog..."; \
-		if ! ./$$prog; then \
+		expected=0; \
+		case "$$prog" in test_echo) expected=42;; esac; \
+		./$$prog; status=$$?; \
+		if [ "$$status" -ne "$$expected" ]; then \
 			echo "测试 $$prog 失败"; \
 			exit 1; \
 		else \
