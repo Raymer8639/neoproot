@@ -274,6 +274,143 @@ int getcwd2(Tracee *tracee, char guest_path[PATH_MAX])
     return 0;
 }
 
+const char *get_reported_cwd(const Tracee *tracee)
+{
+    const char *cwd = tracee->fs->cwd;
+    const char *alias = tracee->fs->cwd_alias_prefix;
+    size_t alias_len;
+
+    if (alias == NULL)
+        return cwd;
+
+    alias_len = strlen(alias);
+    if (strncmp(cwd, alias, alias_len) != 0 ||
+        (cwd[alias_len] != '\0' && cwd[alias_len] != '/'))
+        return cwd;
+
+    return cwd[alias_len] == '\0' ? "/" : cwd + alias_len;
+}
+
+static bool path_has_prefix(const char *path, const char *prefix)
+{
+    size_t prefix_len = strlen(prefix);
+
+    return strncmp(path, prefix, prefix_len) == 0 &&
+        (path[prefix_len] == '\0' || path[prefix_len] == '/');
+}
+
+/* The internal /oldroot spelling is an alias only when it points at the same
+ * physical root as guest /.  A regular pivot keeps the old root at a
+ * different host path and must retain its /oldroot cwd. */
+void refresh_cwd_alias_prefix(Tracee *tracee)
+{
+    Binding *alias_binding;
+    Binding *root_binding;
+
+    if (tracee == NULL || tracee->fs == NULL)
+        return;
+
+    alias_binding = get_binding(tracee, GUEST, "/oldroot");
+    root_binding = get_binding(tracee, GUEST, "/");
+    if (alias_binding == NULL || root_binding == NULL ||
+        strcmp(alias_binding->guest.path, "/oldroot") != 0 ||
+        strcmp(root_binding->guest.path, "/") != 0 ||
+        compare_paths2(alias_binding->host.path, alias_binding->host.length,
+                       root_binding->host.path, root_binding->host.length) !=
+            PATHS_ARE_EQUAL) {
+        TALLOC_FREE(tracee->fs->cwd_alias_prefix);
+        return;
+    }
+
+    if (tracee->fs->cwd_alias_prefix != NULL &&
+        strcmp(tracee->fs->cwd_alias_prefix, "/oldroot") == 0)
+        return;
+
+    TALLOC_FREE(tracee->fs->cwd_alias_prefix);
+    tracee->fs->cwd_alias_prefix = talloc_strdup(tracee->fs, "/oldroot");
+}
+
+/* A bwrap pivot can leave the tracer's cwd below /oldroot even though the
+ * same physical directory is visible at its normal guest path.  Rebase only
+ * when a non-alias binding proves that alternate path exists.  This keeps a
+ * normal pivot's genuinely old-root cwd unchanged. */
+int rebase_cwd_alias(Tracee *tracee)
+{
+    const char *alias;
+    Binding *alias_binding;
+    Binding *root_binding;
+    Binding *binding;
+    Binding *best = NULL;
+    char host_path[PATH_MAX];
+    char guest_path[PATH_MAX];
+    size_t host_len;
+    size_t best_host_len = 0;
+    size_t guest_len;
+    int status;
+
+    if (tracee == NULL || tracee->fs == NULL || tracee->fs->cwd == NULL)
+        return 0;
+
+    alias = tracee->fs->cwd_alias_prefix;
+    if (alias == NULL)
+        return 0;
+    if (!path_has_prefix(tracee->fs->cwd, alias))
+        return 0;
+
+    alias_binding = get_binding(tracee, GUEST, alias);
+    root_binding = get_binding(tracee, GUEST, "/");
+    if (alias_binding == NULL || root_binding == NULL ||
+        strcmp(alias_binding->guest.path, alias) != 0 ||
+        strcmp(root_binding->guest.path, "/") != 0 ||
+        compare_paths2(alias_binding->host.path, alias_binding->host.length,
+                       root_binding->host.path, root_binding->host.length) !=
+            PATHS_ARE_EQUAL)
+        return 0;
+
+    if (strlen(tracee->fs->cwd) >= sizeof(host_path))
+        return -ENAMETOOLONG;
+    strcpy(host_path, tracee->fs->cwd);
+    status = substitute_binding(tracee, GUEST, host_path);
+    if (status < 0)
+        return 0;
+    host_len = strlen(host_path);
+
+    for (binding = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+         binding != (void *) tracee->fs->bindings.guest;
+         binding = CIRCLEQ_NEXT(binding, link.guest)) {
+        Comparison cmp;
+
+        if (!binding->need_substitution ||
+            path_has_prefix(binding->guest.path, alias))
+            continue;
+        cmp = compare_paths2(binding->host.path, binding->host.length,
+                             host_path, host_len);
+        if ((cmp == PATHS_ARE_EQUAL || cmp == PATH1_IS_PREFIX) &&
+            binding->host.length > best_host_len) {
+            best = binding;
+            best_host_len = binding->host.length;
+        }
+    }
+    if (best == NULL)
+        return 0;
+
+    strcpy(guest_path, host_path);
+    guest_len = substitute_path_prefix(guest_path, best->host.length,
+                                       best->guest.path, best->guest.length);
+    if (guest_len >= PATH_MAX)
+        return -ENAMETOOLONG;
+    if (strcmp(guest_path, tracee->fs->cwd) == 0)
+        return 0;
+
+    char *cwd = talloc_strdup(tracee->fs, guest_path);
+    if (cwd == NULL)
+        return -ENOMEM;
+    TALLOC_FREE(tracee->fs->cwd);
+    tracee->fs->cwd = cwd;
+    talloc_set_name_const(tracee->fs->cwd, "$cwd");
+    return 1;
+}
+
 void chop_finality(char *path)
 {
     size_t len = strlen(path);

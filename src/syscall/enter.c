@@ -312,7 +312,10 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
         return;
     }
 
-    (void) insort_binding4(tracee, tracee->fs, host_path, guest_path, mount_kind);
+    if (insort_binding4(tracee, tracee->fs, host_path, guest_path, mount_kind) != NULL) {
+        refresh_cwd_alias_prefix(tracee);
+        (void) rebase_cwd_alias(tracee);
+    }
 }
 
 static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
@@ -344,8 +347,11 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
      * temporary construction tree.  Rebinding root to that physical tmpfs
      * directory discards the completed virtual root. */
     if (strcmp(new_root_user, ".") == 0 && strcmp(put_old_user, ".") == 0 &&
-        strcmp(new_root_guest, "/newroot") == 0)
+        strcmp(new_root_guest, "/newroot") == 0) {
+        refresh_cwd_alias_prefix(tracee);
+        (void) rebase_cwd_alias(tracee);
         return;
+    }
 
     if (put_old_user[0] == '/')
         strcpy(put_old_guest, "/");
@@ -454,27 +460,8 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
         }
     }
 
-    /* Derive the alias from the resulting binding tree.  bwrap can issue a
-     * second pivot_root without a put-old argument, so inspecting only that
-     * syscall's arguments would lose an alias established by the first one. */
-    {
-        bool has_oldroot = false;
-        for (iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
-             iter != (void *) tracee->fs->bindings.guest;
-             iter = CIRCLEQ_NEXT(iter, link.guest)) {
-            if (strcmp(iter->guest.path, "/oldroot") == 0) {
-                has_oldroot = true;
-                break;
-            }
-        }
-        if (has_oldroot) {
-            TALLOC_FREE(tracee->fs->cwd_alias_prefix);
-            tracee->fs->cwd_alias_prefix =
-                talloc_strdup(tracee->fs, "/oldroot");
-        } else if (have_put_old) {
-            TALLOC_FREE(tracee->fs->cwd_alias_prefix);
-        }
-    }
+    refresh_cwd_alias_prefix(tracee);
+    (void) rebase_cwd_alias(tracee);
 
     talloc_free(snapshot);
 }
@@ -1771,6 +1758,7 @@ int translate_syscall_enter(Tracee *tracee)
 
         tracee->fs->cwd = tmp;
         talloc_set_name_const(tracee->fs->cwd, "$cwd");
+        (void) rebase_cwd_alias(tracee);
 
         poke_reg(tracee, SYSARG_RESULT, 0);
         set_sysnum(tracee, PR_void);

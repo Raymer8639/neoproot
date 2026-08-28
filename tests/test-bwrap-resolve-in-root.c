@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
+#include <limits.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +37,96 @@ static int openat_in_root(int dirfd, const char *path)
     return syscall(SYS_openat2, dirfd, path, &how, sizeof(how));
 }
 
+static int check_relative_cwd(const char *context)
+{
+    struct stat stat_buffer;
+
+    if (stat("relative-probe", &stat_buffer) < 0)
+        return fail(context);
+    if (!S_ISREG(stat_buffer.st_mode)) {
+        fprintf(stderr, "%s did not resolve a regular file\n", context);
+        return 1;
+    }
+    return 0;
+}
+
+static int check_reported_cwd(void)
+{
+    static const char expected[] = "/cwd-probe";
+    char cwd[PATH_MAX];
+    char proc_cwd[PATH_MAX];
+    char proc_pid[64];
+    char exact[sizeof(expected)];
+    char truncated[4];
+    ssize_t length;
+
+    if (getcwd(cwd, sizeof(cwd)) == NULL)
+        return fail("getcwd after bwrap pivot");
+    if (strcmp(cwd, expected) != 0) {
+        fprintf(stderr, "getcwd reported %s, expected /cwd-probe\n", cwd);
+        return 1;
+    }
+    if (check_relative_cwd("relative stat after bwrap pivot") != 0)
+        return 1;
+
+    length = readlink("/proc/self/cwd", proc_cwd, sizeof(proc_cwd) - 1);
+    if (length < 0)
+        return fail("readlink /proc/self/cwd after bwrap pivot");
+    proc_cwd[length] = '\0';
+    if (strcmp(proc_cwd, expected) != 0) {
+        fprintf(stderr, "/proc/self/cwd reported %s, expected /cwd-probe\n",
+                proc_cwd);
+        return 1;
+    }
+
+    length = readlink("/proc/self/cwd", exact, sizeof(exact));
+    if (length != (ssize_t)strlen(expected) ||
+        memcmp(exact, expected, strlen(expected)) != 0) {
+        fprintf(stderr, "/proc/self/cwd exact buffer returned %zd\n", length);
+        return 1;
+    }
+
+    length = readlink("/proc/self/cwd", truncated, sizeof(truncated));
+    if (length != (ssize_t)sizeof(truncated) ||
+        memcmp(truncated, expected, sizeof(truncated)) != 0) {
+        fprintf(stderr, "/proc/self/cwd truncated buffer returned %zd\n", length);
+        return 1;
+    }
+
+    if (snprintf(proc_pid, sizeof(proc_pid), "/proc/%d/cwd", getpid()) >=
+        (int)sizeof(proc_pid))
+        return fail("format /proc/pid/cwd");
+    length = readlink(proc_pid, exact, sizeof(exact));
+    if (length != (ssize_t)strlen(expected) ||
+        memcmp(exact, expected, strlen(expected)) != 0) {
+        fprintf(stderr, "/proc/pid/cwd exact buffer returned %zd\n", length);
+        return 1;
+    }
+
+    return 0;
+}
+
+static int single_pivot_child(void *opaque)
+{
+    (void) opaque;
+
+    if (mount("tmpfs", "/tmp", "tmpfs", 0, NULL) < 0)
+        return fail("mount tmpfs for single pivot");
+    if (make_dir("/tmp/newroot") != 0 || make_dir("/tmp/oldroot") != 0)
+        return 1;
+    if (mount("/tmp/newroot", "/tmp/newroot", NULL,
+              MS_BIND | MS_REC | MS_SILENT, NULL) < 0)
+        return fail("bind newroot for single pivot");
+    if (syscall(SYS_pivot_root, "/tmp", "/tmp/oldroot") < 0)
+        return fail("single pivot_root");
+    if (chdir("/") < 0)
+        return fail("chdir after single pivot_root");
+    if (chdir("/oldroot/cwd-probe") < 0)
+        return fail("chdir oldroot cwd after single pivot");
+
+    return check_relative_cwd("relative stat after single pivot");
+}
+
 static int bwrap_like_child(void *opaque)
 {
     char source_proc_path[64];
@@ -47,6 +138,8 @@ static int bwrap_like_child(void *opaque)
 
     (void) opaque;
 
+    if (mount("/", "/", NULL, MS_BIND | MS_REC | MS_RDONLY, NULL) < 0)
+        return fail("bind virtual root read-only");
     if (mount("tmpfs", "/tmp", "tmpfs", 0, NULL) < 0)
         return fail("mount tmpfs /tmp");
     if (make_dir("/tmp/newroot") != 0 || make_dir("/tmp/oldroot") != 0)
@@ -58,6 +151,8 @@ static int bwrap_like_child(void *opaque)
         return fail("pivot_root /tmp /tmp/oldroot");
     if (chdir("/") < 0)
         return fail("chdir after pivot_root");
+    if (make_dir("/oldroot/cwd-probe") != 0)
+        return 1;
     if (make_dir("/proc") != 0)
         return 1;
     if (mount("oldroot/proc", "proc", NULL, MS_BIND | MS_REC | MS_SILENT,
@@ -103,6 +198,14 @@ static int bwrap_like_child(void *opaque)
     if (chdir("/") < 0)
         return fail("chdir after second pivot_root");
 
+    if (mount("proc", "/proc", "proc", 0, NULL) < 0)
+        return fail("mount fresh proc after second pivot_root");
+
+    if (chdir("/oldroot/cwd-probe") < 0)
+        return fail("chdir oldroot cwd probe");
+    if (check_reported_cwd() != 0)
+        return 1;
+
     fd = open("/probe", O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return fail("probe is missing from bwrap root bind");
@@ -110,7 +213,7 @@ static int bwrap_like_child(void *opaque)
     return 0;
 }
 
-int main(void)
+static int run_child(const char *name, int (*child_fn)(void *))
 {
     void *stack;
     pid_t child;
@@ -119,7 +222,7 @@ int main(void)
     stack = malloc(1024 * 1024);
     if (stack == NULL)
         return fail("allocate clone stack");
-    child = clone(bwrap_like_child, (char *) stack + 1024 * 1024,
+    child = clone(child_fn, (char *) stack + 1024 * 1024,
                   CLONE_NEWNS | CLONE_NEWPID | SIGCHLD, NULL);
     if (child < 0) {
         free(stack);
@@ -131,8 +234,15 @@ int main(void)
     }
     free(stack);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        fprintf(stderr, "bwrap-like child failed (status %d)\n", status);
+        fprintf(stderr, "%s failed (status %d)\n", name, status);
         return 1;
     }
     return 0;
+}
+
+int main(void)
+{
+    if (run_child("single-pivot child", single_pivot_child) != 0)
+        return 1;
+    return run_child("bwrap-like child", bwrap_like_child);
 }

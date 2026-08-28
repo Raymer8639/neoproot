@@ -253,16 +253,7 @@ void translate_syscall_exit(Tracee *tracee)
         if (status < 0)
             break;
 
-        reported_cwd = tracee->fs->cwd;
-        if (tracee->fs->cwd_alias_prefix != NULL) {
-            size_t prefix_len = strlen(tracee->fs->cwd_alias_prefix);
-            if (strncmp(reported_cwd, tracee->fs->cwd_alias_prefix,
-                        prefix_len) == 0 &&
-                (reported_cwd[prefix_len] == 0 ||
-                 reported_cwd[prefix_len] == '/'))
-                reported_cwd = reported_cwd[prefix_len] == 0
-                    ? "/" : reported_cwd + prefix_len;
-        }
+        reported_cwd = get_reported_cwd(tracee);
 
         new_size = strlen(reported_cwd) + 1;
         if (size < new_size) {
@@ -649,6 +640,32 @@ void translate_syscall_exit(Tracee *tracee)
                 memcpy(referee, tracee->exe, len + 1);
                 status = len + 1;
                 goto write_back;
+            }
+        }
+
+        {
+            bool is_cwd_link = (strcmp(referer, "/proc/self/cwd") == 0);
+            if (!is_cwd_link) {
+                char proc_cwd[PATH_MAX];
+                int n = snprintf(proc_cwd, sizeof(proc_cwd), "/proc/%d/cwd", tracee->pid);
+                if (n > 0 && (size_t) n < sizeof(proc_cwd))
+                    is_cwd_link = (strcmp(referer, proc_cwd) == 0);
+            }
+            if (is_cwd_link) {
+                const char *reported_cwd = get_reported_cwd(tracee);
+                size_t len = strlen(reported_cwd);
+                size_t write_size;
+
+                if (len >= PATH_MAX) {
+                    status = -ENAMETOOLONG;
+                    break;
+                }
+                write_size = len < max_size ? len : max_size;
+                status = write_data(tracee, output, reported_cwd, write_size);
+                if (status < 0)
+                    break;
+                status = write_size;
+                break;
             }
         }
 
