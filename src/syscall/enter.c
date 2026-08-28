@@ -485,8 +485,9 @@ static void emulate_umount(Tracee *tracee, const char *target_user)
     if (strcmp(binding->guest.path, guest_path) != 0)
         return;
 
-    if (strcmp(guest_path, "/oldroot") == 0)
-        TALLOC_FREE(tracee->fs->cwd_alias_prefix);
+    /* Keep a verified bwrap alias through the final pivot cleanup.  bwrap
+     * unmounts /oldroot, fchdirs through a saved old-root fd, and only then
+     * returns to /.  The fd-derived path must still be rebased. */
     remove_binding_and_restore_covered(tracee, binding);
 }
 

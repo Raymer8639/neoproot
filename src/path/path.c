@@ -359,12 +359,23 @@ int rebase_cwd_alias(Tracee *tracee)
 
     alias_binding = get_binding(tracee, GUEST, alias);
     root_binding = get_binding(tracee, GUEST, "/");
-    if (alias_binding == NULL || root_binding == NULL ||
-        strcmp(alias_binding->guest.path, alias) != 0 ||
-        strcmp(root_binding->guest.path, "/") != 0 ||
+    if (alias_binding != NULL &&
+        strcmp(alias_binding->guest.path, alias) != 0)
+        alias_binding = NULL;
+    if (root_binding == NULL || strcmp(root_binding->guest.path, "/") != 0)
+        return 0;
+
+    if (alias_binding != NULL &&
         compare_paths2(alias_binding->host.path, alias_binding->host.length,
                        root_binding->host.path, root_binding->host.length) !=
-            PATHS_ARE_EQUAL)
+             PATHS_ARE_EQUAL)
+        return 0;
+
+    /* bwrap removes /oldroot before its second pivot, then briefly returns
+     * there through a saved fd to detach it.  The prefix was verified while
+     * the binding existed, so it remains valid until a later mount refreshes
+     * the binding table. */
+    if (alias_binding == NULL && strcmp(alias, "/oldroot") != 0)
         return 0;
 
     if (strlen(tracee->fs->cwd) >= sizeof(host_path))
