@@ -24,6 +24,7 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-statx-empty-path-mount-id.sh \
 	test-statx-empty-path-pipe.sh \
 	test-brk-diagnostic.sh \
+	test-bootstrap-nonblocking.sh \
 	test-event-regressions.sh \
 	test-canon-asan.sh \
 	test-i3-restart-asan.sh

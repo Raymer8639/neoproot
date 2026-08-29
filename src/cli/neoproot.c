@@ -62,7 +62,7 @@ int main(int argc, char *const argv[])
 
     // 要传递给termux的命令
     char *shell_cmd = 
-        "termux-wake-lock 2>/dev/null; "
+        "termux-wake-lock >/dev/null 2>&1 & "
         "ulimit -n 16384; "
         "unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW ; "
         "export PROOT_MEMFD_LOADER=1; "

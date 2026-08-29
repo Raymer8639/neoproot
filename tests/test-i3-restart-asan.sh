@@ -7,10 +7,27 @@ if [ -z "${BASH_VERSION:-}" ]; then
 fi
 set -euo pipefail
 
+LOG=
+report_error() {
+    local status=$?
+    printf 'i3 restart test failed at line %s (status %s): %s\n' \
+        "$1" "$status" "$2" >&2
+    if [[ -n "$LOG" && -f "$LOG" ]]; then
+        cat "$LOG" >&2
+    fi
+    exit "$status"
+}
+trap 'report_error "$LINENO" "$BASH_COMMAND"' ERR
+
 if [[ -z "${PROOT_ASAN:-}" || ! -x "$PROOT_ASAN" ||
       -z "${NEOPROOT_START_SCRIPT:-}" || ! -r "$NEOPROOT_START_SCRIPT" ||
       -z "${DISPLAY:-}" ]]; then
     echo "SKIP: require PROOT_ASAN, NEOPROOT_START_SCRIPT, and DISPLAY"
+    exit 125
+fi
+
+if grep -q '^TracerPid:[[:space:]]*[1-9]' /proc/self/status 2>/dev/null; then
+    echo "SKIP: i3 restart test must run from the Termux host, not a nested PRoot"
     exit 125
 fi
 
@@ -24,7 +41,23 @@ if [[ -n "$HOST_TMPDIR" ]]; then
 fi
 U="$PROOT_ASAN"
 LOG=$(mktemp)
-trap 'rm -f "$LOG"' EXIT INT TERM
+PREFLIGHT_LOG=$(mktemp)
+trap 'rm -f "$LOG" "$PREFLIGHT_LOG"' EXIT INT TERM
+
+if timeout -k 3 10 "$U" --verbose=1 "${ARGS[@]}" /usr/bin/zsh -lc \
+    'printf "neoproot guest preflight\n"' >"$PREFLIGHT_LOG" 2>&1; then
+    preflight_status=0
+else
+    preflight_status=$?
+fi
+
+if [ "$preflight_status" -ne 0 ] || \
+   ! grep -qx 'neoproot guest preflight' "$PREFLIGHT_LOG"; then
+    printf 'i3 restart guest preflight exited with status %s\n' \
+        "$preflight_status" >&2
+    cat "$PREFLIGHT_LOG" >&2
+    exit 1
+fi
 
 guest_cmd='for round in 1 2; do
     echo "i3 ASAN round $round"
@@ -52,7 +85,12 @@ else
 fi
 
 if grep -q 'ERROR: AddressSanitizer' "$LOG" || [ "$status" -ne 0 ]; then
-    cat "$LOG" >&2
+    printf 'i3 restart command exited with status %s\n' "$status" >&2
+    if [ -s "$LOG" ]; then
+        cat "$LOG" >&2
+    else
+        echo 'i3 restart command produced no output' >&2
+    fi
     exit 1
 fi
 
