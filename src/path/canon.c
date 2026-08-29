@@ -23,59 +23,23 @@
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #define ALWAYS_INLINE __attribute__((always_inline)) inline
 
-static ALWAYS_INLINE size_t neon_strlen_fast(const char *s) {
-    if (UNLIKELY(!s || !*s)) return 0;
-    const uint8_t *p = (const uint8_t *)s;
-    uint8x16_t zero = vdupq_n_u8(0);
-    size_t i = 0;
-    for (; (uintptr_t)(p + i) % NEON_VEC_BYTES != 0; i++)
-        if (UNLIKELY(!p[i])) return i;
-    for (;; i += NEON_VEC_BYTES) {
-        uint8x16_t v = vld1q_u8(p + i);
-        uint8x16_t mask = vceqq_u8(v, zero);
-        if (vmaxvq_u8(mask)) {
-            for (size_t j = 0; j < NEON_VEC_BYTES; j++)
-                if (UNLIKELY(!p[i + j])) return i + j;
-        }
-    }
+/*
+ * These operate on unbounded C strings.  Vector loads here must not cross a
+ * string object's end: short literals such as "." and ".." made the former
+ * NEON implementations read into ASAN redzones.  libc supplies safe,
+ * optimized implementations; keep NEON only in copy_component(), where len
+ * bounds every vector access.
+ */
+static ALWAYS_INLINE size_t path_strlen(const char *s) {
+    return s == NULL ? 0 : strlen(s);
 }
 
-static ALWAYS_INLINE int neon_strcmp_fast(const char *a, const char *b) {
-    const uint8_t *pa = (const uint8_t *)a;
-    const uint8_t *pb = (const uint8_t *)b;
-    size_t i = 0;
-    /* 逐字节对齐到 16 字节边界（短字符串如 "."、".."、组件名在此即返回） */
-    for (; (uintptr_t)(pa + i) % NEON_VEC_BYTES != 0; i++) {
-        unsigned char ca = pa[i], cb = pb[i];
-        if (UNLIKELY(ca != cb)) return ca - cb;
-        if (UNLIKELY(ca == '\0')) return 0;
-    }
-    uint8x16_t zero = vdupq_n_u8(0);
-    for (;; i += NEON_VEC_BYTES) {
-        uint8x16_t va = vld1q_u8(pa + i);
-        uint8x16_t vb = vld1q_u8(pb + i);
-        uint8x16_t eq  = vceqq_u8(va, vb);           /* 相等 → 0xFF */
-        uint8x16_t za  = vceqq_u8(va, zero);         /* a 结束 → 0xFF（相等时 b 同步结束） */
-        uint8x16_t stop = vmaxq_u8(vmvnq_u8(eq), za); /* 不等 或 a 结束 */
-        if (vmaxvq_u8(stop) != 0) {
-            for (size_t j = 0; j < NEON_VEC_BYTES; j++) {
-                unsigned char ca = pa[i + j], cb = pb[i + j];
-                if (UNLIKELY(ca != cb)) return ca - cb;
-                if (UNLIKELY(ca == '\0')) return 0;
-            }
-        }
-    }
+static ALWAYS_INLINE int path_strcmp(const char *a, const char *b) {
+    return strcmp(a, b);
 }
 
-/* 复制 C 字符串（含终止符），不做尾部清零（比 memset PATH_MAX 快得多） */
-static ALWAYS_INLINE void neon_strcpy_fast(char *restrict d, const char *restrict s) {
-    size_t i = 0;
-    for (;; i += NEON_VEC_BYTES) {
-        uint8x16_t v = vld1q_u8((const uint8_t *)(s + i));
-        vst1q_u8((uint8_t *)(d + i), v);
-        if (vmaxvq_u8(vceqq_u8(v, vdupq_n_u8(0))) != 0)
-            return;  /* 已复制终止符 */
-    }
+static ALWAYS_INLINE void path_strcpy(char *restrict d, const char *restrict s) {
+    strcpy(d, s);
 }
 
 /* 复制已知长度的组件（含终止符） */
@@ -89,7 +53,7 @@ static ALWAYS_INLINE void copy_component(char *restrict d, const char *restrict 
 
 static ALWAYS_INLINE void pop_component(char *restrict path) {
     if (UNLIKELY(!path || *path != '/')) return;
-    int len = neon_strlen_fast(path) - 1;
+    int len = path_strlen(path) - 1;
     if (len <= 0) return;
     while (len > 1 && path[len] == '/') len--;
     while (len > 1 && path[len] != '/') len--;
@@ -116,7 +80,7 @@ static int substitute_binding_stat(Tracee *restrict tracee, Finality finality,
                                    char host_path[PATH_MAX]) {
     struct stat statl;
     int res;
-    neon_strcpy_fast(host_path, guest_path);
+    path_strcpy(host_path, guest_path);
     res = substitute_binding(tracee, GUEST, host_path);
     if (UNLIKELY(res < 0)) return res;
     /* Extensions may need to resolve host-only paths even when procfs glue is
@@ -129,9 +93,9 @@ static int substitute_binding_stat(Tracee *restrict tracee, Finality finality,
     } else {
         res = lstat(host_path, &statl);
         if (UNLIKELY(res < 0 && errno == EACCES)) {
-            if (neon_strcmp_fast(host_path, "/linkerconfig") == 0 ||
-                neon_strcmp_fast(host_path, "/system")     == 0 ||
-                neon_strcmp_fast(host_path, "/vendor")     == 0) {
+            if (path_strcmp(host_path, "/linkerconfig") == 0 ||
+                path_strcmp(host_path, "/system")     == 0 ||
+                path_strcmp(host_path, "/vendor")     == 0) {
                 res = 0;
                 statl.st_mode = S_IFDIR | 0755;
             }
@@ -157,7 +121,7 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
     unsigned int symlinks_followed = 0; /* 上游 d86f355：跨顺序链计数 */
     if (UNLIKELY(recursion_level > MAXSYMLINKS)) return -ELOOP;
     if (UNLIKELY(!user_path || !guest_path)) return -EINVAL;
-    if (UNLIKELY(neon_strlen_fast(user_path) >= PATH_MAX)) return -ENAMETOOLONG;
+    if (UNLIKELY(path_strlen(user_path) >= PATH_MAX)) return -ENAMETOOLONG;
     if (user_path[0] != '/') {
         if (guest_path[0] != '/') {
             if (recursion_level == 0) {
@@ -174,11 +138,11 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
         char host_path[PATH_MAX];
         fin = next_component(comp, &cursor);
         if (UNLIKELY((int)fin < 0)) return (int)fin;
-        if (neon_strcmp_fast(comp, ".") == 0) {
+        if (path_strcmp(comp, ".") == 0) {
             if (IS_FINAL(fin)) fin = FINAL_DOT;
             continue;
         }
-        if (neon_strcmp_fast(comp, "..") == 0) {
+        if (path_strcmp(comp, "..") == 0) {
             pop_component(guest_path);
             if (IS_FINAL(fin)) fin = FINAL_SLASH;
             continue;
@@ -188,7 +152,7 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
         res = substitute_binding_stat(tracee, fin, recursion_level, scratch_path, host_path);
         if (UNLIKELY(res < 0)) return res;
         if (res <= 0 || (fin == FINAL_NORMAL && !deref_final)) {
-            neon_strcpy_fast(scratch_path, guest_path);
+            path_strcpy(scratch_path, guest_path);
             res = join_paths(2, guest_path, scratch_path, comp);
             if (UNLIKELY(res < 0)) return res;
             continue;
@@ -199,7 +163,7 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
             if (res == CANONICALIZE) goto canon_symlink;
             if (res == DONT_CANONICALIZE) {
                 if (fin == FINAL_NORMAL) {
-                    neon_strcpy_fast(guest_path, scratch_path);
+                    path_strcpy(guest_path, scratch_path);
                     return 0;
                 }
             } else if (UNLIKELY(res < 0)) return res;
@@ -211,7 +175,7 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
             const int saved_errno = errno;
             struct stat st_now;
             if (LIKELY(lstat(host_path, &st_now) == 0 && !S_ISLNK(st_now.st_mode))) {
-                neon_strcpy_fast(scratch_path, guest_path);
+                path_strcpy(scratch_path, guest_path);
                 res = join_paths(2, guest_path, scratch_path, comp);
                 if (UNLIKELY(res < 0)) return res;
                 continue;
@@ -240,11 +204,11 @@ canon_symlink:
         switch (fin) {
             case FINAL_SLASH:
                 join_paths(2, scratch_path, guest_path, "");
-                neon_strcpy_fast(guest_path, scratch_path);
+                path_strcpy(guest_path, scratch_path);
                 break;
             case FINAL_DOT:
                 join_paths(2, scratch_path, guest_path, ".");
-                neon_strcpy_fast(guest_path, scratch_path);
+                path_strcpy(guest_path, scratch_path);
                 break;
             default: break;
         }

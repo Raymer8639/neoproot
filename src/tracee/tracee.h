@@ -21,7 +21,6 @@ typedef enum {
 } RegVersion;
 
 struct bindings;
-struct binding_cache;
 struct load_info;
 struct extensions;
 struct chained_syscalls;
@@ -33,7 +32,6 @@ typedef struct {
 		struct bindings *guest;
 		struct bindings *host;
 	} bindings;
-	struct binding_cache *binding_cache;
 	char *cwd;
 	/* bwrap's pivot_root leaves its inherited cwd below /oldroot. */
 	char *cwd_alias_prefix;

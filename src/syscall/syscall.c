@@ -5,7 +5,6 @@
 #include <stdint.h>
 #include <time.h>
 #include <sys/sysinfo.h>
-#include <arm_neon.h>
 
 #include "syscall/syscall.h"
 #include "syscall/chain.h"
@@ -16,41 +15,6 @@
 #include "cli/note.h"
 
 #define USE_SVC_DIRECT
-
-__attribute__((always_inline, const, artificial))
-static inline size_t arm64_neon_strlen(const char *s)
-{
-    if (__builtin_expect(s == NULL || *s == '\0', 0))
-        return 0;
-
-    const uint8_t *buf = (const uint8_t *)s;
-    size_t offset = 0;
-    const uint8x16_t zero_vec = vdupq_n_u8(0);
-
-    // 对齐处理，和标准glibc strlen完全一致
-    const size_t align = (16 - ((uintptr_t)buf & 15)) & 15;
-    for (; offset < align; offset++) {
-        if (buf[offset] == '\0')
-            return offset;
-    }
-
-    // ARMv8.2 NEON批量处理
-    for (;; offset += 16) {
-        const uint8x16_t data = vld1q_u8(buf + offset);
-        const uint8x16_t cmp  = vceqq_u8(data, zero_vec);
-
-        if (__builtin_expect(vmaxvq_u8(cmp) != 0, 0)) {
-            for (size_t i = 0; i < 16; i++) {
-                if (buf[offset + i] == '\0')
-                    return offset + i;
-            }
-        }
-    }
-}
-
-// 替换标准strlen，仅优化性能，行为完全不变
-#undef strlen
-#define strlen(s) arm64_neon_strlen(s)
 
 /* ==================== ARM64 安全SVC直接系统调用 ==================== */
 #ifdef USE_SVC_DIRECT

@@ -31,7 +31,14 @@ typedef struct binding {
 	} link;
 } Binding;
 
-typedef CIRCLEQ_HEAD(bindings, binding) Bindings;
+/* The queue shape must remain compatible with CIRCLEQ_* macros.  Its cache
+ * belongs here, rather than in FileSystemNameSpace: non-CLONE_FS children
+ * share these binding heads and must therefore share invalidation state. */
+typedef struct bindings {
+	struct binding *cqh_first;
+	struct binding *cqh_last;
+	struct binding_cache *cache;
+} Bindings;
 
 Binding *insort_binding3(const Tracee *tracee, const TALLOC_CTX *context,
 			 const char host_path[PATH_MAX], const char guest_path[PATH_MAX]);

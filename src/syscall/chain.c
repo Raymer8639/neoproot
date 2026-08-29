@@ -22,22 +22,6 @@ struct chained_syscall {
 
 STAILQ_HEAD(chained_syscalls, chained_syscall);
 
-static struct chained_syscalls g_syscall_pool = STAILQ_HEAD_INITIALIZER(g_syscall_pool);
-
-static ALWAYS_INLINE struct chained_syscall *get_from_pool(void) {
-    if (LIKELY(!STAILQ_EMPTY(&g_syscall_pool))) {
-        struct chained_syscall *syscall = STAILQ_FIRST(&g_syscall_pool);
-        STAILQ_REMOVE_HEAD(&g_syscall_pool, link);
-        return syscall;
-    }
-    return NULL;
-}
-
-static ALWAYS_INLINE void return_to_pool(struct chained_syscall *syscall) {
-    if (LIKELY(syscall != NULL))
-        STAILQ_INSERT_TAIL(&g_syscall_pool, syscall, link);
-}
-
 static int register_chained_syscall_internal(Tracee *restrict tracee, Sysnum sysnum,
                                              word_t sysarg_1, word_t sysarg_2,
                                              word_t sysarg_3, word_t sysarg_4,
@@ -52,12 +36,9 @@ static int register_chained_syscall_internal(Tracee *restrict tracee, Sysnum sys
         STAILQ_INIT(tracee->chain.syscalls);
     }
 
-    syscall = get_from_pool();
-    if (UNLIKELY(syscall == NULL)) {
-        syscall = talloc_zero(tracee, struct chained_syscall);
-        if (UNLIKELY(syscall == NULL))
-            return -ENOMEM;
-    }
+    syscall = talloc_zero(tracee->chain.syscalls, struct chained_syscall);
+    if (UNLIKELY(syscall == NULL))
+        return -ENOMEM;
 
     syscall->sysnum     = sysnum;
     syscall->sysargs[0] = sysarg_1;
@@ -121,7 +102,7 @@ void chain_next_syscall(Tracee *restrict tracee) {
     instr_pointer = peek_reg(tracee, CURRENT, INSTR_POINTER);
     poke_reg(tracee, INSTR_POINTER, instr_pointer - get_systrap_size(tracee));
 
-    return_to_pool(syscall);
+    TALLOC_FREE(syscall);
 
     tracee->restart_how = PTRACE_SYSCALL;
 }

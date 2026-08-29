@@ -90,24 +90,25 @@ typedef struct binding_cache {
 } BindingCache;
 
 static ALWAYS_INLINE BindingCache *get_binding_cache(const Tracee *restrict tracee) {
-	if (UNLIKELY(!tracee || !tracee->fs))
+	if (UNLIKELY(!tracee || !tracee->fs || !tracee->fs->bindings.guest))
 		return NULL;
-	BindingCache *cache = tracee->fs->binding_cache;
+	Bindings *bindings = tracee->fs->bindings.guest;
+	BindingCache *cache = bindings->cache;
 	if (LIKELY(cache))
 		return cache;
-	cache = talloc_zero(tracee->fs, BindingCache);
+	cache = talloc_zero(bindings, BindingCache);
 	if (UNLIKELY(!cache))
 		return NULL;
 	if (getenv("NEOPROOT_TEST_BINDING_CACHE_COUNTER") != NULL)
 		fprintf(stderr, "neoproot binding cache: allocate\n");
-	tracee->fs->binding_cache = cache;
+	bindings->cache = cache;
 	return cache;
 }
 
 static ALWAYS_INLINE void invalidate_binding_cache(const Tracee *restrict tracee) {
-	if (UNLIKELY(!tracee || !tracee->fs))
+	if (UNLIKELY(!tracee || !tracee->fs || !tracee->fs->bindings.guest))
 		return;
-	BindingCache *cache = tracee->fs->binding_cache;
+	BindingCache *cache = tracee->fs->bindings.guest->cache;
 	if (UNLIKELY(!cache))
 		return;
 	TALLOC_FREE(cache->entries);
