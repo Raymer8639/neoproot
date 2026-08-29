@@ -289,7 +289,6 @@ void free_terminated_tracees(void) {
         next = t->link.le_next;
         if (t->terminated && free_count < MAX_FREE_BATCH) {
             free_batch[free_count++] = t;
-            LIST_REMOVE(t, link); // 锁内安全移除，避免并发访问
         }
     }
     atomic_store_explicit(&has_terminated_tracees, false, memory_order_release);

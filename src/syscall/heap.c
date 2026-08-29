@@ -44,7 +44,8 @@ void translate_brk_enter(Tracee *tracee)
 		Mapping *bss;
 
 		if (new_brk != 0) {
-			note(tracee, WARNING, INTERNAL, "suspicious brk() from pid %d", tracee->pid);
+			if (tracee->verbose > 0)
+				note(tracee, WARNING, INTERNAL, "suspicious brk() from pid %d", tracee->pid);
 			return;
 		}
 
