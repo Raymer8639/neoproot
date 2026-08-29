@@ -21,7 +21,8 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-bwrap-devnodes.sh \
 	test-tracer-guard.sh \
 	test-8d3c07f5.sh \
-	test-statx-empty-path-mount-id.sh
+	test-statx-empty-path-mount-id.sh \
+	test-statx-empty-path-pipe.sh
 
 # 默认目标
 all: $(TEST_PROGS)

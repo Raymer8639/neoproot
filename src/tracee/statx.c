@@ -5,6 +5,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "tracee/statx.h"
 #include "tracee/reg.h"
@@ -52,6 +53,7 @@ int handle_statx_syscall(Tracee *restrict tracee, bool from_sigsys)
         .updated_stats = 0
     };
     char guest_path[PATH_MAX] = {0};
+    char proc_fd_path[64];
     struct stat st = {0};
 
     // 【性能优化】一次性批量读取所有寄存器，减少ptrace调用开销
@@ -87,9 +89,18 @@ int handle_statx_syscall(Tracee *restrict tracee, bool from_sigsys)
             return status;
         }
 
+        /* AT_EMPTY_PATH names an already-open descriptor.  The procfd
+         * symlink target can be an anonymous object such as "pipe:[N]";
+         * stat() on that target is invalid, while statx on the procfd path
+         * correctly follows it and preserves FIFO/socket metadata. */
+        status = snprintf(proc_fd_path, sizeof(proc_fd_path),
+                          "/proc/%d/fd/%d", tracee->pid, dirfd);
+        if (UNLIKELY(status < 0 || (size_t)status >= sizeof(proc_fd_path)))
+            return -ENAMETOOLONG;
+
         // Preserve mount metadata such as STATX_MNT_ID when emulating an
         // empty-path lookup. Fall back to stat(2) on older host kernels.
-        status = statx_host_path(state.host_path, flags, (unsigned int)mask,
+        status = statx_host_path(proc_fd_path, flags, (unsigned int)mask,
                                  &state.statx_buf);
         if (status == 0) {
             state.updated_stats = 1;
@@ -102,7 +113,7 @@ int handle_statx_syscall(Tracee *restrict tracee, bool from_sigsys)
         }
 
         // Empty path only supports stat semantics in the legacy fallback.
-        status = stat(state.host_path, &st);
+        status = stat(proc_fd_path, &st);
         if (UNLIKELY(status < 0)) {
             return -errno;
         }
