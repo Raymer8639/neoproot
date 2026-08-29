@@ -96,7 +96,11 @@ static int handle_seccomp_event_common(Tracee *restrict tracee) {
         return 0;
     }
     if (status >= 1) {
-        set_result_after_seccomp(tracee, peek_reg(tracee, CURRENT, SYSARG_RESULT));
+        if (status == 1) {
+            set_result_after_seccomp(tracee, 0);
+        } else {
+            set_result_after_seccomp(tracee, peek_reg(tracee, CURRENT, SYSARG_RESULT));
+        }
         return 0;
     }
 

@@ -382,7 +382,6 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
     long status;
     int signal;
     bool sysexit_necessary;
-    bool deliver_sigtrap = false;
     const bool after_enter = atomic_load_explicit(&seccomp_after_ptrace_enter, memory_order_acquire);
 
     if (tracee == NULL || tracee->pid <= 0 || tracee->terminated) {
@@ -435,6 +434,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
         signal = (tracee_status & 0xfff00) >> 8;
         switch (signal) {
             case SIGTRAP: {
+                static bool deliver_sigtrap = false;
                 const unsigned long default_ptrace_options =
                     PTRACE_O_TRACESYSGOOD	|
                     PTRACE_O_TRACEFORK	|
