@@ -12,6 +12,7 @@ TEST_PROGS = test_argv test_echo test_file_ops test_dir_ops
 TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-runtime-bindings.sh test-security-regressions.sh \
 	test-link2symlink-dirent.sh test-link2symlink-stat-guard.sh \
+	test-link2symlink-mmap.sh \
 	test-link2symlink-node-workflow.sh \
 	test-binding-cache.sh \
 	test-openat2.sh \

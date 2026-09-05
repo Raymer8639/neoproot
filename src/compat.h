@@ -47,6 +47,9 @@
 #    ifndef AT_EACCESS
 #        define AT_EACCESS		0x200
 #    endif
+#    ifndef O_PATH
+#        define O_PATH			010000000
+#    endif
 #    ifndef IN_DONT_FOLLOW
 #        define IN_DONT_FOLLOW		0x02000000
 #    endif
