@@ -3,6 +3,23 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.9.7] - 2026-09-05
+
+**link2symlink follow-at-open so Git mmap stays BPF-direct**
+
+- Keep guest `/.l2s/<internal>` names guest-shaped during canonicalize.
+  Rewriting them to a host-absolute path under `PROOT_L2S_DIR` made the
+  next hop walk `/data/data/...` as a guest path and return `ENOENT`,
+  so Git could not `open`+`mmap` relative `.git/objects` and Node/Tauri
+  reported pnpm-linked modules missing.
+- Ordinary `open` follows the L2S backing regular file; `mmap` stays
+  unintercepted. Copy-materialize is limited to `execve`, `O_PATH`,
+  `readlink`, and absolute ordinary open (Node CJS require). `lstat` /
+  `O_NOFOLLOW` keep link semantics, and unmaterialized members still
+  masquerade `st_nlink=2`.
+- Tests/CI: add a relative `open`+`mmap` regression that checks backing
+  contents, nlink masquerade, and that the visible names stay symlinks.
+
 ## [v5.9.6] - 2026-09-05
 
 **Gradle/glibc `faccessat2` fallback on kernels without the syscall**

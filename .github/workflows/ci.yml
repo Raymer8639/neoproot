@@ -60,6 +60,7 @@ jobs:
           PROOT=../src/neoproot sh test-security-regressions.sh
           PROOT=../src/neoproot sh test-link2symlink-dirent.sh
           PROOT=../src/neoproot sh test-link2symlink-stat-guard.sh
+          PROOT=../src/neoproot sh test-link2symlink-mmap.sh
           PROOT=../src/neoproot sh test-link2symlink-node-workflow.sh
           PROOT=../src/neoproot sh test-openat2.sh
           PROOT=../src/neoproot sh test-faccessat2.sh

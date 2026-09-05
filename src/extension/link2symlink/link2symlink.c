@@ -15,6 +15,7 @@
 #include <talloc.h>      /* talloc_*, */
 
 #include "cli/note.h"
+#include "compat.h"
 #include "extension/extension.h"
 #include "tracee/tracee.h"
 #include "tracee/mem.h"
@@ -1058,6 +1059,13 @@ static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *pa
     char *filename;
     int status;
 
+    /* Never copy-materialize a store object onto /.l2s internals.  Ordinary
+     * open already follows the backing file; rewriting the store path would
+     * drop the shared family. */
+    filename = get_filename(path, NULL);
+    if (UNLIKELY(is_l2s_internal_name(filename)))
+        return 0;
+
     /* 链起点判断用 readlink（不用 lstat）：嵌套环境下外层 proot 的
      * link2symlink 会把 lstat 的链路径解析成 .l2s 内部名并拒绝（EPERM），
      * 而 readlink 返回链接内容本身，任何环境下都可靠。
@@ -1250,26 +1258,70 @@ static FORCE_INLINE void translated_path(Extension *restrict extension, char *re
     classify_path_stat_exit(extension, sysnum, translated_path);
 }
 
-/* canonicalize checks each component before TRANSLATED_PATH is emitted.  An
- * absolute backing path outside the rootfs would otherwise be prefixed with
- * the rootfs and fail before the normal L2S remap can run. */
-static FORCE_INLINE void map_external_l2s_host_path(char *host_path) {
+/* Guest-root L2S names that canonicalize can walk through the rootfs
+ * binding.  "/.l2s/<internal>" is the in-rootfs store; "/<internal>" is
+ * the collapsed name used when the backing directory lives outside. */
+static FORCE_INLINE bool is_guest_l2s_name(const char *path, const char *filename)
+{
+	if (UNLIKELY(path == NULL || filename == NULL || path[0] != '/'))
+		return false;
+	if (strncmp(path, "/.l2s/", 6) == 0 && strcmp(path + 6, filename) == 0)
+		return true;
+	return strcmp(path + 1, filename) == 0;
+}
+
+/* canonicalize checks each component before TRANSLATED_PATH is emitted.
+ *
+ * In-rootfs chains store targets as guest "/.l2s/<internal>".  Rewriting
+ * those to a host absolute path under PROOT_L2S_DIR makes the next
+ * canonicalize walk /data/data/... as a guest path and return ENOENT —
+ * Git mmap of relative .git/objects and Node access of pnpm modules.
+ *
+ * External backing still collapses a host-only target to "/<internal>"
+ * so the recursive pass does not walk the host prefix; TRANSLATED_PATH
+ * then follows the remaining hop to the backing regular file.  mmap
+ * stays BPF-direct. */
+static FORCE_INLINE void map_external_l2s_host_path(Extension *extension, char *host_path) {
     char alt[PATH_MAX] ALIGNED;
     const char *filename;
     size_t filename_length;
+    Tracee *tracee;
 
     if (UNLIKELY(host_path == NULL || !get_l2s_directory()))
         return;
     filename = get_filename(host_path, NULL);
     if (UNLIKELY(!is_l2s_internal_name(filename)))
         return;
+    tracee = extension != NULL ? TRACEE(extension) : NULL;
     int host_access = l2s_access(host_path);
     if (LIKELY(host_access == 0)) {
-        /* Symlink targets are canonicalized component by component.  An
-         * external absolute target would fail on its first parent component;
-         * collapse it to a root-level guest name for the recursive pass. */
+        /* A host path inside the guest rootfs must stay host-shaped so
+         * substitute_binding_stat can lstat it.  An external backing
+         * path cannot be walked as a guest prefix; collapse it. */
         if (strncmp(host_path, l2s_directory, l2s_directory_length) == 0 &&
-            host_path[l2s_directory_length] == '/') {
+            host_path[l2s_directory_length] == '/' &&
+            (tracee == NULL || !belongs_to_guestfs(tracee, host_path))) {
+            snprintf(alt, sizeof(alt), "/%s", filename);
+            strcpy(host_path, alt);
+        }
+        return;
+    }
+    /* Guest L2S names must stay guest-shaped.  Rewriting them to a host
+     * absolute under PROOT_L2S_DIR makes canonicalize walk /data/data/...
+     * inside the rootfs and return ENOENT (Git mmap, Node access).
+     * In-rootfs stores keep "/.l2s/<internal>"; external backing collapses
+     * to "/<internal>" so the next HOST_PATH can map the host file. */
+    if (is_guest_l2s_name(host_path, filename)) {
+        char mapped[PATH_MAX] ALIGNED;
+
+        if (tracee != NULL) {
+            strcpy(mapped, host_path);
+            if (substitute_binding(tracee, GUEST, mapped) >= 0 &&
+                l2s_access(mapped) == 0)
+                return;
+        }
+        snprintf(alt, sizeof(alt), "%s/%s", l2s_directory, filename);
+        if (LIKELY(l2s_access(alt) == 0)) {
             snprintf(alt, sizeof(alt), "/%s", filename);
             strcpy(host_path, alt);
         }
@@ -1471,41 +1523,51 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
                 }
             }
         }
-        /* execve 物化（方案 C）：canonicalize 解析链之前、翻译前拦截。
-         * 此时 user_path 仍是原始 guest 路径（symlink 链状态），
-         * 用 substitute_binding 转成 host 路径后物化（只做前缀替换，不解析链）。
-         * 相对路径的 execve 跳过（pnpm/tsgo 场景均为绝对路径）。 */
+        /* Copy-materialize only when the caller cannot use a followed
+         * backing fd: execve, O_PATH (tsgo readlink /proc/self/fd/N),
+         * and readlink (Node ESM realpath).  Ordinary open follows the
+         * L2S chain at TRANSLATED_PATH so mmap stays BPF-direct; copying
+         * onto the visible name would drop st_nlink masquerade (stat-guard)
+         * and rewrite Git objects that mmap must see as the shared backing
+         * file.  Absolute ordinary open still materializes for Node CJS
+         * require of pnpm-linked modules. */
         Sysnum g_sysnum = get_sysnum(tracee, ORIGINAL);
-        if (UNLIKELY(g_sysnum == PR_execve || g_sysnum == PR_execveat)) {
-            char *user_path = (char *)data2;
-            if (LIKELY(user_path && user_path[0] == '/')) {
-                char host_path[PATH_MAX] ALIGNED;
-                strcpy(host_path, user_path);
-                if (LIKELY(substitute_binding(tracee, GUEST, host_path) >= 0))
-                    materialize_executable(tracee, host_path);
+        {
+            const char *user_path = (const char *)data2;
+            const char *base = (const char *)data1;
+            bool want_copy = false;
+            word_t open_flags = 0;
+
+            if (g_sysnum == PR_execve || g_sysnum == PR_execveat)
+                want_copy = true;
+            else if (g_sysnum == PR_readlink || g_sysnum == PR_readlinkat)
+                want_copy = true;
+            else if (g_sysnum == PR_open || g_sysnum == PR_openat ||
+                     g_sysnum == PR_openat2) {
+                if (g_sysnum == PR_open)
+                    open_flags = peek_reg(tracee, CURRENT, SYSARG_2);
+                else
+                    open_flags = peek_reg(tracee, CURRENT, SYSARG_3);
+                if ((open_flags & O_PATH) != 0)
+                    want_copy = true;
+                else if (user_path != NULL && user_path[0] == '/')
+                    want_copy = true;
             }
-        }
-        /* tsgo 场景（open 物化）：tsgo 用 open(path, O_PATH) + readlink(/proc/self/fd/N)
-         * 解析真实路径，readlink(fd) 由内核直接返回（neoproot 无法拦截），若 fd 指向
-         * .l2s 链（symlink），readlink 返回链内容（/.l2s/.l2s.<hash>.0001.0002）→
-         * 当 TS 文件处理报 TS6054/TS2307/TS7006（类型库解析失败）。必须在 open 之前
-         * 把链物化为普通文件（此时 user_path 还是原始 guest 路径，链状态完好；
-         * SYSCALL_ENTER_END 时已被 canonicalize 解析成 final，链信息丢失）。
-         * 对所有 open 触发（不限于 O_PATH）：tsgo 会以多种方式访问类型文件，
-         * 全量物化保证一次 tsc 即全部就位；物化是幂等的（普通文件跳过），
-         * 数据仍 1 份（rename 移动），store 链由反向 symlink 保持完整。 */
-        /* node ESM 场景（readlink 物化，2026-08-13 新增）：libuv 的 realpath
-         * 不先 lstat、直接 readlink 循环，链文件 readlink 会返回 /.l2s 中间链
-         * → node 按扩展名 .0002 判定模块格式 → ERR_UNKNOWN_FILE_EXTENSION
-         * （pnpm install 后 pnpm dev/vite 崩溃，8.13 实测）。在 readlink 执行前
-         * 物化：物化后是普通文件，readlink 自然 EINVAL → realpath 停在原路径
-         * （扩展名正确）；非链 symlink 不受影响（materialize 幂等跳过）。 */
-        if (UNLIKELY(g_sysnum == PR_open || g_sysnum == PR_openat
-                     || g_sysnum == PR_readlink || g_sysnum == PR_readlinkat)) {
-            char *user_path = (char *)data2;
-            if (LIKELY(user_path && user_path[0] == '/')) {
+            if (want_copy && user_path != NULL && base != NULL) {
+                char guest_path[PATH_MAX] ALIGNED;
                 char host_path[PATH_MAX] ALIGNED;
-                strcpy(host_path, user_path);
+                if (user_path[0] == '/') {
+                    strcpy(guest_path, user_path);
+                } else {
+                    size_t bl = strlen(base);
+                    if (bl >= PATH_MAX) bl = PATH_MAX - 1;
+                    memcpy(guest_path, base, bl);
+                    if (bl > 0 && base[bl - 1] != '/')
+                        guest_path[bl++] = '/';
+                    strncpy(guest_path + bl, user_path, PATH_MAX - bl - 1);
+                    guest_path[PATH_MAX - 1] = '\0';
+                }
+                strcpy(host_path, guest_path);
                 if (LIKELY(substitute_binding(tracee, GUEST, host_path) >= 0))
                     materialize_executable(tracee, host_path);
             }
@@ -1542,7 +1604,7 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
         translated_path(extension, (char *)data1);
         return 0;
     case HOST_PATH:
-        map_external_l2s_host_path((char *)data1);
+        map_external_l2s_host_path(extension, (char *)data1);
         return 0;
     case STATX_SYSCALL:
         link2symlink_handle_statx((struct statx_syscall_state *)data1);
