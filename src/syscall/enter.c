@@ -2409,6 +2409,20 @@ int translate_syscall_enter(Tracee *tracee)
         if (status < 0)
             break;
 
+        /* Android/PRoot-Distro kernels commonly lack faccessat2(2).
+         * glibc 2.33+ uses it for [ -x ] with AT_EACCESS, then falls
+         * back to faccessat() on ENOSYS.  Restarting the original
+         * syscall after that ENOSYS leaves SYSARG_1 as the previous
+         * result (ENOENT/-2 on ARM64), so the next check sees
+         * dirfd=-2 and returns ENETDOWN.  Lower to faccessat() like
+         * openat2→openat, keeping AT_SYMLINK_NOFOLLOW. */
+        if (syscall_number == PR_faccessat2) {
+            word_t access_flags = peek_reg(tracee, CURRENT, SYSARG_4);
+
+            set_sysnum(tracee, PR_faccessat);
+            poke_reg(tracee, SYSARG_4, access_flags & AT_SYMLINK_NOFOLLOW);
+        }
+
         status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
         break;
 

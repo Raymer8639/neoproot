@@ -3,6 +3,19 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.9.6] - 2026-09-05
+
+**Gradle/glibc `faccessat2` fallback on kernels without the syscall**
+
+- Lower `faccessat2` to `faccessat` in both syscall enter and seccomp
+  restart paths, keeping only `AT_SYMLINK_NOFOLLOW`. Android/PRoot-Distro
+  kernels commonly return `ENOSYS`; glibc 2.33+ uses `faccessat2(...,
+  AT_EACCESS)` for POSIX `[ -x ]`. Restarting the original syscall left
+  the previous result (ENOENT/-2 on ARM64) in `SYSARG_1`, so the next
+  check used `dirfd=-2` and failed with `ENETDOWN`.
+- Tests/CI: add a missing-then-present `faccessat2(AT_EACCESS)`
+  regression covering the Gradle launcher dual `[ -x ]` sequence.
+
 ## [v5.9.2] - 2026-08-27
 
 **Codex bubblewrap root-bind compatibility patch**
