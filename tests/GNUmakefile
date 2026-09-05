@@ -15,6 +15,7 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-link2symlink-node-workflow.sh \
 	test-binding-cache.sh \
 	test-openat2.sh \
+	test-faccessat2.sh \
 	test-bwrap-oldroot-bind.sh \
 	test-bwrap-proc-dirfd.sh test-bwrap-procfd-mount-target.sh \
 	test-bwrap-resolve-in-root.sh test-bwrap-cwd-dirfd.sh \

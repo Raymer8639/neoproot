@@ -44,6 +44,9 @@
 #    ifndef AT_SYMLINK_NOFOLLOW
 #        define AT_SYMLINK_NOFOLLOW	0x100
 #    endif
+#    ifndef AT_EACCESS
+#        define AT_EACCESS		0x200
+#    endif
 #    ifndef IN_DONT_FOLLOW
 #        define IN_DONT_FOLLOW		0x02000000
 #    endif

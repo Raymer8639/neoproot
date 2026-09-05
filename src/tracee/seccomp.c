@@ -169,6 +169,18 @@ static int handle_seccomp_event_common(Tracee *restrict tracee) {
         case PR_accept:
             transform_simple_syscall(tracee, PR_accept4, 0, -1, -1);
             break;
+        case PR_faccessat2: {
+            /* Android parent seccomp or old kernels reject faccessat2.
+             * Lower to faccessat so glibc's [ -x ] / AT_EACCESS path
+             * is translated instead of returning ENOSYS and poisoning
+             * the next syscall's dirfd. */
+            word_t access_flags = peek_reg(tracee, CURRENT, SYSARG_4);
+
+            set_sysnum(tracee, PR_faccessat);
+            poke_reg(tracee, SYSARG_4, access_flags & AT_SYMLINK_NOFOLLOW);
+            restart_syscall_after_seccomp(tracee);
+            break;
+        }
         case PR_openat2: {
             /* 外层 seccomp 拒绝 openat2 时转 openat（上游 114a7c6 移植）：
              * 这样调用能在外层策略下存活，且重启动后路径会被翻译。 */
