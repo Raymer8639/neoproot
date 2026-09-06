@@ -570,6 +570,61 @@ proc_final:
     return UNLIKELY(status < 0) ? status : 0;
 }
 
+int link2symlink_disguise_stat(Tracee *tracee, const char *host_path, struct stat *st)
+{
+	char original[PATH_MAX] ALIGNED, intermediate[PATH_MAX] ALIGNED, final[PATH_MAX] ALIGNED;
+	struct stat final_stat, statl;
+	char *filename;
+	ssize_t size;
+	int status;
+
+	if (tracee == NULL || host_path == NULL || st == NULL)
+		return 0;
+	if (get_extension(tracee, link2symlink_callback) == NULL)
+		return 0;
+	if (strlen(host_path) >= PATH_MAX)
+		return 0;
+	strcpy(original, host_path);
+	filename = get_filename(original, NULL);
+	status = l2s_lstat(original, &statl);
+	if (UNLIKELY(status < 0))
+		return 0;
+	if (is_l2s_internal_path(original)) {
+		if (S_ISLNK(statl.st_mode)) {
+			strcpy(intermediate, original);
+			goto proc_intermediate_notif;
+		}
+		strcpy(final, original);
+		goto proc_final_notif;
+	}
+	if (UNLIKELY(!S_ISLNK(statl.st_mode)))
+		return 0;
+	size = my_readlink(original, intermediate, PATH_MAX);
+	if (UNLIKELY(size < 0))
+		return 0;
+	filename = get_filename(intermediate, NULL);
+	if (UNLIKELY(strncmp(filename, PREFIX, PREFIX_LEN) != 0))
+		return 0;
+
+proc_intermediate_notif:
+	size = my_readlink(intermediate, final, PATH_MAX);
+	if (UNLIKELY(size < 0))
+		return 0;
+
+proc_final_notif:
+	status = l2s_lstat(final, &final_stat);
+	if (UNLIKELY(status < 0))
+		return 0;
+	{
+		int final_count;
+		if (UNLIKELY(!parse_l2s_final_count(final, &final_count)))
+			return 0;
+		final_stat.st_nlink = final_count;
+	}
+	*st = final_stat;
+	return 0;
+}
+
 static FORCE_INLINE void link2symlink_handle_statx(struct statx_syscall_state *state) {
     if (UNLIKELY(!state || !(state->statx_buf.stx_mask & STATX_NLINK))) return;
     const char *name = strrchr(state->host_path, '/');

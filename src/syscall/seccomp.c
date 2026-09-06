@@ -25,13 +25,22 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include <linux/limits.h>
+
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+#ifndef AT_SYMLINK_NOFOLLOW
+#define AT_SYMLINK_NOFOLLOW 0x100
+#endif
 
 #include "syscall/seccomp.h"
 #include "tracee/tracee.h"
 #include "tracee/abi.h"
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
+#include "path/path.h"
 #include "extension/extension.h"
 #include "cli/note.h"
 #include "compat.h"
@@ -534,131 +543,179 @@ static int notif_read_string(pid_t pid, word_t addr, char *buf, size_t max)
     return (int)max;
 }
 
-int handle_seccomp_user_notif(int listener_fd) {
-    static struct seccomp_notif *req;
-    static struct seccomp_notif_resp *resp;
-    static uint16_t req_sz;
-    static uint16_t resp_sz;
+static pthread_mutex_t notif_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t notif_done = PTHREAD_COND_INITIALIZER;
+static struct seccomp_notif *notif_req;
+static struct seccomp_notif_resp *notif_resp;
+static uint16_t notif_req_sz;
+static uint16_t notif_resp_sz;
+static bool notif_pending;
+
+static int ensure_notif_bufs(void)
+{
+    struct seccomp_notif_sizes sizes = { 0 };
+
+    if (notif_req != NULL && notif_resp != NULL)
+        return 0;
+#ifdef __NR_seccomp
+    if (syscall(__NR_seccomp, SECCOMP_GET_NOTIF_SIZES, 0, &sizes) < 0)
+        return -errno;
+#else
+    return -ENOSYS;
+#endif
+    if (sizes.seccomp_notif == 0 || sizes.seccomp_notif_resp == 0)
+        return -EINVAL;
+    notif_req = calloc(1, sizes.seccomp_notif);
+    notif_resp = calloc(1, sizes.seccomp_notif_resp);
+    if (notif_req == NULL || notif_resp == NULL)
+        return -ENOMEM;
+    notif_req_sz = sizes.seccomp_notif;
+    notif_resp_sz = sizes.seccomp_notif_resp;
+    return 0;
+}
+
+static void notif_send(int listener_fd, int error, word_t val)
+{
+    memset(notif_resp, 0, notif_resp_sz);
+    notif_resp->id = notif_req->id;
+    notif_resp->flags = 0;
+    notif_resp->error = error;
+    notif_resp->val = (int64_t)val;
+    (void)ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, notif_resp);
+}
+
+int recv_seccomp_user_notif(int listener_fd)
+{
+    int rc;
+
+    if (listener_fd < 0)
+        return -EBADF;
+    rc = ensure_notif_bufs();
+    if (rc < 0)
+        return rc;
+
+    pthread_mutex_lock(&notif_lock);
+    while (notif_pending)
+        pthread_cond_wait(&notif_done, &notif_lock);
+    pthread_mutex_unlock(&notif_lock);
+
+    memset(notif_req, 0, notif_req_sz);
+    rc = ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_RECV, notif_req);
+    if (rc < 0)
+        return -errno;
+
+    pthread_mutex_lock(&notif_lock);
+    notif_pending = true;
+    pthread_mutex_unlock(&notif_lock);
+    return 0;
+}
+
+int complete_seccomp_user_notif(int listener_fd)
+{
+    Tracee *tracee;
     struct stat st;
     word_t nr_fstatat64;
     word_t nr_newfstatat;
     pid_t target;
+    char path[PATH_MAX];
+    char host_path[PATH_MAX];
+    int dirfd;
+    int flags;
+    int n;
+    int stat_err;
     int rc;
 
     if (listener_fd < 0)
         return -EBADF;
 
-    if (req == NULL || resp == NULL) {
-        struct seccomp_notif_sizes sizes = { 0 };
-#ifdef __NR_seccomp
-        if (syscall(__NR_seccomp, SECCOMP_GET_NOTIF_SIZES, 0, &sizes) < 0)
-            return -errno;
-#else
-        return -ENOSYS;
-#endif
-        if (sizes.seccomp_notif == 0 || sizes.seccomp_notif_resp == 0)
-            return -EINVAL;
-        /* malloc: this handler runs on the RECV thread; talloc is not MT-safe. */
-        req = calloc(1, sizes.seccomp_notif);
-        resp = calloc(1, sizes.seccomp_notif_resp);
-        if (req == NULL || resp == NULL)
-            return -ENOMEM;
-        req_sz = sizes.seccomp_notif;
-        resp_sz = sizes.seccomp_notif_resp;
-    }
-
-    memset(req, 0, req_sz);
-    rc = ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_RECV, req);
-    if (rc < 0)
-        return -errno;
-
-    memset(resp, 0, resp_sz);
-    resp->id = req->id;
-    resp->flags = 0;
-    resp->val = 0;
-    resp->error = -ENOSYS;
-
-    if (ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_ID_VALID, &req->id) < 0) {
-        resp->error = -ESRCH;
-        (void)ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, resp);
+    pthread_mutex_lock(&notif_lock);
+    if (!notif_pending) {
+        pthread_mutex_unlock(&notif_lock);
         return 0;
+    }
+    pthread_mutex_unlock(&notif_lock);
+
+    if (ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_ID_VALID, &notif_req->id) < 0) {
+        notif_send(listener_fd, -ESRCH, 0);
+        goto done;
     }
 
     nr_fstatat64 = detranslate_sysnum(ABI_DEFAULT, PR_fstatat64);
     nr_newfstatat = detranslate_sysnum(ABI_DEFAULT, PR_newfstatat);
-    if (!((nr_fstatat64 != SYSCALL_AVOIDER && req->data.nr == (int)nr_fstatat64)
-          || (nr_newfstatat != SYSCALL_AVOIDER && req->data.nr == (int)nr_newfstatat))) {
-        (void)ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, resp);
-        return 0;
+    if (!((nr_fstatat64 != SYSCALL_AVOIDER && notif_req->data.nr == (int)nr_fstatat64)
+          || (nr_newfstatat != SYSCALL_AVOIDER && notif_req->data.nr == (int)nr_newfstatat))) {
+        notif_send(listener_fd, -ENOSYS, 0);
+        goto done;
     }
 
-    target = (pid_t)req->pid;
-    {
-        char path[PATH_MAX];
+    target = (pid_t)notif_req->pid;
+    dirfd = (int)notif_req->data.args[0];
+    flags = (int)notif_req->data.args[3];
+    n = notif_read_string(target, (word_t)notif_req->data.args[1], path, sizeof(path));
+    if (n < 0) {
+        notif_send(listener_fd, n, 0);
+        goto done;
+    }
+    path[sizeof(path) - 1] = '\0';
+
+    tracee = get_tracee(NULL, target, false);
+    if (tracee == NULL) {
+        notif_send(listener_fd, -ESRCH, 0);
+        goto done;
+    }
+
+    if (path[0] == '\0') {
         char procpath[64];
-        int dirfd = (int)req->data.args[0];
-        int flags = (int)req->data.args[3];
-        int hostdir = -1;
-        int n;
-        int stat_err;
-        const char *base;
+        int hostdir;
 
-        n = notif_read_string(target, (word_t)req->data.args[1], path, sizeof(path));
-        if (n < 0) {
-            resp->error = n;
-            (void)ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, resp);
-            return 0;
+        if ((flags & AT_EMPTY_PATH) == 0) {
+            notif_send(listener_fd, -ENOENT, 0);
+            goto done;
         }
-        path[sizeof(path) - 1] = '\0';
-        base = strrchr(path, '/');
-        base = base ? base + 1 : path;
-        if (strcmp(path, NEOPROOT_NOTIFY_SENTINEL) == 0
-            || strcmp(base, NEOPROOT_NOTIFY_SENTINEL) == 0) {
-            memset(&st, 0, sizeof(st));
-            st.st_mode = S_IFREG | 0644;
-            st.st_nlink = 1;
-            st.st_size = NEOPROOT_NOTIFY_PLUMBING_SIZE;
-            if (notif_vm_io(target, (word_t)req->data.args[2], &st, sizeof(st), true) < 0)
-                resp->error = -EFAULT;
-            else {
-                resp->error = 0;
-                resp->val = 0;
-            }
-            if (ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, resp) < 0)
-                return -errno;
-            return 0;
-        }
-
-        /* Identity-rootfs plumbing: use the tracee's cwd/fd. Not a
-         * substitute for PRoot path translation (step 3). */
-        if (path[0] == '/')
-            stat_err = fstatat(AT_FDCWD, path, &st, flags);
+        if (dirfd == AT_FDCWD)
+            snprintf(procpath, sizeof(procpath), "/proc/%d/cwd", (int)target);
+        else
+            snprintf(procpath, sizeof(procpath), "/proc/%d/fd/%d", (int)target, dirfd);
+        hostdir = open(procpath, O_PATH | O_CLOEXEC);
+        if (hostdir < 0)
+            stat_err = -1;
         else {
-            if (dirfd == AT_FDCWD)
-                snprintf(procpath, sizeof(procpath), "/proc/%d/cwd", (int)target);
-            else
-                snprintf(procpath, sizeof(procpath), "/proc/%d/fd/%d",
-                         (int)target, dirfd);
-            hostdir = open(procpath, O_PATH | O_CLOEXEC);
-            if (hostdir < 0)
-                stat_err = -1;
-            else {
-                stat_err = fstatat(hostdir, path[0] ? path : ".", &st, flags);
-                close(hostdir);
-            }
+            stat_err = fstatat(hostdir, "", &st, flags | AT_EMPTY_PATH);
+            close(hostdir);
         }
-        if (stat_err < 0)
-            resp->error = errno ? -errno : -ENOENT;
-        else if (notif_vm_io(target, (word_t)req->data.args[2], &st, sizeof(st), true) < 0)
-            resp->error = -EFAULT;
-        else {
-            resp->error = 0;
-            resp->val = 0;
+        if (stat_err < 0) {
+            notif_send(listener_fd, errno ? -errno : -ENOENT, 0);
+            goto done;
         }
-        if (ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, resp) < 0)
-            return -errno;
-        return 0;
+        strcpy(host_path, procpath);
+    } else {
+        rc = translate_path(tracee, host_path, dirfd, path,
+                            (flags & AT_SYMLINK_NOFOLLOW) == 0);
+        if (rc < 0) {
+            notif_send(listener_fd, rc, 0);
+            goto done;
+        }
+        stat_err = fstatat(AT_FDCWD, host_path, &st, flags);
+        if (stat_err < 0) {
+            notif_send(listener_fd, errno ? -errno : -ENOENT, 0);
+            goto done;
+        }
     }
+
+    (void)link2symlink_disguise_stat(tracee, host_path, &st);
+    (void)fake_id0_disguise_stat(tracee, &st);
+
+    if (notif_vm_io(target, (word_t)notif_req->data.args[2], &st, sizeof(st), true) < 0)
+        notif_send(listener_fd, -EFAULT, 0);
+    else
+        notif_send(listener_fd, 0, 0);
+
+done:
+    pthread_mutex_lock(&notif_lock);
+    notif_pending = false;
+    pthread_cond_signal(&notif_done);
+    pthread_mutex_unlock(&notif_lock);
+    return 0;
 }
 
 int enable_syscall_filtering(const Tracee *restrict tracee) {
@@ -702,7 +759,11 @@ int probe_seccomp_user_notif(void) {
     return -ENOSYS;
 }
 
-int handle_seccomp_user_notif([[maybe_unused]] int listener_fd) {
+int recv_seccomp_user_notif([[maybe_unused]] int listener_fd) {
+    return -ENOSYS;
+}
+
+int complete_seccomp_user_notif([[maybe_unused]] int listener_fd) {
     return -ENOSYS;
 }
 

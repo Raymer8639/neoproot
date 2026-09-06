@@ -1,10 +1,13 @@
 #ifndef FAKE_ID0_STAT_H
 #define FAKE_ID0_STAT_H
 
+#include <sys/stat.h>
+
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
 #include "extension/fake_id0/config.h"
 
+int fake_id0_disguise_stat(Tracee *tracee, struct stat *st);
 int handle_stat_enter_end(Tracee *tracee, Reg fd_sysarg);
 int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config, uintptr_t statx_state_raw);
 #ifndef USERLAND

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Step 2: --seccomp-notify USER_NOTIF plumbing for newfstatat.
+# Step 3: --seccomp-notify emulates newfstatat (translate + fake_id0 + L2S nlink).
 # Uses default rootfs "/" so guest paths are host paths (dynamic linker lives).
 set -eu
 
@@ -20,6 +20,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 printf 'hello' > "$ROOT/marker"
+mkdir -p "$ROOT/subdir"
+printf 'abcd' > "$ROOT/subdir/inside"
+ln -s marker "$ROOT/link-to-marker"
+printf 'xx' > "$ROOT/l2s-a"
+
 "$CC" -O2 -o "$ROOT/probe" "$SCRIPT_DIR/test-seccomp-notify-pipe.c"
 chmod 0755 "$ROOT/probe"
 
@@ -33,15 +38,26 @@ if [ "$status" -ne 0 ]; then
 fi
 
 set +e
-(cd "$ROOT" && PROOT_UNSET_DONE=1 "$PROOT" --seccomp-notify ./probe expect-magic >"$ROOT/out" 2>&1)
+(cd "$ROOT" && PROOT_UNSET_DONE=1 "$PROOT" --seccomp-notify ./probe expect-translated >"$ROOT/out" 2>&1)
 status=$?
 set -e
 cat "$ROOT/out"
 if [ "$status" -ne 0 ]; then
-	printf '%s\n' 'with --seccomp-notify: expected sentinel plumbing fstatat'
+	printf '%s\n' 'with --seccomp-notify: expected translated fstatat'
 	exit "$status"
 fi
 grep -F 'USER_NOTIF listener ready' "$ROOT/out" >/dev/null
-grep -F 'pipe expect-magic ok' "$ROOT/out" >/dev/null
+grep -F 'pipe expect-translated ok' "$ROOT/out" >/dev/null
+
+set +e
+(cd "$ROOT" && PROOT_UNSET_DONE=1 "$PROOT" --seccomp-notify --link2symlink ./probe expect-l2s >"$ROOT/out-l2s" 2>&1)
+status=$?
+set -e
+cat "$ROOT/out-l2s"
+if [ "$status" -ne 0 ]; then
+	printf '%s\n' 'with --seccomp-notify --link2symlink: expected nlink=2'
+	exit "$status"
+fi
+grep -F 'pipe expect-l2s ok' "$ROOT/out-l2s" >/dev/null
 
 printf '%s\n' 'seccomp-notify pipe regression passed'

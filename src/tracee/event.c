@@ -5,6 +5,7 @@
 #include <sys/utsname.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include <sys/eventfd.h>
 #include <poll.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -61,6 +62,7 @@ static _Atomic pid_t main_pid = 0;
  * ioctl(RECV) is blocking, so RECV runs on a dedicated thread. */
 static int user_notif_listener = -1;
 static int user_notif_sock = -1;
+static int user_notif_eventfd = -1;
 static pthread_t user_notif_thread;
 static _Atomic bool user_notif_thread_running = false;
 
@@ -191,9 +193,15 @@ static void *user_notif_thread_main(void *arg)
     int fd = (int)(intptr_t)arg;
 
     for (;;) {
-        int rc = handle_seccomp_user_notif(fd);
+        int rc = recv_seccomp_user_notif(fd);
         if (rc == -EBADF || rc == -ENOTTY || rc == -EIO)
             break;
+        if (rc < 0)
+            continue;
+        if (user_notif_eventfd >= 0) {
+            uint64_t one = 1;
+            (void)write(user_notif_eventfd, &one, sizeof(one));
+        }
     }
     return NULL;
 }
@@ -237,19 +245,31 @@ static void maybe_recv_user_notif_listener(void)
     user_notif_listener = fd;
     close(user_notif_sock);
     user_notif_sock = -1;
+    if (user_notif_eventfd < 0)
+        user_notif_eventfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     start_user_notif_thread(fd);
+}
+
+static void drain_user_notif(void)
+{
+    uint64_t v;
+
+    if (user_notif_listener < 0)
+        return;
+    if (user_notif_eventfd >= 0)
+        (void)read(user_notif_eventfd, &v, sizeof(v));
+    (void)complete_seccomp_user_notif(user_notif_listener);
 }
 
 static pid_t wait_for_tracee_or_notif(int *tracee_status)
 {
     maybe_recv_user_notif_listener();
-    if (user_notif_sock < 0)
+    if (user_notif_listener < 0 && user_notif_sock < 0)
         return waitpid(-1, tracee_status, __WALL);
 
-    /* Listener still in flight: watch the unix socket without blocking
-     * forever in waitpid (USER_NOTIF has no ptrace event). */
     for (;;) {
-        struct pollfd pfd;
+        struct pollfd pfds[2];
+        nfds_t n = 0;
         pid_t pid;
         int pr;
 
@@ -257,21 +277,31 @@ static pid_t wait_for_tracee_or_notif(int *tracee_status)
         if (pid != 0)
             return pid;
         maybe_recv_user_notif_listener();
-        if (user_notif_listener >= 0)
+        drain_user_notif();
+
+        if (user_notif_sock >= 0) {
+            pfds[n].fd = user_notif_sock;
+            pfds[n].events = POLLIN;
+            pfds[n].revents = 0;
+            n++;
+        }
+        if (user_notif_eventfd >= 0) {
+            pfds[n].fd = user_notif_eventfd;
+            pfds[n].events = POLLIN;
+            pfds[n].revents = 0;
+            n++;
+        }
+        if (n == 0)
             return waitpid(-1, tracee_status, __WALL);
 
-        pfd.fd = user_notif_sock;
-        pfd.events = POLLIN;
-        pfd.revents = 0;
-        pr = poll(&pfd, 1, 10);
+        pr = poll(pfds, n, 10);
         if (pr < 0) {
             if (errno == EINTR)
                 continue;
             return -1;
         }
         maybe_recv_user_notif_listener();
-        if (user_notif_listener >= 0)
-            return waitpid(-1, tracee_status, __WALL);
+        drain_user_notif();
     }
 }
 
