@@ -1,3 +1,6 @@
+/* BPF filter construction. USER_NOTIF probe/emulation lives in
+ * syscall/seccomp_notify.c; this file only decides RET_TRACE vs
+ * RET_USER_NOTIF and installs NEW_LISTENER when the flag is set. */
 #include "build.h"
 #include "arch.h"
 
@@ -16,13 +19,15 @@
 #include <stdint.h>
 #include <assert.h>
 #include <stdbool.h>
+#include <unistd.h>
+#include <sys/syscall.h>
 
 #include "syscall/seccomp.h"
 #include "tracee/tracee.h"
+#include "tracee/abi.h"
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "extension/extension.h"
-#include "cli/note.h"
 #include "compat.h"
 #include "attribute.h"
 
@@ -61,15 +66,24 @@ static ALWAYS_INLINE int add_statements(struct sock_fprog *restrict program,
     return 0;
 }
 
-static ALWAYS_INLINE int add_trace_syscall(struct sock_fprog *restrict program,
-                                           word_t syscall, int flag) {
+static ALWAYS_INLINE int add_syscall_ret(struct sock_fprog *restrict program,
+                                         word_t syscall, uint32_t seccomp_ret) {
     if (UNLIKELY(syscall > UINT32_MAX))
         return -ERANGE;
     const struct sock_filter stmts[] = {
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)syscall, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE + flag),
+        BPF_STMT(BPF_RET | BPF_K, seccomp_ret),
     };
     return add_statements(program, sizeof(stmts)/sizeof(*stmts), stmts);
+}
+
+static ALWAYS_INLINE int add_trace_syscall(struct sock_fprog *restrict program,
+                                           word_t syscall, int flag) {
+    return add_syscall_ret(program, syscall, SECCOMP_RET_TRACE + flag);
+}
+
+static ALWAYS_INLINE bool is_user_notif_sysnum(Sysnum value) {
+    return value == PR_newfstatat || value == PR_fstatat64;
 }
 
 /* ioctl 等按参数条件过滤的变体：只有 args[1] 匹配特定值才停靠，
@@ -147,7 +161,8 @@ static ALWAYS_INLINE void free_program_filter(struct sock_fprog *restrict progra
     program->len = 0;
 }
 
-static int set_seccomp_filters(const FilteredSysnum *restrict sysnums) {
+static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
+                               bool user_notif, int *listener_fd) {
     SeccompArch archs[] = SECCOMP_ARCHS;
     size_t n_arch = sizeof(archs) / sizeof(SeccompArch);
     struct sock_fprog prog = { 0 };
@@ -192,6 +207,8 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums) {
                     };
                     ret = add_trace_syscall_args1(&prog, sc, sysnums[k].flags,
                                                   ioctl_cmds, 7);
+                } else if (user_notif && is_user_notif_sysnum(sysnums[k].value)) {
+                    ret = add_syscall_ret(&prog, sc, SECCOMP_RET_USER_NOTIF);
                 } else {
                     ret = add_trace_syscall(&prog, sc, sysnums[k].flags);
                 }
@@ -211,6 +228,23 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums) {
     ret = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     if (UNLIKELY(ret < 0))
         goto out;
+    if (user_notif) {
+#ifndef __NR_seccomp
+        ret = -ENOSYS;
+        goto out;
+#else
+        int fd = (int)syscall(__NR_seccomp, SECCOMP_SET_MODE_FILTER,
+                              SECCOMP_FILTER_FLAG_NEW_LISTENER, &prog);
+        if (fd < 0) {
+            ret = -errno;
+            goto out;
+        }
+        if (listener_fd)
+            *listener_fd = fd;
+        ret = 0;
+        goto out;
+#endif
+    }
     ret = prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
     if (UNLIKELY(ret < 0))
         goto out;
@@ -368,6 +402,7 @@ static int merge_filtered_sysnums(TALLOC_CTX *ctx,
 int enable_syscall_filtering(const Tracee *restrict tracee) {
     FilteredSysnum *filtered = NULL;
     int ret;
+    int listener = -1;
     assert(tracee != NULL && tracee->ctx != NULL);
     ret = merge_filtered_sysnums(tracee->ctx, &filtered, proot_sysnums);
     if (UNLIKELY(ret < 0))
@@ -387,8 +422,12 @@ int enable_syscall_filtering(const Tracee *restrict tracee) {
                 return ret;
         }
     }
-    ret = set_seccomp_filters(filtered);
-    return ret;
+    ret = set_seccomp_filters(filtered, tracee->seccomp_notify, &listener);
+    if (ret < 0)
+        return ret;
+    if (tracee->seccomp_notify)
+        return listener;
+    return 0;
 }
 
 #else /* !HAVE_SECCOMP_FILTER */

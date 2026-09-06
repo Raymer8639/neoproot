@@ -21,6 +21,7 @@
 #include "path/canon.h"
 #include "path/path.h"
 #include "extension/sysvipc/sysvipc.h"
+#include "syscall/seccomp.h"
 
 #include "build.h"
 
@@ -346,6 +347,18 @@ int proot_main(int argc, char *const argv[]) {
     }
     status = parse_config(tracee, (size_t)argc, argv);
     if (UNLIKELY(status < 0)) goto error;
+    if (tracee->seccomp_notify) {
+        int probe = probe_seccomp_user_notif();
+        if (probe < 0) {
+            note(tracee, ERROR, USER,
+                 "--seccomp-notify requires Linux 5.0+ seccomp NEW_LISTENER "
+                 "and USER_NOTIF; probe failed: %s",
+                 strerror(-probe));
+            goto error;
+        }
+        note(tracee, WARNING, USER,
+             "seccomp-notify: USER_NOTIF listener ready; newfstatat is emulated");
+    }
     if (!SAFE_GETENV("PROOT_NO_MOUNTINFO"))
         initialize_extension(tracee, mountinfo_callback, NULL);
     status = launch_process(tracee, &argv[status]);

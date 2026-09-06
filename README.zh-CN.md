@@ -29,6 +29,7 @@ sh build.sh install
 - 自动处理 Termux 宿主初始化：wake-lock、文件描述符上限和 `LD_*` 清理由 `neoproot` 启动器完成。
 - link2symlink 硬链接模拟兼容 pnpm 和 TypeScript/tsgo 通过 `/proc/<pid>/fd/<fd>` 探测真实路径的工作流。
 - 移除分支原有的路径翻译线程池开销，高频路径操作下 nvim 与包管理器更顺畅。
+- 可选 `--seccomp-notify`（Linux 5.0+）用 seccomp USER_NOTIF 模拟 `newfstatat`，目录元数据扫描少一次 ptrace 停靠。不加该参数时 kernel 4+ 行为不变。
 - 内置高优先级调度（`setpriority(-20)`），无需 root 即可改善 CPU 调度倾向。
 - 修复中文 VNC 退出卡死、注销/切后台问题和误导性的 `signal 11` 退出警告。
 - 采用精简的 C23/C++23 实现并针对 ARMv8.2 调优，以 ARM64 性能换取通用架构覆盖范围。

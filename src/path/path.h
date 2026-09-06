@@ -79,6 +79,15 @@ void clear_translated_dirfds(pid_t pid);
 void inherit_translated_dirfds(pid_t parent_pid, pid_t child_pid);
 void copy_translated_dirfd(pid_t pid, int source_fd, int target_fd);
 
+/* USER_NOTIF: fstatat via a cached host O_PATH of dirfd, skipping
+ * translate_path and per-call readlink. Returns 0 if *st is filled,
+ * negative errno for the guest, 1 if the caller must take the slow path.
+ * On 0, host_path is the host file path for L2S disguise. */
+struct stat;
+int try_fstatat_cached_host_dirfd(Tracee *tracee, int dir_fd,
+                                  const char *user_path, int flags,
+                                  struct stat *st, char host_path[PATH_MAX]);
+
 #define AT_FD(dirfd, path) ((dirfd) != AT_FDCWD && ((path) != NULL && (path)[0] != '/'))
 
 #endif /* PATH_H */

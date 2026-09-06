@@ -3,6 +3,22 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.10.0] - 2026-09-06
+
+**Optional seccomp USER_NOTIF path for `newfstatat`**
+
+- Add `--seccomp-notify` to emulate `newfstatat`/`fstatat64` with
+  `SECCOMP_RET_USER_NOTIF` (Linux 5.0+ `NEW_LISTENER`). Without the
+  flag, kernel 4+ keeps ptrace `SECCOMP_RET_TRACE`. A failed probe
+  exits instead of silently falling back.
+- The tracer completes path translation, fake_id0 uid/gid, and L2S
+  nlink on a dedicated RECV thread, then `SEND`s the result. Never
+  `CONTINUE`. A cached host `O_PATH` dirfd skips `translate_path` on
+  the `AT_SYMLINK_NOFOLLOW` basename hot path; `dup2` is checked with
+  `kcmp`/inode because it is not in the default BPF list.
+- Tests/CI: add CLI probe and pipe regressions for translation, bind
+  overlays, L2S nlink, and dirfd cache hit/stale.
+
 ## [v5.9.8] - 2026-09-06
 
 **Faster directory metadata scans via dirfd basename reuse**

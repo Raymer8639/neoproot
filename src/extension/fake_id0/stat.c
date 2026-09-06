@@ -1,5 +1,6 @@
 #include <linux/limits.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <assert.h>
 #include <string.h>
@@ -8,10 +9,29 @@
 #include "tracee/mem.h"
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
-#include "syscall/seccomp.h"
+#include "extension/extension.h"
 #include "extension/fake_id0/stat.h"
 #include "extension/fake_id0/helper_functions.h"
 #include "tracee/statx.h"
+
+/* USER_NOTIF twin of handle_stat_exit_end: rewrite uid/gid in *st. */
+int fake_id0_disguise_stat(Tracee *tracee, struct stat *st)
+{
+    Extension *ext;
+    Config *config;
+
+    if (tracee == NULL || st == NULL)
+        return 0;
+    ext = get_extension(tracee, fake_id0_callback);
+    if (ext == NULL || ext->config == NULL)
+        return 0;
+    config = ext->config;
+    if (st->st_uid == getuid())
+        st->st_uid = config->suid;
+    if (st->st_gid == getgid())
+        st->st_gid = config->sgid;
+    return 0;
+}
 
 #ifndef USERLAND
 int handle_stat_exit_end(Tracee *tracee, Config *config, Reg stat_sysarg)

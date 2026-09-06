@@ -84,6 +84,7 @@ OBJECTS += \
 	path/proc.o		\
 	path/temp.o		\
 	syscall/seccomp.o	\
+	syscall/seccomp_notify.o	\
 	syscall/syscall.o	\
 	syscall/chain.o		\
 	syscall/enter.o		\
