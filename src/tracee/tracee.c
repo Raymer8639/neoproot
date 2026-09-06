@@ -353,6 +353,7 @@ int new_child(Tracee *parent, word_t clone_flags) {
 
     child->verbose    = parent->verbose;
     child->seccomp    = parent->seccomp;
+    child->seccomp_notify = parent->seccomp_notify;
     child->sysexit_pending = parent->sysexit_pending;
     child->no_new_privs = parent->no_new_privs;
     child->seen_execve = parent->seen_execve;

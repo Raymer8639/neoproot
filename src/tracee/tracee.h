@@ -58,6 +58,8 @@ typedef struct tracee {
 	bool         running;
 	bool         terminated;
 	bool         killall_on_exit;
+	/* Opt-in --seccomp-notify: USER_NOTIF for metadata (not wired yet). */
+	bool         seccomp_notify;
 
 	struct tracee *parent;
 	bool         clone;

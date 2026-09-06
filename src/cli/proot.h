@@ -62,6 +62,7 @@ static int handle_option_link2symlink_dirent(Tracee *, const Cli *, const char *
 static int handle_option_ashmem_memfd(Tracee *, const Cli *, const char *);
 static int handle_option_sysvipc(Tracee *, const Cli *, const char *);
 static int handle_option_kill_on_exit(Tracee *, const Cli *, const char *);
+static int handle_option_seccomp_notify(Tracee *, const Cli *, const char *);
 static int handle_option_L(Tracee *, const Cli *, const char *);
 static int handle_option_H(Tracee *, const Cli *, const char *);
 static int handle_option_p(Tracee *, const Cli *, const char *);
@@ -138,6 +139,16 @@ static Cli proot_cli = {
             .handler = handle_option_kill_on_exit,
             .description = "Kill all child processes on exit.",
             .detail = ""
+        },
+        {
+            .class = "Regular options",
+            .arguments = {
+                { .name = "--seccomp-notify", 0, NULL },
+                { .name = NULL, 0, NULL }
+            },
+            .handler = handle_option_seccomp_notify,
+            .description = "Opt-in seccomp USER_NOTIF (Linux 5.0+).",
+            .detail = "Requires seccomp NEW_LISTENER. Without this option, kernel 4+ keeps ptrace TRACE. The notify path is not wired yet; a successful probe still uses TRACE."
         },
         {
             .class = "Regular options",

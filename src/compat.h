@@ -203,6 +203,18 @@
 #    ifndef SECCOMP_MODE_FILTER
 #        define SECCOMP_MODE_FILTER	2
 #    endif
+#    ifndef SECCOMP_SET_MODE_FILTER
+#        define SECCOMP_SET_MODE_FILTER	1
+#    endif
+#    ifndef SECCOMP_GET_ACTION_AVAIL
+#        define SECCOMP_GET_ACTION_AVAIL	2
+#    endif
+#    ifndef SECCOMP_FILTER_FLAG_NEW_LISTENER
+#        define SECCOMP_FILTER_FLAG_NEW_LISTENER	(1UL << 3)
+#    endif
+#    ifndef SECCOMP_RET_USER_NOTIF
+#        define SECCOMP_RET_USER_NOTIF	0x7fc00000U
+#    endif
 #    ifndef talloc_get_type_abort
 #        define talloc_get_type_abort talloc_get_type
 #    endif

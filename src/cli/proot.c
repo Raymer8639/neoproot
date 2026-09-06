@@ -118,6 +118,12 @@ static int handle_option_kill_on_exit(Tracee *restrict t, const Cli *restrict c,
     return 0;
 }
 
+static int handle_option_seccomp_notify(Tracee *restrict t, const Cli *restrict c, const char *v) {
+    (void)c; (void)v;
+    t->seccomp_notify = true;
+    return 0;
+}
+
 static int handle_option_v(Tracee *restrict t, const Cli *restrict c, const char *val) {
     (void)c;
     int lvl;

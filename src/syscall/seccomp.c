@@ -16,6 +16,9 @@
 #include <stdint.h>
 #include <assert.h>
 #include <stdbool.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/syscall.h>
 
 #include "syscall/seccomp.h"
 #include "tracee/tracee.h"
@@ -365,6 +368,71 @@ static int merge_filtered_sysnums(TALLOC_CTX *ctx,
     return 0;
 }
 
+int probe_seccomp_user_notif(void) {
+#ifndef __NR_seccomp
+    return -ENOSYS;
+#else
+    int pipefd[2];
+    pid_t pid;
+    int status;
+    int child_errno = 0;
+    ssize_t n;
+
+    if (pipe(pipefd) < 0)
+        return -errno;
+
+    pid = fork();
+    if (pid < 0) {
+        int saved = errno;
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -saved;
+    }
+
+    if (pid == 0) {
+        struct sock_filter filter[] = {
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_getppid, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        };
+        struct sock_fprog prog = {
+            .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
+            .filter = filter,
+        };
+        int fd;
+        int e;
+
+        close(pipefd[0]);
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
+            e = errno ? errno : EPERM;
+            (void)write(pipefd[1], &e, sizeof(e));
+            _exit(1);
+        }
+        fd = (int)syscall(__NR_seccomp, SECCOMP_SET_MODE_FILTER,
+                          SECCOMP_FILTER_FLAG_NEW_LISTENER, &prog);
+        if (fd < 0) {
+            e = errno ? errno : EINVAL;
+            (void)write(pipefd[1], &e, sizeof(e));
+            _exit(1);
+        }
+        close(fd);
+        _exit(0);
+    }
+
+    close(pipefd[1]);
+    n = read(pipefd[0], &child_errno, sizeof(child_errno));
+    close(pipefd[0]);
+    if (waitpid(pid, &status, 0) < 0)
+        return -errno;
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return 0;
+    if (n == (ssize_t)sizeof(child_errno) && child_errno != 0)
+        return -child_errno;
+    return -EPERM;
+#endif
+}
+
 int enable_syscall_filtering(const Tracee *restrict tracee) {
     FilteredSysnum *filtered = NULL;
     int ret;
@@ -393,8 +461,13 @@ int enable_syscall_filtering(const Tracee *restrict tracee) {
 
 #else /* !HAVE_SECCOMP_FILTER */
 
+#include <errno.h>
 #include "tracee/tracee.h"
 #include "attribute.h"
+
+int probe_seccomp_user_notif(void) {
+    return -ENOSYS;
+}
 
 int enable_syscall_filtering([[maybe_unused]] const Tracee *tracee) {
     return 0;
