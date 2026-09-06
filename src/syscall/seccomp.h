@@ -25,10 +25,10 @@ extern int enable_syscall_filtering(const Tracee *tracee);
 /* 0 if NEW_LISTENER+USER_NOTIF can be installed; -errno otherwise.
  * Uses a throwaway child so the tracer is not filtered. */
 extern int probe_seccomp_user_notif(void);
-/* Blocking ioctl(RECV) into a one-slot queue. Runs on the RECV thread. */
-extern int recv_seccomp_user_notif(int listener_fd);
-/* Main-thread complete: path translation + fake_id0 + L2S nlink + SEND.
- * Never CONTINUE. No-op if the queue is empty. */
-extern int complete_seccomp_user_notif(int listener_fd);
+/* Blocking RECV + emulate + SEND. Runs on the dedicated RECV thread.
+ * Never CONTINUE. Serializes with event_loop via seccomp_user_notif_lock. */
+extern int handle_seccomp_user_notif(int listener_fd);
+extern void seccomp_user_notif_lock(void);
+extern void seccomp_user_notif_unlock(void);
 
 #endif /* SECCOMP_H */

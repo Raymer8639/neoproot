@@ -5,7 +5,6 @@
 #include <sys/utsname.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
-#include <sys/eventfd.h>
 #include <poll.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -58,11 +57,10 @@ static _Atomic bool root_exited = false;
 static _Atomic pid_t main_pid = 0;
 
 /* --seccomp-notify: listener fd lives in the tracer; sock carries it from the child.
- * Android 5.15 seccomp-notify fds are not pollable (POLLIN never fires), and
- * ioctl(RECV) is blocking, so RECV runs on a dedicated thread. */
+ * Android 5.15 notify fds are not pollable, so RECV+emulate+SEND run on a
+ * dedicated thread. event_loop keeps blocking waitpid for TRACE syscalls. */
 static int user_notif_listener = -1;
 static int user_notif_sock = -1;
-static int user_notif_eventfd = -1;
 static pthread_t user_notif_thread;
 static _Atomic bool user_notif_thread_running = false;
 
@@ -193,15 +191,9 @@ static void *user_notif_thread_main(void *arg)
     int fd = (int)(intptr_t)arg;
 
     for (;;) {
-        int rc = recv_seccomp_user_notif(fd);
+        int rc = handle_seccomp_user_notif(fd);
         if (rc == -EBADF || rc == -ENOTTY || rc == -EIO)
             break;
-        if (rc < 0)
-            continue;
-        if (user_notif_eventfd >= 0) {
-            uint64_t one = 1;
-            (void)write(user_notif_eventfd, &one, sizeof(one));
-        }
     }
     return NULL;
 }
@@ -245,31 +237,17 @@ static void maybe_recv_user_notif_listener(void)
     user_notif_listener = fd;
     close(user_notif_sock);
     user_notif_sock = -1;
-    if (user_notif_eventfd < 0)
-        user_notif_eventfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     start_user_notif_thread(fd);
-}
-
-static void drain_user_notif(void)
-{
-    uint64_t v;
-
-    if (user_notif_listener < 0)
-        return;
-    if (user_notif_eventfd >= 0)
-        (void)read(user_notif_eventfd, &v, sizeof(v));
-    (void)complete_seccomp_user_notif(user_notif_listener);
 }
 
 static pid_t wait_for_tracee_or_notif(int *tracee_status)
 {
     maybe_recv_user_notif_listener();
-    if (user_notif_listener < 0 && user_notif_sock < 0)
+    if (user_notif_sock < 0)
         return waitpid(-1, tracee_status, __WALL);
 
     for (;;) {
-        struct pollfd pfds[2];
-        nfds_t n = 0;
+        struct pollfd pfd;
         pid_t pid;
         int pr;
 
@@ -277,31 +255,21 @@ static pid_t wait_for_tracee_or_notif(int *tracee_status)
         if (pid != 0)
             return pid;
         maybe_recv_user_notif_listener();
-        drain_user_notif();
-
-        if (user_notif_sock >= 0) {
-            pfds[n].fd = user_notif_sock;
-            pfds[n].events = POLLIN;
-            pfds[n].revents = 0;
-            n++;
-        }
-        if (user_notif_eventfd >= 0) {
-            pfds[n].fd = user_notif_eventfd;
-            pfds[n].events = POLLIN;
-            pfds[n].revents = 0;
-            n++;
-        }
-        if (n == 0)
+        if (user_notif_sock < 0)
             return waitpid(-1, tracee_status, __WALL);
 
-        pr = poll(pfds, n, 10);
+        pfd.fd = user_notif_sock;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        pr = poll(&pfd, 1, 10);
         if (pr < 0) {
             if (errno == EINTR)
                 continue;
             return -1;
         }
         maybe_recv_user_notif_listener();
-        drain_user_notif();
+        if (user_notif_sock < 0)
+            return waitpid(-1, tracee_status, __WALL);
     }
 }
 
@@ -574,23 +542,36 @@ int event_loop(void)
             continue;
         }
 
+        if (user_notif_listener >= 0)
+            seccomp_user_notif_lock();
+
         tracee = get_tracee(NULL, pid, true);
         if (tracee == NULL || tracee->pid <= 0 || tracee->terminated) {
+            if (user_notif_listener >= 0)
+                seccomp_user_notif_unlock();
             continue;
         }
         tracee->running = false;
 
-        if (notify_extensions(tracee, NEW_STATUS, tracee_status, 0) != 0)
+        if (notify_extensions(tracee, NEW_STATUS, tracee_status, 0) != 0) {
+            if (user_notif_listener >= 0)
+                seccomp_user_notif_unlock();
             continue;
+        }
 
         if (tracee->as_ptracee.ptracer != NULL) {
             const bool keep_stopped = handle_ptracee_event(tracee, tracee_status);
-            if (keep_stopped)
+            if (keep_stopped) {
+                if (user_notif_listener >= 0)
+                    seccomp_user_notif_unlock();
                 continue;
+            }
         }
 
         signal = handle_tracee_event(tracee, tracee_status);
         (void) restart_tracee(tracee, signal);
+        if (user_notif_listener >= 0)
+            seccomp_user_notif_unlock();
     }
     return atomic_load_explicit(&last_exit_status, memory_order_acquire);
 }

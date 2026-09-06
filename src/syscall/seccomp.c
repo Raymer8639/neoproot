@@ -543,13 +543,23 @@ static int notif_read_string(pid_t pid, word_t addr, char *buf, size_t max)
     return (int)max;
 }
 
-static pthread_mutex_t notif_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t notif_done = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t user_notif_tracee_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct seccomp_notif *notif_req;
 static struct seccomp_notif_resp *notif_resp;
 static uint16_t notif_req_sz;
 static uint16_t notif_resp_sz;
-static bool notif_pending;
+static int nr_fstatat64_cached = -2;
+static int nr_newfstatat_cached = -2;
+
+void seccomp_user_notif_lock(void)
+{
+    pthread_mutex_lock(&user_notif_tracee_lock);
+}
+
+void seccomp_user_notif_unlock(void)
+{
+    pthread_mutex_unlock(&user_notif_tracee_lock);
+}
 
 static int ensure_notif_bufs(void)
 {
@@ -584,38 +594,21 @@ static void notif_send(int listener_fd, int error, word_t val)
     (void)ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, notif_resp);
 }
 
-int recv_seccomp_user_notif(int listener_fd)
+static bool host_may_need_l2s(const char *path, const struct stat *st)
 {
-    int rc;
+    const char *base;
 
-    if (listener_fd < 0)
-        return -EBADF;
-    rc = ensure_notif_bufs();
-    if (rc < 0)
-        return rc;
-
-    pthread_mutex_lock(&notif_lock);
-    while (notif_pending)
-        pthread_cond_wait(&notif_done, &notif_lock);
-    pthread_mutex_unlock(&notif_lock);
-
-    memset(notif_req, 0, notif_req_sz);
-    rc = ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_RECV, notif_req);
-    if (rc < 0)
-        return -errno;
-
-    pthread_mutex_lock(&notif_lock);
-    notif_pending = true;
-    pthread_mutex_unlock(&notif_lock);
-    return 0;
+    if (S_ISLNK(st->st_mode))
+        return true;
+    base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    return strncmp(base, ".l2s.", 5) == 0;
 }
 
-int complete_seccomp_user_notif(int listener_fd)
+int handle_seccomp_user_notif(int listener_fd)
 {
     Tracee *tracee;
     struct stat st;
-    word_t nr_fstatat64;
-    word_t nr_newfstatat;
     pid_t target;
     char path[PATH_MAX];
     char host_path[PATH_MAX];
@@ -627,25 +620,25 @@ int complete_seccomp_user_notif(int listener_fd)
 
     if (listener_fd < 0)
         return -EBADF;
+    rc = ensure_notif_bufs();
+    if (rc < 0)
+        return rc;
 
-    pthread_mutex_lock(&notif_lock);
-    if (!notif_pending) {
-        pthread_mutex_unlock(&notif_lock);
-        return 0;
+    memset(notif_req, 0, notif_req_sz);
+    rc = ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_RECV, notif_req);
+    if (rc < 0)
+        return -errno;
+
+    if (nr_fstatat64_cached == -2) {
+        word_t nr = detranslate_sysnum(ABI_DEFAULT, PR_fstatat64);
+        nr_fstatat64_cached = (nr == SYSCALL_AVOIDER) ? -1 : (int)nr;
+        nr = detranslate_sysnum(ABI_DEFAULT, PR_newfstatat);
+        nr_newfstatat_cached = (nr == SYSCALL_AVOIDER) ? -1 : (int)nr;
     }
-    pthread_mutex_unlock(&notif_lock);
-
-    if (ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_ID_VALID, &notif_req->id) < 0) {
-        notif_send(listener_fd, -ESRCH, 0);
-        goto done;
-    }
-
-    nr_fstatat64 = detranslate_sysnum(ABI_DEFAULT, PR_fstatat64);
-    nr_newfstatat = detranslate_sysnum(ABI_DEFAULT, PR_newfstatat);
-    if (!((nr_fstatat64 != SYSCALL_AVOIDER && notif_req->data.nr == (int)nr_fstatat64)
-          || (nr_newfstatat != SYSCALL_AVOIDER && notif_req->data.nr == (int)nr_newfstatat))) {
+    if (!((nr_fstatat64_cached >= 0 && notif_req->data.nr == nr_fstatat64_cached)
+          || (nr_newfstatat_cached >= 0 && notif_req->data.nr == nr_newfstatat_cached))) {
         notif_send(listener_fd, -ENOSYS, 0);
-        goto done;
+        return 0;
     }
 
     target = (pid_t)notif_req->pid;
@@ -654,14 +647,16 @@ int complete_seccomp_user_notif(int listener_fd)
     n = notif_read_string(target, (word_t)notif_req->data.args[1], path, sizeof(path));
     if (n < 0) {
         notif_send(listener_fd, n, 0);
-        goto done;
+        return 0;
     }
     path[sizeof(path) - 1] = '\0';
 
+    seccomp_user_notif_lock();
     tracee = get_tracee(NULL, target, false);
     if (tracee == NULL) {
+        seccomp_user_notif_unlock();
         notif_send(listener_fd, -ESRCH, 0);
-        goto done;
+        return 0;
     }
 
     if (path[0] == '\0') {
@@ -669,8 +664,9 @@ int complete_seccomp_user_notif(int listener_fd)
         int hostdir;
 
         if ((flags & AT_EMPTY_PATH) == 0) {
+            seccomp_user_notif_unlock();
             notif_send(listener_fd, -ENOENT, 0);
-            goto done;
+            return 0;
         }
         if (dirfd == AT_FDCWD)
             snprintf(procpath, sizeof(procpath), "/proc/%d/cwd", (int)target);
@@ -684,37 +680,39 @@ int complete_seccomp_user_notif(int listener_fd)
             close(hostdir);
         }
         if (stat_err < 0) {
-            notif_send(listener_fd, errno ? -errno : -ENOENT, 0);
-            goto done;
+            int e = errno ? -errno : -ENOENT;
+            seccomp_user_notif_unlock();
+            notif_send(listener_fd, e, 0);
+            return 0;
         }
         strcpy(host_path, procpath);
     } else {
         rc = translate_path(tracee, host_path, dirfd, path,
                             (flags & AT_SYMLINK_NOFOLLOW) == 0);
         if (rc < 0) {
+            seccomp_user_notif_unlock();
             notif_send(listener_fd, rc, 0);
-            goto done;
+            return 0;
         }
         stat_err = fstatat(AT_FDCWD, host_path, &st, flags);
         if (stat_err < 0) {
-            notif_send(listener_fd, errno ? -errno : -ENOENT, 0);
-            goto done;
+            int e = errno ? -errno : -ENOENT;
+            seccomp_user_notif_unlock();
+            notif_send(listener_fd, e, 0);
+            return 0;
         }
     }
 
-    (void)link2symlink_disguise_stat(tracee, host_path, &st);
+    if (host_may_need_l2s(host_path, &st) || host_may_need_l2s(path, &st))
+        (void)link2symlink_disguise_stat(tracee, host_path, &st);
     (void)fake_id0_disguise_stat(tracee, &st);
 
-    if (notif_vm_io(target, (word_t)notif_req->data.args[2], &st, sizeof(st), true) < 0)
+    rc = notif_vm_io(target, (word_t)notif_req->data.args[2], &st, sizeof(st), true);
+    seccomp_user_notif_unlock();
+    if (rc < 0)
         notif_send(listener_fd, -EFAULT, 0);
     else
         notif_send(listener_fd, 0, 0);
-
-done:
-    pthread_mutex_lock(&notif_lock);
-    notif_pending = false;
-    pthread_cond_signal(&notif_done);
-    pthread_mutex_unlock(&notif_lock);
     return 0;
 }
 
@@ -759,12 +757,16 @@ int probe_seccomp_user_notif(void) {
     return -ENOSYS;
 }
 
-int recv_seccomp_user_notif([[maybe_unused]] int listener_fd) {
+int handle_seccomp_user_notif([[maybe_unused]] int listener_fd) {
     return -ENOSYS;
 }
 
-int complete_seccomp_user_notif([[maybe_unused]] int listener_fd) {
-    return -ENOSYS;
+void seccomp_user_notif_lock(void)
+{
+}
+
+void seccomp_user_notif_unlock(void)
+{
 }
 
 int enable_syscall_filtering([[maybe_unused]] const Tracee *tracee) {
