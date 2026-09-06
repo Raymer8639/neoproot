@@ -452,6 +452,11 @@ int readlink_proc_pid_fd(pid_t pid, int fd, char path[PATH_MAX])
     return 0;
 }
 
+/* Dirfd translation cache shared by:
+ *   TRACE fast path: try_dirfd_component_fast (translate_path)
+ *   USER_NOTIF:      try_fstatat_cached_host_dirfd (cached host O_PATH)
+ * Invalidated on close/dup/exec/bind. USER_NOTIF also checks kcmp/inode
+ * because dup2 is not in the default BPF list. */
 #define DIRFD_CACHE_SIZE 64
 
 static struct {

@@ -570,6 +570,9 @@ proc_final:
     return UNLIKELY(status < 0) ? status : 0;
 }
 
+/* USER_NOTIF twin of handle_sysexit_end: same L2S walk, but fills *st
+ * instead of poking guest memory. Errors are swallowed so a failed
+ * disguise does not fail the guest stat (TRACE path can return -errno). */
 int link2symlink_disguise_stat(Tracee *tracee, const char *host_path, struct stat *st)
 {
 	char original[PATH_MAX] ALIGNED, intermediate[PATH_MAX] ALIGNED, final[PATH_MAX] ALIGNED;

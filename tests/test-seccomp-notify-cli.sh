@@ -1,5 +1,5 @@
 #!/bin/sh
-# Step 1: --seccomp-notify is visible; a successful probe still uses TRACE.
+# --seccomp-notify is in --help; with the flag, USER_NOTIF listener starts.
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

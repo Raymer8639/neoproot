@@ -22,8 +22,9 @@ typedef struct {
 #define FILTER_SYSEXIT  0x1
 
 extern int enable_syscall_filtering(const Tracee *tracee);
-/* 0 if NEW_LISTENER+USER_NOTIF can be installed; -errno otherwise.
- * Uses a throwaway child so the tracer is not filtered. */
+/* Implemented in seccomp_notify.c. 0 if NEW_LISTENER+USER_NOTIF can be
+ * installed; -errno otherwise. Uses a throwaway child so the tracer is
+ * not filtered. */
 extern int probe_seccomp_user_notif(void);
 /* Blocking RECV + emulate + SEND. Runs on the dedicated RECV thread.
  * Never CONTINUE. Serializes with event_loop via seccomp_user_notif_lock. */

@@ -85,8 +85,8 @@ void copy_translated_dirfd(pid_t pid, int source_fd, int target_fd);
  * On 0, host_path is the host file path for L2S disguise. */
 struct stat;
 int try_fstatat_cached_host_dirfd(Tracee *tracee, int dir_fd,
-				  const char *user_path, int flags,
-				  struct stat *st, char host_path[PATH_MAX]);
+                                  const char *user_path, int flags,
+                                  struct stat *st, char host_path[PATH_MAX]);
 
 #define AT_FD(dirfd, path) ((dirfd) != AT_FDCWD && ((path) != NULL && (path)[0] != '/'))
 

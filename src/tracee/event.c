@@ -240,6 +240,18 @@ static void maybe_recv_user_notif_listener(void)
     start_user_notif_thread(fd);
 }
 
+static void lock_user_notif_if_ready(void)
+{
+    if (user_notif_listener >= 0)
+        seccomp_user_notif_lock();
+}
+
+static void unlock_user_notif_if_ready(void)
+{
+    if (user_notif_listener >= 0)
+        seccomp_user_notif_unlock();
+}
+
 static pid_t wait_for_tracee_or_notif(int *tracee_status)
 {
     maybe_recv_user_notif_listener();
@@ -542,36 +554,31 @@ int event_loop(void)
             continue;
         }
 
-        if (user_notif_listener >= 0)
-            seccomp_user_notif_lock();
+        lock_user_notif_if_ready();
 
         tracee = get_tracee(NULL, pid, true);
         if (tracee == NULL || tracee->pid <= 0 || tracee->terminated) {
-            if (user_notif_listener >= 0)
-                seccomp_user_notif_unlock();
+            unlock_user_notif_if_ready();
             continue;
         }
         tracee->running = false;
 
         if (notify_extensions(tracee, NEW_STATUS, tracee_status, 0) != 0) {
-            if (user_notif_listener >= 0)
-                seccomp_user_notif_unlock();
+            unlock_user_notif_if_ready();
             continue;
         }
 
         if (tracee->as_ptracee.ptracer != NULL) {
             const bool keep_stopped = handle_ptracee_event(tracee, tracee_status);
             if (keep_stopped) {
-                if (user_notif_listener >= 0)
-                    seccomp_user_notif_unlock();
+                unlock_user_notif_if_ready();
                 continue;
             }
         }
 
         signal = handle_tracee_event(tracee, tracee_status);
         (void) restart_tracee(tracee, signal);
-        if (user_notif_listener >= 0)
-            seccomp_user_notif_unlock();
+        unlock_user_notif_if_ready();
     }
     return atomic_load_explicit(&last_exit_status, memory_order_acquire);
 }

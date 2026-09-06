@@ -1,5 +1,5 @@
 #!/bin/sh
-# Step 3: --seccomp-notify emulates newfstatat (translate + fake_id0 + L2S nlink).
+# --seccomp-notify emulates newfstatat (translate + fake_id0 + L2S nlink).
 # Uses default rootfs "/" so guest paths are host paths (dynamic linker lives).
 set -eu
 
