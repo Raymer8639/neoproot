@@ -5,6 +5,10 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#ifndef KCMP_FILE
+#define KCMP_FILE 0
+#endif
 #include <dirent.h>
 #include <stdio.h>
 #include <errno.h>
@@ -748,6 +752,36 @@ static int ensure_host_dirfd(int slot, pid_t pid, int guest_fd)
     return fd;
 }
 
+/* dup2/SCM_RIGHTS may change the guest fd without a TRACE stop (dup is
+ * not in the default BPF list unless kompat is loaded). Cheap identity
+ * check so a cached O_PATH is not reused for the wrong directory. */
+static bool host_dirfd_still_valid(int slot, pid_t pid, int guest_fd)
+{
+    int host_fd = dirfd_cache[slot].host_fd;
+    struct stat guest_st;
+    struct stat host_st;
+    char procfd[64];
+#ifdef __NR_kcmp
+    long rc;
+#endif
+
+    if (host_fd < 0)
+        return false;
+#ifdef __NR_kcmp
+    /* Same open file description is sufficient. A fresh O_PATH of
+     * /proc/pid/fd/N is often a different description of the same
+     * inode, so inequality falls through to st_dev/st_ino. */
+    rc = syscall(__NR_kcmp, pid, getpid(), KCMP_FILE, guest_fd, host_fd);
+    if (rc == 0)
+        return true;
+#endif
+    snprintf(procfd, sizeof(procfd), "/proc/%d/fd/%d", (int)pid, guest_fd);
+    if (stat(procfd, &guest_st) < 0 || fstat(host_fd, &host_st) < 0)
+        return false;
+    return guest_st.st_dev == host_st.st_dev &&
+           guest_st.st_ino == host_st.st_ino;
+}
+
 static int populate_dirfd_cache(Tracee *tracee, int dir_fd)
 {
     char proc_path[PATH_MAX];
@@ -788,6 +822,12 @@ int try_fstatat_cached_host_dirfd(Tracee *tracee, int dir_fd,
 
     dirfd_cache_init();
     slot = dirfd_cache_slot(tracee->pid, dir_fd);
+    if (slot >= 0 && dirfd_cache[slot].host_fd >= 0 &&
+        !host_dirfd_still_valid(slot, tracee->pid, dir_fd)) {
+        host_dirfd_note("stale");
+        forget_translated_dirfd(tracee->pid, dir_fd);
+        slot = -1;
+    }
     if (slot < 0) {
         slot = populate_dirfd_cache(tracee, dir_fd);
         if (slot < 0) {
