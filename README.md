@@ -29,6 +29,7 @@ The installer places `neoproot` in `$PREFIX/bin`. For ARM64 Linux, download `neo
 - Automatic Termux host setup: wake-lock, file-descriptor limits, and `LD_*` cleanup are handled by the `neoproot` launcher.
 - link2symlink hard-link emulation works with pnpm and TypeScript/tsgo workflows that probe real paths through `/proc/<pid>/fd/<fd>`.
 - High-frequency path operations avoid the fork's removed translation-thread-pool overhead, keeping nvim and package-manager workflows responsive.
+- Optional `--seccomp-notify` (Linux 5.0+) emulates `newfstatat` via seccomp USER_NOTIF so directory metadata scans skip a ptrace stop. Kernel 4+ without the flag is unchanged.
 - Built-in high-priority scheduling (`setpriority(-20)`) improves CPU availability without root access.
 - Fixes include Chinese VNC exit hangs, logout/background-switch issues, and the misleading `signal 11` exit warning.
 - The codebase uses a lean C23/C++23 implementation tuned for ARMv8.2, trading generic architecture coverage for ARM64 performance.
