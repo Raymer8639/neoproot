@@ -3,7 +3,7 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
-## [Unreleased]
+## [v5.9.8] - 2026-09-06
 
 **Faster directory metadata scans via dirfd basename reuse**
 
