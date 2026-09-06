@@ -73,6 +73,12 @@ int readlink_proc_pid_fd(pid_t pid, int fd, char path[PATH_MAX]);
 bool is_proc_fd_mountinfo(const Tracee *tracee, int dir_fd,
                           const char *user_path);
 
+void forget_translated_dirfd(pid_t pid, int fd);
+void forget_translated_dirfds_range(pid_t pid, unsigned int first, unsigned int last);
+void clear_translated_dirfds(pid_t pid);
+void inherit_translated_dirfds(pid_t parent_pid, pid_t child_pid);
+void copy_translated_dirfd(pid_t pid, int source_fd, int target_fd);
+
 #define AT_FD(dirfd, path) ((dirfd) != AT_FDCWD && ((path) != NULL && (path)[0] != '/'))
 
 #endif /* PATH_H */

@@ -114,6 +114,8 @@ static ALWAYS_INLINE void invalidate_binding_cache(const Tracee *restrict tracee
 	TALLOC_FREE(cache->entries);
 	cache->count = 0;
 	cache->cached_root = NULL;
+	if (tracee->pid > 0)
+		clear_translated_dirfds(tracee->pid);
 }
 
 static int compare_by_desc_length(const void *a, const void *b) {
