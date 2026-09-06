@@ -79,6 +79,7 @@ void forget_proc_fd_path(pid_t pid, int fd)
             proc_fd_path_cache[index].path[0] = 0;
         }
     }
+    forget_translated_dirfd(pid, fd);
 }
 
 void forget_proc_fd_paths_range(pid_t pid, unsigned int first, unsigned int last)
@@ -94,6 +95,7 @@ void forget_proc_fd_paths_range(pid_t pid, unsigned int first, unsigned int last
             proc_fd_path_cache[index].path[0] = 0;
         }
     }
+    forget_translated_dirfds_range(pid, first, last);
 }
 
 void clear_proc_fd_paths(pid_t pid)
@@ -107,6 +109,7 @@ void clear_proc_fd_paths(pid_t pid)
             proc_fd_path_cache[index].path[0] = 0;
         }
     }
+    clear_translated_dirfds(pid);
 }
 
 void inherit_proc_fd_paths(pid_t parent_pid, pid_t child_pid)
@@ -119,6 +122,7 @@ void inherit_proc_fd_paths(pid_t parent_pid, pid_t child_pid)
             remember_proc_fd_path(child_pid, proc_fd_path_cache[index].fd,
                                   proc_fd_path_cache[index].path);
     }
+    inherit_translated_dirfds(parent_pid, child_pid);
 }
 
 static void copy_proc_fd_path(pid_t pid, int source_fd, int target_fd)
@@ -129,6 +133,7 @@ static void copy_proc_fd_path(pid_t pid, int source_fd, int target_fd)
         remember_proc_fd_path(pid, target_fd, path);
     else
         forget_proc_fd_path(pid, target_fd);
+    copy_translated_dirfd(pid, source_fd, target_fd);
 }
 
 const char *recall_proc_fd_path(pid_t pid, int fd)
