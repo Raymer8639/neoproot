@@ -687,19 +687,28 @@ int handle_seccomp_user_notif(int listener_fd)
         }
         strcpy(host_path, procpath);
     } else {
-        rc = translate_path(tracee, host_path, dirfd, path,
-                            (flags & AT_SYMLINK_NOFOLLOW) == 0);
+        rc = try_fstatat_cached_host_dirfd(tracee, dirfd, path, flags,
+                                           &st, host_path);
         if (rc < 0) {
             seccomp_user_notif_unlock();
             notif_send(listener_fd, rc, 0);
             return 0;
         }
-        stat_err = fstatat(AT_FDCWD, host_path, &st, flags);
-        if (stat_err < 0) {
-            int e = errno ? -errno : -ENOENT;
-            seccomp_user_notif_unlock();
-            notif_send(listener_fd, e, 0);
-            return 0;
+        if (rc > 0) {
+            rc = translate_path(tracee, host_path, dirfd, path,
+                                (flags & AT_SYMLINK_NOFOLLOW) == 0);
+            if (rc < 0) {
+                seccomp_user_notif_unlock();
+                notif_send(listener_fd, rc, 0);
+                return 0;
+            }
+            stat_err = fstatat(AT_FDCWD, host_path, &st, flags);
+            if (stat_err < 0) {
+                int e = errno ? -errno : -ENOENT;
+                seccomp_user_notif_unlock();
+                notif_send(listener_fd, e, 0);
+                return 0;
+            }
         }
     }
 

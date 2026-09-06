@@ -453,11 +453,14 @@ int readlink_proc_pid_fd(pid_t pid, int fd, char path[PATH_MAX])
 static struct {
     pid_t pid;
     int fd;
+    int host_fd;
     char proc_path[PATH_MAX];
     char guest_dir[PATH_MAX];
 } dirfd_cache[DIRFD_CACHE_SIZE];
 static size_t dirfd_cache_next;
+static bool dirfd_cache_inited;
 static int dirfd_fast_test = -1;
+static int host_dirfd_test = -1;
 
 static bool dirfd_fast_test_enabled(void)
 {
@@ -471,6 +474,54 @@ static void dirfd_fast_note(const char *what)
 {
     if (dirfd_fast_test_enabled())
         fprintf(stderr, "neoproot dirfd-fast: %s\n", what);
+}
+
+static bool host_dirfd_test_enabled(void)
+{
+    if (host_dirfd_test < 0)
+        host_dirfd_test =
+            getenv("NEOPROOT_TEST_HOST_DIRFD") != NULL ? 1 : 0;
+    return host_dirfd_test == 1;
+}
+
+static void host_dirfd_note(const char *what)
+{
+    if (host_dirfd_test_enabled())
+        fprintf(stderr, "neoproot host-dirfd: %s\n", what);
+}
+
+static void dirfd_cache_init(void)
+{
+    size_t index;
+
+    if (dirfd_cache_inited)
+        return;
+    for (index = 0; index < DIRFD_CACHE_SIZE; index++) {
+        dirfd_cache[index].fd = -1;
+        dirfd_cache[index].host_fd = -1;
+    }
+    dirfd_cache_inited = true;
+}
+
+static void close_host_dirfd_slot(size_t index)
+{
+    if (dirfd_cache[index].host_fd >= 0) {
+        close(dirfd_cache[index].host_fd);
+        dirfd_cache[index].host_fd = -1;
+    }
+}
+
+static int dup_cloexec(int fd)
+{
+    int copy;
+
+    if (fd < 0)
+        return -1;
+    copy = dup(fd);
+    if (copy < 0)
+        return -1;
+    (void)fcntl(copy, F_SETFD, FD_CLOEXEC);
+    return copy;
 }
 
 static bool is_single_path_component(const char *path)
@@ -496,6 +547,7 @@ static int dirfd_cache_slot(pid_t pid, int fd)
 {
     size_t index;
 
+    dirfd_cache_init();
     if (fd < 0)
         return -1;
     for (index = 0; index < DIRFD_CACHE_SIZE; index++) {
@@ -511,6 +563,7 @@ void forget_translated_dirfd(pid_t pid, int fd)
 
     if (slot < 0)
         return;
+    close_host_dirfd_slot((size_t)slot);
     dirfd_cache[slot].pid = 0;
     dirfd_cache[slot].fd = -1;
     dirfd_cache[slot].proc_path[0] = '\0';
@@ -550,41 +603,78 @@ static void remember_translated_dirfd(pid_t pid, int fd,
         return;
 
     slot = dirfd_cache_slot(pid, fd);
-    if (slot < 0) {
+    if (slot >= 0) {
+        if (strcmp(dirfd_cache[slot].proc_path, proc_path) == 0 &&
+            strcmp(dirfd_cache[slot].guest_dir, guest_dir) == 0)
+            return;
+        close_host_dirfd_slot((size_t)slot);
+    } else {
         slot = (int)dirfd_cache_next;
         dirfd_cache_next = (dirfd_cache_next + 1) % DIRFD_CACHE_SIZE;
+        close_host_dirfd_slot((size_t)slot);
     }
     dirfd_cache[slot].pid = pid;
     dirfd_cache[slot].fd = fd;
+    dirfd_cache[slot].host_fd = -1;
     strncpy(dirfd_cache[slot].proc_path, proc_path, PATH_MAX - 1);
     dirfd_cache[slot].proc_path[PATH_MAX - 1] = '\0';
     strncpy(dirfd_cache[slot].guest_dir, guest_dir, PATH_MAX - 1);
     dirfd_cache[slot].guest_dir[PATH_MAX - 1] = '\0';
 }
 
+static void attach_host_dirfd(pid_t pid, int fd, int host_fd)
+{
+    int slot;
+
+    if (host_fd < 0)
+        return;
+    slot = dirfd_cache_slot(pid, fd);
+    if (slot < 0) {
+        close(host_fd);
+        return;
+    }
+    close_host_dirfd_slot((size_t)slot);
+    dirfd_cache[slot].host_fd = host_fd;
+}
+
 void copy_translated_dirfd(pid_t pid, int source_fd, int target_fd)
 {
     int slot = dirfd_cache_slot(pid, source_fd);
+    char proc_path[PATH_MAX];
+    char guest_dir[PATH_MAX];
+    int host_dup = -1;
 
     if (slot < 0) {
         forget_translated_dirfd(pid, target_fd);
         return;
     }
-    remember_translated_dirfd(pid, target_fd,
-                              dirfd_cache[slot].proc_path,
-                              dirfd_cache[slot].guest_dir);
+    strcpy(proc_path, dirfd_cache[slot].proc_path);
+    strcpy(guest_dir, dirfd_cache[slot].guest_dir);
+    host_dup = dup_cloexec(dirfd_cache[slot].host_fd);
+    remember_translated_dirfd(pid, target_fd, proc_path, guest_dir);
+    attach_host_dirfd(pid, target_fd, host_dup);
 }
 
 void inherit_translated_dirfds(pid_t parent_pid, pid_t child_pid)
 {
     size_t index;
 
+    dirfd_cache_init();
     clear_translated_dirfds(child_pid);
     for (index = 0; index < DIRFD_CACHE_SIZE; index++) {
-        if (dirfd_cache[index].pid == parent_pid)
-            remember_translated_dirfd(child_pid, dirfd_cache[index].fd,
-                                      dirfd_cache[index].proc_path,
-                                      dirfd_cache[index].guest_dir);
+        char proc_path[PATH_MAX];
+        char guest_dir[PATH_MAX];
+        int fd;
+        int host_dup;
+
+        if (dirfd_cache[index].pid != parent_pid)
+            continue;
+        fd = dirfd_cache[index].fd;
+        strcpy(proc_path, dirfd_cache[index].proc_path);
+        strcpy(guest_dir, dirfd_cache[index].guest_dir);
+        host_dup = dup_cloexec(dirfd_cache[index].host_fd);
+        remember_translated_dirfd(child_pid, fd, proc_path, guest_dir);
+        attach_host_dirfd(child_pid, fd, host_dup);
     }
 }
 
@@ -637,6 +727,111 @@ static int try_dirfd_component_fast(Tracee *tracee, char result[PATH_MAX],
 translated:
     notify_extensions(tracee, TRANSLATED_PATH, (intptr_t)result, 0);
     dirfd_fast_note("hit");
+    return 0;
+}
+
+static int ensure_host_dirfd(int slot, pid_t pid, int guest_fd)
+{
+    int fd;
+    char procfd[64];
+
+    if (slot < 0)
+        return -1;
+    if (dirfd_cache[slot].host_fd >= 0)
+        return dirfd_cache[slot].host_fd;
+
+    snprintf(procfd, sizeof(procfd), "/proc/%d/fd/%d", (int)pid, guest_fd);
+    fd = open(procfd, O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    dirfd_cache[slot].host_fd = fd;
+    return fd;
+}
+
+static int populate_dirfd_cache(Tracee *tracee, int dir_fd)
+{
+    char proc_path[PATH_MAX];
+    char guest_dir[PATH_MAX];
+    int slot;
+
+    if (readlink_proc_pid_fd(tracee->pid, dir_fd, proc_path) < 0)
+        return -1;
+    if (proc_path[0] != '/' || strcmp(proc_path, "/proc") == 0)
+        return -1;
+    strcpy(guest_dir, proc_path);
+    if (detranslate_path(tracee, guest_dir, NULL) < 0)
+        return -1;
+    remember_translated_dirfd(tracee->pid, dir_fd, proc_path, guest_dir);
+    slot = dirfd_cache_slot(tracee->pid, dir_fd);
+    return slot;
+}
+
+int try_fstatat_cached_host_dirfd(Tracee *tracee, int dir_fd,
+                                  const char *user_path, int flags,
+                                  struct stat *st, char host_path[PATH_MAX])
+{
+    int slot;
+    int host_fd;
+    int status;
+    char guest_full[PATH_MAX];
+    Binding *dir_binding;
+    Binding *full_binding;
+
+    if (tracee == NULL || st == NULL || user_path == NULL || host_path == NULL)
+        return 1;
+    if (dir_fd == AT_FDCWD || dir_fd < 0)
+        return 1;
+    if ((flags & AT_SYMLINK_NOFOLLOW) == 0 || (flags & AT_EMPTY_PATH) != 0)
+        return 1;
+    if (!is_single_path_component(user_path))
+        return 1;
+
+    dirfd_cache_init();
+    slot = dirfd_cache_slot(tracee->pid, dir_fd);
+    if (slot < 0) {
+        slot = populate_dirfd_cache(tracee, dir_fd);
+        if (slot < 0) {
+            host_dirfd_note("miss");
+            return 1;
+        }
+    }
+
+    if (dirfd_cache[slot].proc_path[0] == '\0' ||
+        strcmp(dirfd_cache[slot].proc_path, "/proc") == 0 ||
+        is_proc_path(dirfd_cache[slot].guest_dir) ||
+        proc_path_after_alias(tracee, dirfd_cache[slot].guest_dir) != NULL) {
+        host_dirfd_note("miss");
+        return 1;
+    }
+    if (should_skip_file_access_due_to_f2fs_bug(tracee,
+                                                dirfd_cache[slot].guest_dir))
+        return 1;
+
+    status = join_paths(2, guest_full, dirfd_cache[slot].guest_dir, user_path);
+    if (status < 0) {
+        host_dirfd_note("miss");
+        return 1;
+    }
+    dir_binding = get_binding(tracee, GUEST, dirfd_cache[slot].guest_dir);
+    full_binding = get_binding(tracee, GUEST, guest_full);
+    if (full_binding != dir_binding) {
+        host_dirfd_note("miss");
+        return 1;
+    }
+
+    host_fd = ensure_host_dirfd(slot, tracee->pid, dir_fd);
+    if (host_fd < 0) {
+        host_dirfd_note("miss");
+        return 1;
+    }
+
+    if (fstatat(host_fd, user_path, st, flags) < 0)
+        return errno ? -errno : -ENOENT;
+
+    if (join_paths(2, host_path, dirfd_cache[slot].proc_path, user_path) < 0)
+        return 1;
+
+    host_dirfd_note("hit");
     return 0;
 }
 

@@ -95,14 +95,75 @@ int main(int argc, char **argv)
 			fprintf(stderr, "open(subdir): %s\n", strerror(errno));
 			return 1;
 		}
+		for (int i = 0; i < 8; i++) {
+			if (do_fstatat(dirfd, "inside", &st, AT_SYMLINK_NOFOLLOW) != 0) {
+				fprintf(stderr, "fstatat(dirfd, inside)[%d]: %s\n",
+					i, strerror(errno));
+				close(dirfd);
+				return 1;
+			}
+			if (!S_ISREG(st.st_mode) || st.st_size != 4) {
+				fprintf(stderr, "dirfd+basename[%d]: mode=%o size=%lld\n",
+					i, (unsigned)st.st_mode, (long long)st.st_size);
+				close(dirfd);
+				return 1;
+			}
+		}
+
+		{
+			int other = open("subdir2", O_RDONLY | O_DIRECTORY);
+			if (other < 0) {
+				fprintf(stderr, "open(subdir2): %s\n", strerror(errno));
+				close(dirfd);
+				return 1;
+			}
+			if (dup2(other, dirfd) < 0) {
+				fprintf(stderr, "dup2: %s\n", strerror(errno));
+				close(other);
+				close(dirfd);
+				return 1;
+			}
+			close(other);
+			if (do_fstatat(dirfd, "inside", &st, AT_SYMLINK_NOFOLLOW) != 0) {
+				fprintf(stderr, "fstatat after dup2: %s\n", strerror(errno));
+				close(dirfd);
+				return 1;
+			}
+			if (!S_ISREG(st.st_mode) || st.st_size != 9) {
+				fprintf(stderr, "dup2 dirfd: mode=%o size=%lld\n",
+					(unsigned)st.st_mode, (long long)st.st_size);
+				close(dirfd);
+				return 1;
+			}
+		}
+		close(dirfd);
+	} else if (strcmp(mode, "expect-bind") == 0) {
+		int dirfd;
+
+		dirfd = open("subdir", O_RDONLY | O_DIRECTORY);
+		if (dirfd < 0) {
+			fprintf(stderr, "open(subdir): %s\n", strerror(errno));
+			return 1;
+		}
 		if (do_fstatat(dirfd, "inside", &st, AT_SYMLINK_NOFOLLOW) != 0) {
-			fprintf(stderr, "fstatat(dirfd, inside): %s\n", strerror(errno));
+			fprintf(stderr, "fstatat bound inside: %s\n", strerror(errno));
+			close(dirfd);
+			return 1;
+		}
+		if (!S_ISREG(st.st_mode) || st.st_size != 13) {
+			fprintf(stderr, "bind overlay: mode=%o size=%lld, expected 13\n",
+				(unsigned)st.st_mode, (long long)st.st_size);
+			close(dirfd);
+			return 1;
+		}
+		if (do_fstatat(dirfd, "plain", &st, AT_SYMLINK_NOFOLLOW) != 0) {
+			fprintf(stderr, "fstatat plain: %s\n", strerror(errno));
 			close(dirfd);
 			return 1;
 		}
 		close(dirfd);
-		if (!S_ISREG(st.st_mode) || st.st_size != 4) {
-			fprintf(stderr, "dirfd+basename: mode=%o size=%lld\n",
+		if (!S_ISREG(st.st_mode) || st.st_size != 5) {
+			fprintf(stderr, "unbound sibling: mode=%o size=%lld\n",
 				(unsigned)st.st_mode, (long long)st.st_size);
 			return 1;
 		}
@@ -130,6 +191,22 @@ int main(int argc, char **argv)
 		}
 		if (!S_ISREG(st.st_mode) || st.st_nlink != 2) {
 			fprintf(stderr, "l2s-b: expected regular nlink=2, got mode=%o nlink=%lu\n",
+				(unsigned)st.st_mode, (unsigned long)st.st_nlink);
+			return 1;
+		}
+		fd = open(".", O_RDONLY | O_DIRECTORY);
+		if (fd < 0) {
+			fprintf(stderr, "open(.): %s\n", strerror(errno));
+			return 1;
+		}
+		if (do_fstatat(fd, "l2s-a", &st, AT_SYMLINK_NOFOLLOW) != 0) {
+			fprintf(stderr, "fstatat(dirfd, l2s-a): %s\n", strerror(errno));
+			close(fd);
+			return 1;
+		}
+		close(fd);
+		if (!S_ISREG(st.st_mode) || st.st_nlink != 2) {
+			fprintf(stderr, "dirfd l2s-a: expected regular nlink=2, got mode=%o nlink=%lu\n",
 				(unsigned)st.st_mode, (unsigned long)st.st_nlink);
 			return 1;
 		}
