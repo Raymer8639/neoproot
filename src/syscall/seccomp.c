@@ -19,9 +19,17 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/uio.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <linux/limits.h>
 
 #include "syscall/seccomp.h"
 #include "tracee/tracee.h"
+#include "tracee/abi.h"
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "extension/extension.h"
@@ -64,15 +72,24 @@ static ALWAYS_INLINE int add_statements(struct sock_fprog *restrict program,
     return 0;
 }
 
-static ALWAYS_INLINE int add_trace_syscall(struct sock_fprog *restrict program,
-                                           word_t syscall, int flag) {
+static ALWAYS_INLINE int add_syscall_ret(struct sock_fprog *restrict program,
+                                         word_t syscall, uint32_t seccomp_ret) {
     if (UNLIKELY(syscall > UINT32_MAX))
         return -ERANGE;
     const struct sock_filter stmts[] = {
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)syscall, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE + flag),
+        BPF_STMT(BPF_RET | BPF_K, seccomp_ret),
     };
     return add_statements(program, sizeof(stmts)/sizeof(*stmts), stmts);
+}
+
+static ALWAYS_INLINE int add_trace_syscall(struct sock_fprog *restrict program,
+                                           word_t syscall, int flag) {
+    return add_syscall_ret(program, syscall, SECCOMP_RET_TRACE + flag);
+}
+
+static ALWAYS_INLINE bool is_user_notif_sysnum(Sysnum value) {
+    return value == PR_newfstatat || value == PR_fstatat64;
 }
 
 /* ioctl 等按参数条件过滤的变体：只有 args[1] 匹配特定值才停靠，
@@ -150,7 +167,8 @@ static ALWAYS_INLINE void free_program_filter(struct sock_fprog *restrict progra
     program->len = 0;
 }
 
-static int set_seccomp_filters(const FilteredSysnum *restrict sysnums) {
+static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
+                               bool user_notif, int *listener_fd) {
     SeccompArch archs[] = SECCOMP_ARCHS;
     size_t n_arch = sizeof(archs) / sizeof(SeccompArch);
     struct sock_fprog prog = { 0 };
@@ -195,6 +213,8 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums) {
                     };
                     ret = add_trace_syscall_args1(&prog, sc, sysnums[k].flags,
                                                   ioctl_cmds, 7);
+                } else if (user_notif && is_user_notif_sysnum(sysnums[k].value)) {
+                    ret = add_syscall_ret(&prog, sc, SECCOMP_RET_USER_NOTIF);
                 } else {
                     ret = add_trace_syscall(&prog, sc, sysnums[k].flags);
                 }
@@ -214,6 +234,23 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums) {
     ret = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     if (UNLIKELY(ret < 0))
         goto out;
+    if (user_notif) {
+#ifndef __NR_seccomp
+        ret = -ENOSYS;
+        goto out;
+#else
+        int fd = (int)syscall(__NR_seccomp, SECCOMP_SET_MODE_FILTER,
+                              SECCOMP_FILTER_FLAG_NEW_LISTENER, &prog);
+        if (fd < 0) {
+            ret = -errno;
+            goto out;
+        }
+        if (listener_fd)
+            *listener_fd = fd;
+        ret = 0;
+        goto out;
+#endif
+    }
     ret = prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
     if (UNLIKELY(ret < 0))
         goto out;
@@ -433,9 +470,201 @@ int probe_seccomp_user_notif(void) {
 #endif
 }
 
+/* USER_NOTIF tasks are not in ptrace-stop; PEEK/POKE fail. process_vm_*
+ * (then /proc/pid/mem) does not need the task stopped. */
+static int notif_vm_io(pid_t pid, word_t addr, void *buf, size_t n, bool writing)
+{
+    struct iovec local = { .iov_base = buf, .iov_len = n };
+    struct iovec remote = { .iov_base = (void *)(uintptr_t)addr, .iov_len = n };
+    ssize_t r;
+    char mempath[64];
+    int fd;
+    ssize_t pr;
+
+    if (n == 0)
+        return 0;
+#ifdef __NR_process_vm_readv
+    if (writing)
+        r = syscall(__NR_process_vm_writev, pid, &local, 1, &remote, 1, 0);
+    else
+        r = syscall(__NR_process_vm_readv, pid, &local, 1, &remote, 1, 0);
+    if (r == (ssize_t)n)
+        return 0;
+#endif
+    snprintf(mempath, sizeof(mempath), "/proc/%d/mem", (int)pid);
+    fd = open(mempath, (writing ? O_RDWR : O_RDONLY) | O_CLOEXEC);
+    if (fd < 0)
+        return -errno;
+    pr = writing ? pwrite(fd, buf, n, (off_t)addr) : pread(fd, buf, n, (off_t)addr);
+    close(fd);
+    if (pr == (ssize_t)n)
+        return 0;
+    return pr < 0 ? -errno : -EFAULT;
+}
+
+static int notif_read_string(pid_t pid, word_t addr, char *buf, size_t max)
+{
+    size_t off = 0;
+    long page;
+
+    if (max == 0)
+        return 0;
+    page = sysconf(_SC_PAGE_SIZE);
+    if (page <= 0)
+        page = 4096;
+    while (off < max) {
+        size_t page_off = (size_t)((addr + off) & (word_t)(page - 1));
+        size_t chunk = (size_t)page - page_off;
+        int rc;
+        if (chunk > max - off)
+            chunk = max - off;
+        rc = notif_vm_io(pid, addr + off, buf + off, chunk, false);
+        if (rc < 0) {
+            if (off == 0)
+                return rc;
+            break;
+        }
+        for (size_t i = 0; i < chunk; i++) {
+            if (buf[off + i] == '\0')
+                return (int)(off + i + 1);
+        }
+        off += chunk;
+    }
+    buf[max - 1] = '\0';
+    return (int)max;
+}
+
+int handle_seccomp_user_notif(int listener_fd) {
+    static struct seccomp_notif *req;
+    static struct seccomp_notif_resp *resp;
+    static uint16_t req_sz;
+    static uint16_t resp_sz;
+    struct stat st;
+    word_t nr_fstatat64;
+    word_t nr_newfstatat;
+    pid_t target;
+    int rc;
+
+    if (listener_fd < 0)
+        return -EBADF;
+
+    if (req == NULL || resp == NULL) {
+        struct seccomp_notif_sizes sizes = { 0 };
+#ifdef __NR_seccomp
+        if (syscall(__NR_seccomp, SECCOMP_GET_NOTIF_SIZES, 0, &sizes) < 0)
+            return -errno;
+#else
+        return -ENOSYS;
+#endif
+        if (sizes.seccomp_notif == 0 || sizes.seccomp_notif_resp == 0)
+            return -EINVAL;
+        /* malloc: this handler runs on the RECV thread; talloc is not MT-safe. */
+        req = calloc(1, sizes.seccomp_notif);
+        resp = calloc(1, sizes.seccomp_notif_resp);
+        if (req == NULL || resp == NULL)
+            return -ENOMEM;
+        req_sz = sizes.seccomp_notif;
+        resp_sz = sizes.seccomp_notif_resp;
+    }
+
+    memset(req, 0, req_sz);
+    rc = ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_RECV, req);
+    if (rc < 0)
+        return -errno;
+
+    memset(resp, 0, resp_sz);
+    resp->id = req->id;
+    resp->flags = 0;
+    resp->val = 0;
+    resp->error = -ENOSYS;
+
+    if (ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_ID_VALID, &req->id) < 0) {
+        resp->error = -ESRCH;
+        (void)ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, resp);
+        return 0;
+    }
+
+    nr_fstatat64 = detranslate_sysnum(ABI_DEFAULT, PR_fstatat64);
+    nr_newfstatat = detranslate_sysnum(ABI_DEFAULT, PR_newfstatat);
+    if (!((nr_fstatat64 != SYSCALL_AVOIDER && req->data.nr == (int)nr_fstatat64)
+          || (nr_newfstatat != SYSCALL_AVOIDER && req->data.nr == (int)nr_newfstatat))) {
+        (void)ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, resp);
+        return 0;
+    }
+
+    target = (pid_t)req->pid;
+    {
+        char path[PATH_MAX];
+        char procpath[64];
+        int dirfd = (int)req->data.args[0];
+        int flags = (int)req->data.args[3];
+        int hostdir = -1;
+        int n;
+        int stat_err;
+        const char *base;
+
+        n = notif_read_string(target, (word_t)req->data.args[1], path, sizeof(path));
+        if (n < 0) {
+            resp->error = n;
+            (void)ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, resp);
+            return 0;
+        }
+        path[sizeof(path) - 1] = '\0';
+        base = strrchr(path, '/');
+        base = base ? base + 1 : path;
+        if (strcmp(path, NEOPROOT_NOTIFY_SENTINEL) == 0
+            || strcmp(base, NEOPROOT_NOTIFY_SENTINEL) == 0) {
+            memset(&st, 0, sizeof(st));
+            st.st_mode = S_IFREG | 0644;
+            st.st_nlink = 1;
+            st.st_size = NEOPROOT_NOTIFY_PLUMBING_SIZE;
+            if (notif_vm_io(target, (word_t)req->data.args[2], &st, sizeof(st), true) < 0)
+                resp->error = -EFAULT;
+            else {
+                resp->error = 0;
+                resp->val = 0;
+            }
+            if (ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, resp) < 0)
+                return -errno;
+            return 0;
+        }
+
+        /* Identity-rootfs plumbing: use the tracee's cwd/fd. Not a
+         * substitute for PRoot path translation (step 3). */
+        if (path[0] == '/')
+            stat_err = fstatat(AT_FDCWD, path, &st, flags);
+        else {
+            if (dirfd == AT_FDCWD)
+                snprintf(procpath, sizeof(procpath), "/proc/%d/cwd", (int)target);
+            else
+                snprintf(procpath, sizeof(procpath), "/proc/%d/fd/%d",
+                         (int)target, dirfd);
+            hostdir = open(procpath, O_PATH | O_CLOEXEC);
+            if (hostdir < 0)
+                stat_err = -1;
+            else {
+                stat_err = fstatat(hostdir, path[0] ? path : ".", &st, flags);
+                close(hostdir);
+            }
+        }
+        if (stat_err < 0)
+            resp->error = errno ? -errno : -ENOENT;
+        else if (notif_vm_io(target, (word_t)req->data.args[2], &st, sizeof(st), true) < 0)
+            resp->error = -EFAULT;
+        else {
+            resp->error = 0;
+            resp->val = 0;
+        }
+        if (ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, resp) < 0)
+            return -errno;
+        return 0;
+    }
+}
+
 int enable_syscall_filtering(const Tracee *restrict tracee) {
     FilteredSysnum *filtered = NULL;
     int ret;
+    int listener = -1;
     assert(tracee != NULL && tracee->ctx != NULL);
     ret = merge_filtered_sysnums(tracee->ctx, &filtered, proot_sysnums);
     if (UNLIKELY(ret < 0))
@@ -455,8 +684,12 @@ int enable_syscall_filtering(const Tracee *restrict tracee) {
                 return ret;
         }
     }
-    ret = set_seccomp_filters(filtered);
-    return ret;
+    ret = set_seccomp_filters(filtered, tracee->seccomp_notify, &listener);
+    if (ret < 0)
+        return ret;
+    if (tracee->seccomp_notify)
+        return listener;
+    return 0;
 }
 
 #else /* !HAVE_SECCOMP_FILTER */
@@ -466,6 +699,10 @@ int enable_syscall_filtering(const Tracee *restrict tracee) {
 #include "attribute.h"
 
 int probe_seccomp_user_notif(void) {
+    return -ENOSYS;
+}
+
+int handle_seccomp_user_notif([[maybe_unused]] int listener_fd) {
     return -ENOSYS;
 }
 

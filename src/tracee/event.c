@@ -3,6 +3,10 @@
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <sys/utsname.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
+#include <poll.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
@@ -51,6 +55,14 @@ static _Atomic int last_exit_status = -1;
 static _Atomic bool is_exiting_normally = false;
 static _Atomic bool root_exited = false;
 static _Atomic pid_t main_pid = 0;
+
+/* --seccomp-notify: listener fd lives in the tracer; sock carries it from the child.
+ * Android 5.15 seccomp-notify fds are not pollable (POLLIN never fires), and
+ * ioctl(RECV) is blocking, so RECV runs on a dedicated thread. */
+static int user_notif_listener = -1;
+static int user_notif_sock = -1;
+static pthread_t user_notif_thread;
+static _Atomic bool user_notif_thread_running = false;
 
 // ==================== 信号处理辅助函数 ====================
 static void sig_ign(int sig, siginfo_t *si, void *uc)
@@ -114,6 +126,153 @@ static void wakeup_event_loop(int signum, siginfo_t *siginfo, void *ucontext)
     [[maybe_unused]] const int unused_sig = signum;
     [[maybe_unused]] siginfo_t *const unused_si = siginfo;
     [[maybe_unused]] void *const unused_uc = ucontext;
+}
+
+static int send_listener_fd(int sock, int fd)
+{
+    char dummy = 0;
+    struct iovec iov = { .iov_base = &dummy, .iov_len = 1 };
+    union {
+        char buf[CMSG_SPACE(sizeof(int))];
+        struct cmsghdr align;
+    } u;
+    struct msghdr msg = {
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = u.buf,
+        .msg_controllen = sizeof(u.buf),
+    };
+    struct cmsghdr *cmsg;
+
+    memset(u.buf, 0, sizeof(u.buf));
+    cmsg = CMSG_FIRSTHDR(&msg);
+    if (cmsg == NULL)
+        return -EINVAL;
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsg), &fd, sizeof(fd));
+    if (sendmsg(sock, &msg, 0) < 0)
+        return -errno;
+    return 0;
+}
+
+static int recv_listener_fd(int sock, bool dontwait)
+{
+    char dummy = 0;
+    struct iovec iov = { .iov_base = &dummy, .iov_len = 1 };
+    union {
+        char buf[CMSG_SPACE(sizeof(int))];
+        struct cmsghdr align;
+    } u;
+    struct msghdr msg = {
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = u.buf,
+        .msg_controllen = sizeof(u.buf),
+    };
+    struct cmsghdr *cmsg;
+    int fd = -1;
+    int flags = dontwait ? MSG_DONTWAIT : 0;
+
+    memset(u.buf, 0, sizeof(u.buf));
+    if (recvmsg(sock, &msg, flags) < 0)
+        return -errno;
+    cmsg = CMSG_FIRSTHDR(&msg);
+    if (cmsg == NULL || cmsg->cmsg_level != SOL_SOCKET
+        || cmsg->cmsg_type != SCM_RIGHTS || cmsg->cmsg_len < CMSG_LEN(sizeof(int)))
+        return -EINVAL;
+    memcpy(&fd, CMSG_DATA(cmsg), sizeof(fd));
+    return fd;
+}
+
+static void *user_notif_thread_main(void *arg)
+{
+    int fd = (int)(intptr_t)arg;
+
+    for (;;) {
+        int rc = handle_seccomp_user_notif(fd);
+        if (rc == -EBADF || rc == -ENOTTY || rc == -EIO)
+            break;
+    }
+    return NULL;
+}
+
+static void start_user_notif_thread(int fd)
+{
+    pthread_attr_t attr;
+    bool expected = false;
+
+    if (!atomic_compare_exchange_strong_explicit(&user_notif_thread_running,
+                                                 &expected, true,
+                                                 memory_order_acq_rel,
+                                                 memory_order_acquire))
+        return;
+    if (pthread_attr_init(&attr) != 0)
+        goto fail;
+    (void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&user_notif_thread, &attr, user_notif_thread_main,
+                       (void *)(intptr_t)fd) != 0) {
+        pthread_attr_destroy(&attr);
+        goto fail;
+    }
+    pthread_attr_destroy(&attr);
+    return;
+fail:
+    atomic_store_explicit(&user_notif_thread_running, false, memory_order_release);
+    note(NULL, ERROR, INTERNAL,
+         "seccomp-notify: failed to start USER_NOTIF thread");
+}
+
+static void maybe_recv_user_notif_listener(void)
+{
+    int fd;
+
+    if (user_notif_sock < 0 || user_notif_listener >= 0)
+        return;
+    fd = recv_listener_fd(user_notif_sock, true);
+    if (fd < 0)
+        return;
+    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+    user_notif_listener = fd;
+    close(user_notif_sock);
+    user_notif_sock = -1;
+    start_user_notif_thread(fd);
+}
+
+static pid_t wait_for_tracee_or_notif(int *tracee_status)
+{
+    maybe_recv_user_notif_listener();
+    if (user_notif_sock < 0)
+        return waitpid(-1, tracee_status, __WALL);
+
+    /* Listener still in flight: watch the unix socket without blocking
+     * forever in waitpid (USER_NOTIF has no ptrace event). */
+    for (;;) {
+        struct pollfd pfd;
+        pid_t pid;
+        int pr;
+
+        pid = waitpid(-1, tracee_status, __WALL | WNOHANG);
+        if (pid != 0)
+            return pid;
+        maybe_recv_user_notif_listener();
+        if (user_notif_listener >= 0)
+            return waitpid(-1, tracee_status, __WALL);
+
+        pfd.fd = user_notif_sock;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        pr = poll(&pfd, 1, 10);
+        if (pr < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        maybe_recv_user_notif_listener();
+        if (user_notif_listener >= 0)
+            return waitpid(-1, tracee_status, __WALL);
+    }
 }
 
 // ==================== talloc 调试辅助函数 ====================
@@ -227,22 +386,37 @@ int launch_process(Tracee *tracee, char *const argv[])
     char *const default_argv[] = { "-sh", NULL };
     long status;
     pid_t pid;
+    int notify_socks[2] = { -1, -1 };
 
     mem_prepare_before_first_execve(tracee);
 
     if (tracee->verbose > 0)
         list_open_fd(tracee);
 
+    if (tracee->seccomp_notify) {
+        if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, notify_socks) < 0) {
+            note(tracee, ERROR, SYSTEM, "socketpair(seccomp-notify)");
+            return -errno;
+        }
+    }
+
     pid = fork();
     switch(pid) {
         case -1:
             note(tracee, ERROR, SYSTEM, "fork()");
+            if (notify_socks[0] >= 0)
+                close(notify_socks[0]);
+            if (notify_socks[1] >= 0)
+                close(notify_socks[1]);
             return -errno;
         case 0:
             /* 上游 6c8b9ad1d：Android zygote/部分启动器会把 SIGPIPE 置为
              * SIG_IGN，且 ignore 会跨 fork/exec 传入 guest。恢复为默认
              * 处置，保证 `yes | head` 等管道行为与普通系统一致。 */
             signal(SIGPIPE, SIG_DFL);
+
+            if (notify_socks[0] >= 0)
+                close(notify_socks[0]);
 
             status = ptrace(PTRACE_TRACEME, 0, NULL, NULL);
             if (status < 0) {
@@ -252,12 +426,28 @@ int launch_process(Tracee *tracee, char *const argv[])
 
             kill(getpid(), SIGSTOP);
 
-            if (getenv("PROOT_NO_SECCOMP") == NULL)
-                (void) enable_syscall_filtering(tracee);
+            if (getenv("PROOT_NO_SECCOMP") == NULL) {
+                int rc = enable_syscall_filtering(tracee);
+                if (tracee->seccomp_notify) {
+                    if (rc >= 0) {
+                        (void)fcntl(rc, F_SETFD, FD_CLOEXEC);
+                        (void)send_listener_fd(notify_socks[1], rc);
+                        /* Do not close() here: PR_close is TRACE and would
+                         * stop before exec. CLOEXEC drops the copy on exec. */
+                    }
+                    (void)fcntl(notify_socks[1], F_SETFD, FD_CLOEXEC);
+                    notify_socks[1] = -1;
+                }
+            } else if (notify_socks[1] >= 0) {
+                (void)fcntl(notify_socks[1], F_SETFD, FD_CLOEXEC);
+            }
 
             execvp(tracee->exe, argv[0] != NULL ? argv : default_argv);
             return -errno;
         default:
+            if (notify_socks[1] >= 0)
+                close(notify_socks[1]);
+            user_notif_sock = notify_socks[0];
             tracee->pid = pid;
             return 0;
     }
@@ -336,7 +526,7 @@ int event_loop(void)
             break;
         }
 
-        pid = waitpid(-1, &tracee_status, __WALL);
+        pid = wait_for_tracee_or_notif(&tracee_status);
         {
             const int saved_errno = errno;
             shadow_pipes_set_timer(false);

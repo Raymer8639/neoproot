@@ -148,7 +148,7 @@ static Cli proot_cli = {
             },
             .handler = handle_option_seccomp_notify,
             .description = "Opt-in seccomp USER_NOTIF (Linux 5.0+).",
-            .detail = "Requires seccomp NEW_LISTENER. Without this option, kernel 4+ keeps ptrace TRACE. The notify path is not wired yet; a successful probe still uses TRACE."
+            .detail = "Requires seccomp NEW_LISTENER. Without this option, kernel 4+ keeps ptrace TRACE. newfstatat uses USER_NOTIF plumbing (no path translation yet)."
         },
         {
             .class = "Regular options",

@@ -25,5 +25,13 @@ extern int enable_syscall_filtering(const Tracee *tracee);
 /* 0 if NEW_LISTENER+USER_NOTIF can be installed; -errno otherwise.
  * Uses a throwaway child so the tracer is not filtered. */
 extern int probe_seccomp_user_notif(void);
+/* Drain one USER_NOTIF. Plumbing: newfstatat/fstatat64 get a magic
+ * struct stat or identity-rootfs host fstatat (no path translation).
+ * Guest memory via process_vm_*; never CONTINUE. Safe from a RECV thread. */
+extern int handle_seccomp_user_notif(int listener_fd);
+
+/* Isolation-test plumbing: this relative name gets a magic st_size. */
+#define NEOPROOT_NOTIFY_PLUMBING_SIZE 0x4e4f5449LL
+#define NEOPROOT_NOTIFY_SENTINEL "neoproot-notify-sentinel"
 
 #endif /* SECCOMP_H */

@@ -357,7 +357,7 @@ int proot_main(int argc, char *const argv[]) {
             goto error;
         }
         note(tracee, WARNING, USER,
-             "seccomp-notify: notify path not wired yet; using ptrace TRACE");
+             "seccomp-notify: USER_NOTIF listener ready; newfstatat is plumbing-only");
     }
     if (!SAFE_GETENV("PROOT_NO_MOUNTINFO"))
         initialize_extension(tracee, mountinfo_callback, NULL);
