@@ -185,7 +185,10 @@ $(USE_BUILD_H): build.h
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo neoproot-unknown)
 
-build.h:
+# Existing build.h is not removed by a plain rebuild, so `git describe`
+# can stick on an old tag. FORCE regenerates it; clean deletes it.
+.PHONY: FORCE
+build.h: FORCE
 	@echo "  GEN	$@"
 	@echo "/* This file is auto-generated, edit at your own risk.  */" > $@
 	@echo "#ifndef BUILD_H" >> $@
@@ -289,7 +292,7 @@ BINDIR ?= $(PREFIX)/bin
 
 .PHONY: clean distclean install uninstall
 clean distclean:
-	-$(RM) -f $(OBJECTS) $(LOADER_OBJECTS) neoproot loader/loader $(DEPS) licenses
+	-$(RM) -f $(OBJECTS) $(LOADER_OBJECTS) neoproot loader/loader $(DEPS) licenses build.h
 
 install: neoproot
 	$($(quiet)INSTALL) -D $< $(DESTDIR)$(BINDIR)/$<

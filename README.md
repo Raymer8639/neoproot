@@ -4,7 +4,7 @@
 
 An ARM64-focused PRoot fork for Android/Termux containers. neoproot targets developers who run Debian/Ubuntu userspaces on phones and tablets, especially Node.js, pnpm, TypeScript, nvim, bwrap, and other syscall-heavy workflows.
 
-Current stable binaries: [latest release](https://github.com/Raymer8639/neoproot/releases/latest).
+GitHub Release assets are **ARM64 Linux (glibc)** CI builds. Termux needs a **local bionic** build; do not install those assets as `$PREFIX/bin/neoproot`.
 
 [![CI](https://github.com/Raymer8639/neoproot/actions/workflows/ci.yml/badge.svg)](https://github.com/Raymer8639/neoproot/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-ARM64%20%2F%20Android-blue)
@@ -13,7 +13,7 @@ Current stable binaries: [latest release](https://github.com/Raymer8639/neoproot
 
 ## Start in Termux
 
-Use a release binary when it runs on your device; otherwise build the Termux-native binary:
+Always build on the Termux host. Linux CI / Release files will not run correctly as the Termux Android binary.
 
 ```sh
 pkg install clang make llvm binutils pkg-config talloc
@@ -22,7 +22,9 @@ cd neoproot
 sh build.sh install
 ```
 
-The installer places `neoproot` in `$PREFIX/bin`. For ARM64 Linux, download `neoproot` or the lower-instruction-set `neoproot-portable` from [Releases](https://github.com/Raymer8639/neoproot/releases), verify its SHA256, and install it in your `PATH`.
+The installer places `neoproot` in `$PREFIX/bin`.
+
+On **ARM64 Linux** (not Termux), download `neoproot` or the lower-instruction-set `neoproot-portable` from [Releases](https://github.com/Raymer8639/neoproot/releases), verify its SHA256, and install it in your `PATH`.
 
 ## Why neoproot
 
