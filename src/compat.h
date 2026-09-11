@@ -275,4 +275,26 @@ struct proot_open_how {
 	unsigned long long resolve;
 };
 
+#ifndef RESOLVE_NO_XDEV
+#define RESOLVE_NO_XDEV		0x01ull
+#endif
+#ifndef RESOLVE_NO_MAGICLINKS
+#define RESOLVE_NO_MAGICLINKS	0x02ull
+#endif
+#ifndef RESOLVE_NO_SYMLINKS
+#define RESOLVE_NO_SYMLINKS	0x04ull
+#endif
+#ifndef RESOLVE_BENEATH
+#define RESOLVE_BENEATH		0x08ull
+#endif
+#ifndef RESOLVE_IN_ROOT
+#define RESOLVE_IN_ROOT		0x10ull
+#endif
+#ifndef RESOLVE_CACHED
+#define RESOLVE_CACHED		0x20ull
+#endif
+/* Bits we emulate or explicitly ignore (CACHED). Unknown bits → EINVAL. */
+#define PROOT_RESOLVE_KNOWN (RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS | \
+	RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_CACHED)
+
 #endif /* COMPAT_H */
