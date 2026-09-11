@@ -4,7 +4,7 @@
 
 面向 ARM64 的 PRoot 分支，专为 Android/Termux 容器优化。neoproot 适合在手机、平板上的 Debian/Ubuntu 用户空间中运行 Node.js、pnpm、TypeScript、nvim、bwrap 等高频系统调用工作流。
 
-当前稳定版二进制：[最新发布](https://github.com/Raymer8639/neoproot/releases/latest)。
+GitHub Release 资产是 **ARM64 Linux（glibc）** CI 产物。Termux 必须用 **本机 bionic** 编译，不要把这些文件装进 `$PREFIX/bin/neoproot`。
 
 [![CI](https://github.com/Raymer8639/neoproot/actions/workflows/ci.yml/badge.svg)](https://github.com/Raymer8639/neoproot/actions/workflows/ci.yml)
 ![平台](https://img.shields.io/badge/platform-ARM64%20%2F%20Android-blue)
@@ -13,7 +13,7 @@
 
 ## 在 Termux 中开始
 
-如果发布二进制能在你的设备上运行，优先使用它；否则在 Termux 内构建原生版本：
+务必在 Termux 宿主上编译。Linux CI / Release 文件不能当 Termux 的 Android 二进制用。
 
 ```sh
 pkg install clang make llvm binutils pkg-config talloc
@@ -22,7 +22,9 @@ cd neoproot
 sh build.sh install
 ```
 
-安装脚本会把 `neoproot` 放到 `$PREFIX/bin`。ARM64 Linux 用户可以从 [Releases](https://github.com/Raymer8639/neoproot/releases) 下载 `neoproot` 或降低指令集要求的 `neoproot-portable`，校验 SHA256 后放入 `PATH`。
+安装脚本会把 `neoproot` 放到 `$PREFIX/bin`。
+
+**ARM64 Linux**（不是 Termux）可以从 [Releases](https://github.com/Raymer8639/neoproot/releases) 下载 `neoproot` 或降低指令集要求的 `neoproot-portable`，校验 SHA256 后放入 `PATH`。
 
 ## 为什么使用 neoproot
 

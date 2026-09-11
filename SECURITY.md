@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-Security fixes are currently provided on the `v5.9.x` release line of
-neoproot.
+Security fixes are currently provided on the latest release line
+(`v5.10.x` as of 2026-09).
 
 ## Reporting a vulnerability
 
