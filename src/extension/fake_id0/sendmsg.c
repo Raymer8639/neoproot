@@ -12,27 +12,24 @@
 
 #define MAX_CONTROLLEN 1024
 
-// 已修复：纯64位模式，移除所有32位兼容逻辑
-static void sendmsg_unpack_control_and_len(const Tracee *tracee, const struct msghdr *msghdr,
+static void sendmsg_unpack_control_and_len([[maybe_unused]] const Tracee *tracee,
+                                           const struct msghdr *msghdr,
                                            word_t *out_control, size_t *out_controllen)
 {
-    (void)tracee; // 根源修复 unused parameter
     *out_control    = (word_t)msghdr->msg_control;
     *out_controllen = msghdr->msg_controllen;
 }
 
-// 已修复：纯64位模式，移除所有32位兼容逻辑
-static void sendmsg_pack_control(const Tracee *tracee, struct msghdr *msghdr, word_t control)
+static void sendmsg_pack_control([[maybe_unused]] const Tracee *tracee,
+                                 struct msghdr *msghdr, word_t control)
 {
-    (void)tracee; // 根源修复 unused parameter
     msghdr->msg_control = (void *)control;
 }
 
-// 已修复：纯64位模式，移除所有32位兼容逻辑
-static void sendmsg_unpack_cmsghdr(const Tracee *tracee, const struct cmsghdr *cmsghdr,
+static void sendmsg_unpack_cmsghdr([[maybe_unused]] const Tracee *tracee,
+                                   const struct cmsghdr *cmsghdr,
                                    size_t *out_len, int *out_level, int *out_type)
 {
-    (void)tracee; // 根源修复 unused parameter
     *out_len   = cmsghdr->cmsg_len;
     *out_level = cmsghdr->cmsg_level;
     *out_type  = cmsghdr->cmsg_type;

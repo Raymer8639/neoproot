@@ -1811,6 +1811,151 @@ static int translate_sysarg(Tracee *tracee, Reg reg, Type type)
     return translate_path2(tracee, AT_FDCWD, old_path, reg, type);
 }
 
+int lower_openat2_to_openat(Tracee *tracee)
+{
+    struct proot_open_how how = {};
+    word_t how_size = peek_reg(tracee, CURRENT, SYSARG_4);
+    int status;
+
+    if (how_size > sizeof(how))
+        how_size = sizeof(how);
+    status = read_data(tracee, &how, peek_reg(tracee, CURRENT, SYSARG_3), how_size);
+    if (status < 0) {
+        tracee->openat2_resolve = 0;
+        return status;
+    }
+    tracee->openat2_resolve = how.resolve;
+    set_sysnum(tracee, PR_openat);
+    poke_reg(tracee, SYSARG_3, how.flags);
+    poke_reg(tracee, SYSARG_4, how.mode);
+    return 0;
+}
+
+static int translate_openat_enter(Tracee *tracee, bool from_openat2)
+{
+    unsigned long long resolve;
+    int resolve_dirfd;
+    bool skip_beneath = false;
+    int dirfd;
+    int flags;
+    int status;
+    char path[PATH_MAX];
+
+    if (from_openat2) {
+        status = lower_openat2_to_openat(tracee);
+        if (status < 0)
+            return status;
+    }
+
+    resolve = tracee->openat2_resolve;
+    tracee->openat2_resolve = 0;
+    dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
+    flags = peek_reg(tracee, CURRENT, SYSARG_3);
+    resolve_dirfd = dirfd;
+
+    status = get_sysarg_path(tracee, path, SYSARG_2);
+    if (status < 0)
+        return status;
+
+    /* auxv 通道 2 修复：同 PR_open（openat2 已改写为 openat，
+     * 也走这里） */
+    if (is_proc_self_auxv(tracee, path) && tracee->auxv_host_path != NULL)
+        return set_sysarg_path(tracee, tracee->auxv_host_path, SYSARG_2);
+
+    if ((flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) != 0) {
+        status = check_bind_readonly(tracee, path);
+        if (status < 0)
+            return status;
+    }
+
+    if ((resolve & ~PROOT_RESOLVE_KNOWN) != 0)
+        return -EINVAL;
+
+    if ((resolve & RESOLVE_IN_ROOT) != 0 && dirfd != AT_FDCWD &&
+        path[0] == '/') {
+        char dir_path[PATH_MAX];
+        char dir_host_path[PATH_MAX];
+        char oldroot_host_path[PATH_MAX];
+        const char *remembered_dir = recall_proc_fd_path(tracee->pid,
+                                                          (int)dirfd);
+        int dir_status = readlink_proc_pid_fd(tracee->pid, dirfd, dir_path);
+        bool dir_is_newroot = false;
+        bool dir_is_oldroot = remembered_dir != NULL &&
+            (strcmp(remembered_dir, "/oldroot") == 0 ||
+             strncmp(remembered_dir, "/oldroot/", 9) == 0);
+
+        if (dir_status == 0) {
+            strncpy(dir_host_path, dir_path, sizeof(dir_host_path) - 1);
+            dir_host_path[sizeof(dir_host_path) - 1] = '\0';
+            dir_status = detranslate_path(tracee, dir_path, NULL);
+            dir_is_newroot = dir_status >= 0 &&
+                strcmp(dir_path, "/newroot") == 0;
+        }
+        if (dir_is_newroot) {
+            /* bwrap builds its future root through this fd.  Keep its
+             * mounts at the current virtual root so later setup syscalls
+             * observe them before the second pivot_root. */
+            dirfd = AT_FDCWD;
+            poke_reg(tracee, SYSARG_1, dirfd);
+            skip_beneath = true;
+        } else {
+            /* RESOLVE_IN_ROOT interprets absolute paths below dirfd.  In
+             * particular, '/' means the fd itself, not the current root. */
+            const char *relative_path = path[1] == '\0' ? "." : path + 1;
+
+            if (dir_status >= 0 && dir_is_oldroot &&
+                compare_paths(get_root(tracee), dir_host_path) == PATHS_ARE_EQUAL &&
+                translate_oldroot_fd_path(tracee, relative_path,
+                                          oldroot_host_path) == 0)
+                return set_sysarg_path(tracee, oldroot_host_path, SYSARG_2);
+
+            status = set_sysarg_path(tracee, relative_path, SYSARG_2);
+            if (status < 0)
+                return status;
+            memmove(path, relative_path, strlen(relative_path) + 1);
+        }
+    }
+
+    /* Absolute path + BENEATH starts at /, which leaves dirfd. */
+    if ((resolve & RESOLVE_BENEATH) != 0 && path[0] == '/')
+        return -EXDEV;
+
+    if ((resolve & (RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)) != 0) {
+        tracee->openat2_resolve = resolve;
+        tracee->openat2_oflags = flags;
+    }
+    if (((flags & O_NOFOLLOW) != 0) || ((flags & O_EXCL) != 0 && (flags & O_CREAT) != 0) ||
+        (resolve & RESOLVE_NO_SYMLINKS) != 0)
+        status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
+    else
+        status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
+    tracee->openat2_resolve = 0;
+    tracee->openat2_oflags = 0;
+    if (status < 0)
+        return status;
+
+    /* Single-component relative + no follow cannot leave dirfd. */
+    if ((resolve & RESOLVE_BENEATH) != 0 && !skip_beneath &&
+        !((resolve & RESOLVE_NO_SYMLINKS) != 0 && is_single_rel_component(path)) &&
+        !((flags & O_NOFOLLOW) != 0 && is_single_rel_component(path))) {
+        char host_result[PATH_MAX];
+        status = get_sysarg_path(tracee, host_result, SYSARG_2);
+        if (status < 0)
+            return status;
+        status = check_openat2_beneath(tracee, resolve_dirfd, host_result);
+        if (status < 0)
+            return status;
+    }
+    if ((resolve & RESOLVE_NO_XDEV) != 0) {
+        char host_result[PATH_MAX];
+        status = get_sysarg_path(tracee, host_result, SYSARG_2);
+        if (status < 0)
+            return status;
+        status = check_openat2_no_xdev(tracee, resolve_dirfd, host_result);
+    }
+    return status;
+}
+
 int translate_syscall_enter(Tracee *tracee)
 {
     int flags;
@@ -2589,147 +2734,14 @@ int translate_syscall_enter(Tracee *tracee)
         status = 0;
         break;
 
-    case PR_openat2: {
+    case PR_openat2:
         /* openat2 → openat 再翻译（上游 114a7c6）。how.resolve 不能交给
-         * 内核：翻译后是绝对 host 路径，RESOLVE_BENEATH 会误伤。标志留在
-         * tracee 上，下面按内核语义仿真。 */
-        struct proot_open_how how = {};
-        word_t how_size = peek_reg(tracee, CURRENT, SYSARG_4);
-        if (how_size > sizeof(how))
-            how_size = sizeof(how);
-        status = read_data(tracee, &how, peek_reg(tracee, CURRENT, SYSARG_3), how_size);
-        if (status < 0) {
-            tracee->openat2_resolve = 0;
-            break;
-        }
-        tracee->openat2_resolve = how.resolve;
-        set_sysnum(tracee, PR_openat);
-        poke_reg(tracee, SYSARG_3, how.flags);
-        poke_reg(tracee, SYSARG_4, how.mode);
-    }
-        /* fall through */
-    case PR_openat: {
-        unsigned long long resolve = tracee->openat2_resolve;
-        int resolve_dirfd;
-        bool skip_beneath = false;
-
-        tracee->openat2_resolve = 0;
-        dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
-        flags = peek_reg(tracee, CURRENT, SYSARG_3);
-        resolve_dirfd = dirfd;
-
-        status = get_sysarg_path(tracee, path, SYSARG_2);
-        if (status < 0)
-            break;
-
-        /* auxv 通道 2 修复：同 PR_open（openat2 已改写为 openat，
-         * 也走这里） */
-        if (is_proc_self_auxv(tracee, path) && tracee->auxv_host_path != NULL) {
-            status = set_sysarg_path(tracee, tracee->auxv_host_path, SYSARG_2);
-            if (status < 0)
-                break;
-            break;
-        }
-
-        if ((flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) != 0) {
-            status = check_bind_readonly(tracee, path);
-            if (status < 0)
-                break;
-        }
-
-        if ((resolve & ~PROOT_RESOLVE_KNOWN) != 0) {
-            status = -EINVAL;
-            break;
-        }
-
-        if ((resolve & RESOLVE_IN_ROOT) != 0 && dirfd != AT_FDCWD &&
-            path[0] == '/') {
-            char dir_path[PATH_MAX];
-            char dir_host_path[PATH_MAX];
-            char oldroot_host_path[PATH_MAX];
-            const char *remembered_dir = recall_proc_fd_path(tracee->pid,
-                                                              (int)dirfd);
-            int dir_status = readlink_proc_pid_fd(tracee->pid, dirfd, dir_path);
-            bool dir_is_newroot = false;
-            bool dir_is_oldroot = remembered_dir != NULL &&
-                (strcmp(remembered_dir, "/oldroot") == 0 ||
-                 strncmp(remembered_dir, "/oldroot/", 9) == 0);
-
-            if (dir_status == 0) {
-                strncpy(dir_host_path, dir_path, sizeof(dir_host_path) - 1);
-                dir_host_path[sizeof(dir_host_path) - 1] = '\0';
-                dir_status = detranslate_path(tracee, dir_path, NULL);
-                dir_is_newroot = dir_status >= 0 &&
-                    strcmp(dir_path, "/newroot") == 0;
-            }
-            if (dir_is_newroot) {
-                /* bwrap builds its future root through this fd.  Keep its
-                 * mounts at the current virtual root so later setup syscalls
-                 * observe them before the second pivot_root. */
-                dirfd = AT_FDCWD;
-                poke_reg(tracee, SYSARG_1, dirfd);
-                skip_beneath = true;
-            } else {
-                /* RESOLVE_IN_ROOT interprets absolute paths below dirfd.  In
-                 * particular, '/' means the fd itself, not the current root. */
-                const char *relative_path = path[1] == '\0' ? "." : path + 1;
-
-                if (dir_status >= 0 && dir_is_oldroot &&
-                    compare_paths(get_root(tracee), dir_host_path) == PATHS_ARE_EQUAL &&
-                    translate_oldroot_fd_path(tracee, relative_path,
-                                              oldroot_host_path) == 0) {
-                    status = set_sysarg_path(tracee, oldroot_host_path, SYSARG_2);
-                    break;
-                }
-
-                status = set_sysarg_path(tracee, relative_path, SYSARG_2);
-                if (status < 0)
-                    break;
-                memmove(path, relative_path, strlen(relative_path) + 1);
-            }
-        }
-
-        /* Absolute path + BENEATH starts at /, which leaves dirfd. */
-        if ((resolve & RESOLVE_BENEATH) != 0 && path[0] == '/') {
-            status = -EXDEV;
-            break;
-        }
-
-        if ((resolve & (RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)) != 0) {
-            tracee->openat2_resolve = resolve;
-            tracee->openat2_oflags = flags;
-        }
-        if (((flags & O_NOFOLLOW) != 0) || ((flags & O_EXCL) != 0 && (flags & O_CREAT) != 0) ||
-            (resolve & RESOLVE_NO_SYMLINKS) != 0)
-            status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
-        else
-            status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
-        tracee->openat2_resolve = 0;
-        tracee->openat2_oflags = 0;
-        if (status < 0)
-            break;
-
-        /* Single-component relative + no follow cannot leave dirfd. */
-        if ((resolve & RESOLVE_BENEATH) != 0 && !skip_beneath &&
-            !((resolve & RESOLVE_NO_SYMLINKS) != 0 && is_single_rel_component(path)) &&
-            !((flags & O_NOFOLLOW) != 0 && is_single_rel_component(path))) {
-            char host_result[PATH_MAX];
-            status = get_sysarg_path(tracee, host_result, SYSARG_2);
-            if (status < 0)
-                break;
-            status = check_openat2_beneath(tracee, resolve_dirfd, host_result);
-            if (status < 0)
-                break;
-        }
-        if ((resolve & RESOLVE_NO_XDEV) != 0) {
-            char host_result[PATH_MAX];
-            status = get_sysarg_path(tracee, host_result, SYSARG_2);
-            if (status < 0)
-                break;
-            status = check_openat2_no_xdev(tracee, resolve_dirfd, host_result);
-        }
+         * 内核：翻译后是绝对 host 路径，RESOLVE_BENEATH 会误伤。 */
+        status = translate_openat_enter(tracee, true);
         break;
-    }
+    case PR_openat:
+        status = translate_openat_enter(tracee, false);
+        break;
     case PR_readlinkat:
         dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
 
