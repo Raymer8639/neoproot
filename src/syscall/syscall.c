@@ -425,7 +425,8 @@ svc_direct_done:
 
 			/* Push regs again without changing syscall */
 			push_regs_status = push_specific_regs(tracee, false);
-			if (push_regs_status != 0) {
+			/* ESRCH: the tracee already exited; nothing left to poke. */
+			if (push_regs_status != 0 && push_regs_status != -ESRCH) {
 				note(tracee, WARNING, SYSTEM, "can't set tracee registers in workaround");
 			}
 		}
