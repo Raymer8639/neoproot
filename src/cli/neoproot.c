@@ -38,7 +38,7 @@ static int reject_traced_startup(void)
         errno = 0;
         tracer_pid = strtol(line + sizeof("TracerPid:") - 1, &end, 10);
         fclose(status);
-        while (*end == 32 || *end == 9 || *end == 10)
+        while (*end == ' ' || *end == '\t' || *end == '\n')
             end++;
         if (errno != 0 || end == line + sizeof("TracerPid:") - 1
             || *end != 0 || tracer_pid <= 0)

@@ -192,12 +192,23 @@ static int notif_read_string(pid_t pid, word_t addr, char *buf, size_t max)
     return (int)max;
 }
 
+static void free_notif_bufs(void)
+{
+    free(notif_req);
+    free(notif_resp);
+    notif_req = NULL;
+    notif_resp = NULL;
+    notif_req_sz = 0;
+    notif_resp_sz = 0;
+}
+
 static int ensure_notif_bufs(void)
 {
     struct seccomp_notif_sizes sizes = { 0 };
 
     if (notif_req != NULL && notif_resp != NULL)
         return 0;
+    free_notif_bufs();
 #ifdef __NR_seccomp
     if (syscall(__NR_seccomp, SECCOMP_GET_NOTIF_SIZES, 0, &sizes) < 0)
         return -errno;
@@ -208,8 +219,10 @@ static int ensure_notif_bufs(void)
         return -EINVAL;
     notif_req = calloc(1, sizes.seccomp_notif);
     notif_resp = calloc(1, sizes.seccomp_notif_resp);
-    if (notif_req == NULL || notif_resp == NULL)
+    if (notif_req == NULL || notif_resp == NULL) {
+        free_notif_bufs();
         return -ENOMEM;
+    }
     notif_req_sz = sizes.seccomp_notif;
     notif_resp_sz = sizes.seccomp_notif_resp;
     return 0;

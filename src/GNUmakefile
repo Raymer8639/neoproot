@@ -98,7 +98,7 @@ OBJECTS += \
 	tracee/mem.o		\
 	tracee/reg.o		\
 	tracee/event.o		\
-	tracee/seccomp.o        \
+	tracee/seccomp.o	\
 	tracee/statx.o		\
 	ptrace/ptrace.o		\
 	ptrace/wait.o		\

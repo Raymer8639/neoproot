@@ -87,33 +87,32 @@ int main(void)
 {
 	struct stat statl;
 
-	if (mkdir("objects", 0700) < 0 || mkdir("objects/d9", 0700) < 0)
+	if (chdir("/") < 0)
 		return 1;
-	if (create_payload("objects/d9/source") < 0)
+	if (mkdir("shared", 0700) < 0 || mkdir("shared/d9", 0700) < 0)
 		return 1;
-	if (link("objects/d9/source", "objects/d9/8dbb9d39fd0ad9c95597fd043cb76f2958e313") < 0) {
+	if (create_payload("shared/d9/source") < 0)
+		return 1;
+	if (link("shared/d9/source", "shared/d9/linked") < 0) {
 		perror("link");
 		return 1;
 	}
 
-	if (check_stat("lstat source", lstat("objects/d9/source", &statl), &statl, 2) < 0)
+	if (check_stat("lstat source", lstat("shared/d9/source", &statl), &statl, 2) < 0)
 		return 1;
-	if (check_stat("lstat object",
-		       lstat("objects/d9/8dbb9d39fd0ad9c95597fd043cb76f2958e313", &statl),
-		       &statl, 2) < 0)
+	if (check_stat("lstat linked", lstat("shared/d9/linked", &statl), &statl, 2) < 0)
 		return 1;
 
-	if (mmap_relative("objects/d9/source") < 0)
+	if (mmap_relative("shared/d9/source") < 0)
 		return 1;
-	if (mmap_relative("objects/d9/8dbb9d39fd0ad9c95597fd043cb76f2958e313") < 0)
+	if (mmap_relative("shared/d9/linked") < 0)
 		return 1;
 
 	if (check_stat("lstat source after mmap",
-		       lstat("objects/d9/source", &statl), &statl, 2) < 0)
+		       lstat("shared/d9/source", &statl), &statl, 2) < 0)
 		return 1;
-	if (check_stat("lstat object after mmap",
-		       lstat("objects/d9/8dbb9d39fd0ad9c95597fd043cb76f2958e313", &statl),
-		       &statl, 2) < 0)
+	if (check_stat("lstat linked after mmap",
+		       lstat("shared/d9/linked", &statl), &statl, 2) < 0)
 		return 1;
 
 	printf("link2symlink mmap follow-at-open probe passed\n");
