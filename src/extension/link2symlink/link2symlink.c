@@ -243,6 +243,69 @@ static FORCE_INLINE char* get_filename(char *path, size_t *out_len) {
     return name;
 }
 
+/* Git object-store dests of link(2)/linkat(2). L2S chains are host-visible
+ * symlinks; git clone --local then dies (CVE-2022-39253). Matching is the
+ * translated host path, so GIT_OBJECT_DIRECTORY still works when it ends
+ * in /objects/<layout>. pnpm's store uses files/<2hex>/, not objects/. */
+static bool is_git_odb_link_dest(const char *path)
+{
+	const char *p = path;
+	bool leading = true;
+
+	if (path == NULL || path[0] == '\0')
+		return false;
+
+	while (p != NULL && p[0] != '\0') {
+		const char *rest;
+
+		if (leading && strncmp(p, "objects/", 8) == 0)
+			rest = p + 8;
+		else {
+			const char *hit = strstr(p, "/objects/");
+			if (hit == NULL)
+				return false;
+			rest = hit + 9;
+		}
+		leading = false;
+
+		if (isxdigit((unsigned char)rest[0]) &&
+		    isxdigit((unsigned char)rest[1]) &&
+		    rest[2] == '/') {
+			const char *name = rest + 3;
+			size_t n = 0;
+			while (isxdigit((unsigned char)name[n]))
+				n++;
+			if ((n == 38 || n == 62) && name[n] == '\0')
+				return true;
+		}
+		if (strncmp(rest, "pack/", 5) == 0 &&
+		    rest[5] != '\0' && strchr(rest + 5, '/') == NULL)
+			return true;
+		if (strncmp(rest, "info/", 5) == 0 && rest[5] != '\0') {
+			const char *file = rest + 5;
+			const char *slash = strchr(file, '/');
+			if (slash == NULL)
+				return true;
+			if (strncmp(file, "commit-graphs/", 14) == 0 &&
+			    file[14] != '\0' && strchr(file + 14, '/') == NULL)
+				return true;
+		}
+		p = rest;
+	}
+	return false;
+}
+
+static bool git_odb_dest_should_skip(Tracee *tracee, Reg dest_sysarg)
+{
+	char dest_path[PATH_MAX] ALIGNED;
+	int status;
+
+	status = read_path(tracee, dest_path, peek_reg(tracee, CURRENT, dest_sysarg));
+	if (status < 0)
+		return false;
+	return is_git_odb_link_dest(dest_path);
+}
+
 static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Reg dest_sysarg) {
     if (UNLIKELY(!tracee)) return -EINVAL;
 
@@ -261,6 +324,10 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
     ssize_t size;
     int status, link_count, suffix = 1;
     bool first_link = true;
+
+    /* Leave link(2) to the kernel. Git finalize_object_file then rename()s. */
+    if (git_odb_dest_should_skip(tracee, dest_sysarg))
+	    return 1;
 
     size = read_string(tracee, original, peek_reg(tracee, CURRENT, src_sysarg), PATH_MAX);
     if (UNLIKELY(size < 0)) return size;
@@ -1473,6 +1540,8 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
             return UNLIKELY(status < 0) ? status : 0;
         case PR_link:
             status = move_and_symlink_path(tracee, SYSARG_1, SYSARG_2);
+            if (status == 1)
+                return 0;
             return UNLIKELY(status < 0) ? status : 0;
         case PR_linkat:
             if (peek_reg(tracee, CURRENT, SYSARG_5) & AT_SYMLINK_FOLLOW) {
@@ -1485,6 +1554,8 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
                 }
             }
             status = move_and_symlink_path(tracee, SYSARG_2, SYSARG_4);
+            if (status == 1)
+                return 0;
             return UNLIKELY(status < 0) ? status : 0;
         default:
             return 0;

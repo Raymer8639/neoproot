@@ -3,6 +3,22 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.10.2] - 2026-09-12
+
+**Keep Git object-store files as real regular files under `--link2symlink`**
+
+- Skip `link2symlink` when `link`/`linkat` dest is a Git object-store
+  path (`objects/<2hex>/<38 or 62 hex>`, `objects/pack/*`,
+  `objects/info/*`). The kernel returns `EPERM` on Android; Git
+  `finalize_object_file` then `rename`s the tempfile into place. Host
+  `git clone --local` no longer dies on L2S chains (CVE-2022-39253).
+  pnpm's `files/<2hex>/` store is unchanged. Existing chained objects
+  are not rewritten.
+- Tests/CI: `test-link2symlink-git-objects`; mmap follow-at-open
+  probe no longer uses a Git loose-object layout.
+- Chore: share `lower_openat2_to_openat`, free USER_NOTIF buffers on
+  partial alloc failure, drop unused `src/.check_seccomp_filter.c`.
+
 ## [v5.10.1] - 2026-09-12
 
 **Emulate openat2 resolve flags after lowering to openat**

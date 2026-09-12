@@ -36,10 +36,10 @@ run_probe() {
 	printf '%s\n' "$output"
 	printf '%s\n' "$output" | grep -qx 'link2symlink mmap follow-at-open probe passed'
 
-	# Follow-at-open must not copy-materialize the visible names: Git
-	# objects stay as L2S chains while mmap sees the backing file.
-	test -L "$probe_root/objects/d9/source"
-	test -L "$probe_root/objects/d9/8dbb9d39fd0ad9c95597fd043cb76f2958e313"
+	# Follow-at-open must not copy-materialize the visible names: L2S
+	# members stay as chains while mmap sees the backing file.
+	test -L "$probe_root/shared/d9/source"
+	test -L "$probe_root/shared/d9/linked"
 }
 
 run_probe "$ROOT" ''
