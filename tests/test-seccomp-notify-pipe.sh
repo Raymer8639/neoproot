@@ -41,6 +41,7 @@ fi
 
 set +e
 (cd "$ROOT" && PROOT_UNSET_DONE=1 NEOPROOT_TEST_HOST_DIRFD=1 \
+	NEOPROOT_TEST_USER_NOTIF=1 \
 	"$PROOT" --seccomp-notify ./probe expect-translated >"$ROOT/out" 2>&1)
 status=$?
 set -e
@@ -52,6 +53,8 @@ fi
 grep -F 'USER_NOTIF listener ready' "$ROOT/out" >/dev/null
 grep -F 'pipe expect-translated ok' "$ROOT/out" >/dev/null
 grep -F 'neoproot host-dirfd: hit' "$ROOT/out" >/dev/null
+grep -F 'neoproot user-notif: fstatat continue' "$ROOT/out" >/dev/null
+grep -F 'neoproot user-notif: statx emulate' "$ROOT/out" >/dev/null
 
 PRIVATE=$(mktemp -d "${TMPDIR:-/tmp}/neoproot-seccomp-notify-bind.XXXXXX")
 printf 'bound-content' > "$PRIVATE/inside"

@@ -63,6 +63,6 @@ if [ "$status" -ne 0 ]; then
 	exit "$status"
 fi
 printf '%s\n' "$notify_err" | grep -F 'USER_NOTIF listener ready' >/dev/null
-printf '%s\n' "$notify_err" | grep -F 'newfstatat is emulated' >/dev/null
+printf '%s\n' "$notify_err" | grep -F 'newfstatat/statx are emulated' >/dev/null
 
 printf '%s\n' 'seccomp-notify CLI probe passed'

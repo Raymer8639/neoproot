@@ -99,6 +99,8 @@ extern int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_
 struct stat;
 extern int fake_id0_disguise_stat(Tracee *tracee, struct stat *st);
 extern int link2symlink_disguise_stat(Tracee *tracee, const char *host_path, struct stat *st);
+extern int link2symlink_disguise_statx(Tracee *tracee, const char *host_path,
+                                       struct statx *stx, unsigned int mask);
 extern int hidden_files_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 extern int port_switch_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 extern int link2symlink_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);

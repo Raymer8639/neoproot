@@ -28,6 +28,7 @@
 #include <linux/limits.h>
 
 #include "tracee/abi.h"
+#include "tracee/statx.h"
 #include "syscall/sysnum.h"
 #include "path/path.h"
 #include "extension/extension.h"
@@ -37,11 +38,12 @@
  *
  * Layout:
  *   cli.c          probe_seccomp_user_notif() before launch
- *   seccomp.c      BPF: newfstatat/fstatat64 -> RET_USER_NOTIF + NEW_LISTENER
+ *   seccomp.c      BPF: stat syscalls -> RET_USER_NOTIF + NEW_LISTENER
  *   event.c        child SCM_RIGHTS listener; dedicated RECV thread
  *   this file      blocking RECV, emulate newfstatat, SEND
  *
- * Never CONTINUE. Serialize with event_loop via seccomp_user_notif_lock.
+ * CONTINUE is limited to paths with no metadata extension rewrite. Serialize
+ * with event_loop via seccomp_user_notif_lock.
  * Guest memory uses process_vm_* (then /proc/pid/mem): the task is not
  * in ptrace-stop, so PEEK/POKE would EFAULT.
  */
@@ -53,6 +55,21 @@ static uint16_t notif_req_sz;
 static uint16_t notif_resp_sz;
 static int nr_fstatat64_cached = -2;
 static int nr_newfstatat_cached = -2;
+static int nr_statx_cached = -2;
+static int notif_test_enabled = -1;
+
+static bool notif_test(void)
+{
+    if (notif_test_enabled < 0)
+        notif_test_enabled = getenv("NEOPROOT_TEST_USER_NOTIF") != NULL ? 1 : 0;
+    return notif_test_enabled == 1;
+}
+
+static void notif_note(const char *what)
+{
+    if (notif_test())
+        fprintf(stderr, "neoproot user-notif: %s\n", what);
+}
 
 void seccomp_user_notif_lock(void)
 {
@@ -228,14 +245,20 @@ static int ensure_notif_bufs(void)
     return 0;
 }
 
-static void notif_send(int listener_fd, int error, word_t val)
+static int notif_send_flags(int listener_fd, int error, word_t val,
+                            uint32_t flags)
 {
     memset(notif_resp, 0, notif_resp_sz);
     notif_resp->id = notif_req->id;
-    notif_resp->flags = 0;
+    notif_resp->flags = flags;
     notif_resp->error = error;
     notif_resp->val = (int64_t)val;
-    (void)ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, notif_resp);
+    return (int)ioctl(listener_fd, SECCOMP_IOCTL_NOTIF_SEND, notif_resp);
+}
+
+static void notif_send(int listener_fd, int error, word_t val)
+{
+    (void)notif_send_flags(listener_fd, error, val, 0);
 }
 
 static bool host_may_need_l2s(const char *path, const struct stat *st)
@@ -276,6 +299,42 @@ static int fstatat_empty_path(pid_t target, int dirfd, int flags,
     return 0;
 }
 
+static int host_statx_path(const char *path, int flags, unsigned int mask,
+                           struct statx *stx)
+{
+#if defined(SYS_statx)
+    if (syscall(SYS_statx, AT_FDCWD, path, flags & ~AT_EMPTY_PATH,
+                mask, stx) < 0)
+#elif defined(__NR_statx)
+    if (syscall(__NR_statx, AT_FDCWD, path, flags & ~AT_EMPTY_PATH,
+                mask, stx) < 0)
+#else
+    errno = ENOSYS;
+    return -ENOSYS;
+#endif
+        return errno ? -errno : -ENOENT;
+    return 0;
+}
+
+static int statx_empty_path(pid_t target, int dirfd, int flags,
+                            unsigned int mask, struct statx *stx,
+                            char host_path[PATH_MAX])
+{
+    char procpath[64];
+
+    if ((flags & AT_EMPTY_PATH) == 0)
+        return -ENOENT;
+    if (dirfd == AT_FDCWD)
+        snprintf(procpath, sizeof(procpath), "/proc/%d/cwd", (int)target);
+    else
+        snprintf(procpath, sizeof(procpath), "/proc/%d/fd/%d",
+                 (int)target, dirfd);
+    if (host_statx_path(procpath, flags, mask, stx) < 0)
+        return errno ? -errno : -ENOENT;
+    strcpy(host_path, procpath);
+    return 0;
+}
+
 /* Fill *st for a guest newfstatat. Caller holds seccomp_user_notif_lock. */
 static int emulate_notif_fstatat(Tracee *tracee, pid_t target, int dirfd,
                                  const char *path, int flags, struct stat *st,
@@ -308,6 +367,46 @@ static int emulate_notif_fstatat(Tracee *tracee, pid_t target, int dirfd,
     return 0;
 }
 
+static int emulate_notif_statx(Tracee *tracee, pid_t target, int dirfd,
+                               const char *path, int flags,
+                               unsigned int mask, struct statx *stx,
+                               char host_path[PATH_MAX])
+{
+    struct statx_syscall_state state = { 0 };
+    int rc;
+
+    if (path[0] == '\0') {
+        rc = statx_empty_path(target, dirfd, flags, mask, stx, host_path);
+        if (rc < 0)
+            return rc;
+    } else {
+        rc = try_statx_cached_host_dirfd(tracee, dirfd, path, flags,
+                                         mask, stx, host_path);
+        if (rc < 0)
+            return rc;
+        if (rc > 0) {
+            rc = translate_path(tracee, host_path, dirfd, path,
+                                (flags & AT_SYMLINK_NOFOLLOW) == 0);
+            if (rc < 0)
+                return rc;
+            rc = host_statx_path(host_path, flags, mask, stx);
+            if (rc < 0)
+                return rc;
+        }
+    }
+
+    (void)link2symlink_disguise_statx(tracee, host_path, stx, mask);
+
+    strcpy(state.host_path, host_path);
+    state.statx_buf = *stx;
+    state.updated_stats = true;
+    rc = notify_extensions(tracee, STATX_SYSCALL, (intptr_t)&state, 0);
+    if (rc < 0)
+        return rc;
+    *stx = state.statx_buf;
+    return 0;
+}
+
 static bool notif_is_fstatat(int nr)
 {
     if (nr_fstatat64_cached == -2) {
@@ -320,15 +419,35 @@ static bool notif_is_fstatat(int nr)
         || (nr_newfstatat_cached >= 0 && nr == nr_newfstatat_cached);
 }
 
+static bool notif_is_statx(int nr)
+{
+    if (nr_statx_cached == -2) {
+        word_t sysnr = detranslate_sysnum(ABI_DEFAULT, PR_statx);
+        nr_statx_cached = (sysnr == SYSCALL_AVOIDER) ? -1 : (int)sysnr;
+    }
+    return nr_statx_cached >= 0 && nr == nr_statx_cached;
+}
+
+static bool notif_can_continue_fstatat(Tracee *tracee, int dirfd,
+                                       const char *path, int flags)
+{
+    if (get_extension(tracee, link2symlink_callback) != NULL ||
+        get_extension(tracee, fake_id0_callback) != NULL)
+        return false;
+    return can_continue_cached_host_dirfd(tracee, dirfd, path, flags);
+}
+
 int handle_seccomp_user_notif(int listener_fd)
 {
     Tracee *tracee;
     struct stat st;
+    struct statx stx;
     pid_t target;
     char path[PATH_MAX];
     char host_path[PATH_MAX];
     int dirfd;
     int flags;
+    unsigned int mask;
     int n;
     int rc;
 
@@ -343,14 +462,16 @@ int handle_seccomp_user_notif(int listener_fd)
     if (rc < 0)
         return -errno;
 
-    if (!notif_is_fstatat((int)notif_req->data.nr)) {
+    int nr = (int)notif_req->data.nr;
+    bool want_fstatat = notif_is_fstatat(nr);
+
+    if (!want_fstatat && !notif_is_statx(nr)) {
         notif_send(listener_fd, -ENOSYS, 0);
         return 0;
     }
 
     target = (pid_t)notif_req->pid;
     dirfd = (int)notif_req->data.args[0];
-    flags = (int)notif_req->data.args[3];
     n = notif_read_string(target, (word_t)notif_req->data.args[1],
                           path, sizeof(path));
     if (n < 0) {
@@ -358,6 +479,8 @@ int handle_seccomp_user_notif(int listener_fd)
         return 0;
     }
     path[sizeof(path) - 1] = '\0';
+    flags = want_fstatat ? (int)notif_req->data.args[3]
+                         : (int)notif_req->data.args[2];
 
     seccomp_user_notif_lock();
     tracee = get_tracee(NULL, target, false);
@@ -367,11 +490,32 @@ int handle_seccomp_user_notif(int listener_fd)
         return 0;
     }
 
-    rc = emulate_notif_fstatat(tracee, target, dirfd, path, flags,
-                               &st, host_path);
-    if (rc == 0)
-        rc = notif_vm_io(target, (word_t)notif_req->data.args[2],
-                         &st, sizeof(st), true);
+    if (want_fstatat && notif_can_continue_fstatat(tracee, dirfd, path, flags)) {
+        if (notif_send_flags(listener_fd, 0, 0,
+                             SECCOMP_USER_NOTIF_FLAG_CONTINUE) == 0) {
+            notif_note("fstatat continue");
+            seccomp_user_notif_unlock();
+            return 0;
+        }
+        notif_note("continue unavailable");
+    }
+
+    if (want_fstatat) {
+        notif_note("fstatat emulate");
+        rc = emulate_notif_fstatat(tracee, target, dirfd, path, flags,
+                                   &st, host_path);
+        if (rc == 0)
+            rc = notif_vm_io(target, (word_t)notif_req->data.args[2],
+                             &st, sizeof(st), true);
+    } else {
+        notif_note("statx emulate");
+        mask = (unsigned int)notif_req->data.args[3];
+        rc = emulate_notif_statx(tracee, target, dirfd, path, flags, mask,
+                                 &stx, host_path);
+        if (rc == 0)
+            rc = notif_vm_io(target, (word_t)notif_req->data.args[4],
+                             &stx, sizeof(stx), true);
+    }
     seccomp_user_notif_unlock();
     notif_send(listener_fd, rc < 0 ? rc : 0, 0);
     return 0;
