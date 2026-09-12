@@ -3,6 +3,28 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.10.1] - 2026-09-12
+
+**Emulate openat2 resolve flags after lowering to openat**
+
+- Keep lowering `openat2` to `openat` so translated host-absolute
+  paths are not rejected by kernel `RESOLVE_BENEATH`. Store the full
+  `how.resolve` mask (including the seccomp restart path) and emulate:
+  `RESOLVE_NO_SYMLINKS` (`ELOOP` on symlink components, except a final
+  `O_PATH|O_NOFOLLOW`), `RESOLVE_BENEATH` (`EXDEV` for absolute or
+  escaped paths), `RESOLVE_NO_XDEV` (`EXDEV` across `st_dev`), and
+  `RESOLVE_NO_MAGICLINKS` (`ELOOP` on `/proc` magic links).
+  `RESOLVE_IN_ROOT` stays the existing bwrap path. `RESOLVE_CACHED` is
+  ignored; unknown bits return `EINVAL`.
+- Silence the ARM64 pokedata workaround warning when `SETREGSET`
+  returns `ESRCH` because the short-lived tracee already exited.
+- Docs: GitHub Release assets are ARM64 Linux/glibc CI builds, not
+  Termux Android binaries. `make clean` deletes and regenerates
+  `src/build.h` so `--help` does not keep a stale `git describe`.
+- Tests/CI: `test-openat2` now expects kernel-shaped `ELOOP`/`EXDEV`
+  for `NO_SYMLINKS` and `BENEATH` instead of treating those flags as
+  no-ops.
+
 ## [v5.10.0] - 2026-09-06
 
 **Optional seccomp USER_NOTIF path for `newfstatat`**
