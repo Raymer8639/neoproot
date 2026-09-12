@@ -11,9 +11,6 @@
 #include <sys/time.h>
 #include <fcntl.h>
 #include <limits.h>
-#ifndef NAME_MAX
-#define NAME_MAX 255
-#endif
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
@@ -120,127 +117,20 @@ static int host_path_of_dirfd(Tracee *tracee, int dirfd, char host[PATH_MAX])
     return readlink_proc_pid_fd(tracee->pid, dirfd, host);
 }
 
-static void pop_guest_component(char *path)
+static bool is_single_rel_component(const char *path)
 {
-    size_t len;
+    const char *cursor;
 
-    if (path == NULL || path[0] != '/')
-        return;
-    len = strlen(path);
-    while (len > 1 && path[len - 1] == '/')
-        len--;
-    while (len > 1 && path[len - 1] != '/')
-        len--;
-    if (len <= 1) {
-        path[0] = '/';
-        path[1] = '\0';
-        return;
-    }
-    path[len - 1] = '\0';
-}
-
-static bool is_proc_magic_guest(const char *guest)
-{
-    const char *fd;
-
-    if (guest == NULL || strncmp(guest, "/proc/", 6) != 0)
+    if (path == NULL || path[0] == '\0' || path[0] == '/')
         return false;
-    if (strncmp(guest, "/proc/self/fd/", 14) == 0 ||
-        strncmp(guest, "/proc/thread-self/fd/", 21) == 0)
-        return true;
-    fd = strchr(guest + 6, '/');
-    if (fd == NULL || strncmp(fd, "/fd/", 4) != 0)
+    if (path[0] == '.' &&
+        (path[1] == '\0' || (path[1] == '.' && path[2] == '\0')))
         return false;
-    for (const char *p = guest + 6; p < fd; p++) {
-        if (*p < '0' || *p > '9')
+    for (cursor = path; *cursor != '\0'; cursor++) {
+        if (*cursor == '/')
             return false;
     }
     return true;
-}
-
-/* RESOLVE_NO_SYMLINKS: any symlink component is ELOOP, except the
- * documented O_PATH|O_NOFOLLOW trailing-symlink case. RESOLVE_NO_MAGICLINKS
- * only rejects /proc/.../fd magic links. */
-static int check_openat2_link_resolve(Tracee *tracee, int dirfd, const char *path,
-                                      word_t flags, unsigned long long resolve)
-{
-    char accum[PATH_MAX];
-    const char *cursor = path;
-    int status;
-
-    if ((resolve & (RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)) == 0)
-        return 0;
-
-    if (path[0] == '/') {
-        accum[0] = '/';
-        accum[1] = '\0';
-        while (*cursor == '/')
-            cursor++;
-    } else {
-        if (dirfd == AT_FDCWD) {
-            status = getcwd2(tracee, accum);
-            if (status < 0)
-                return status;
-        } else {
-            status = readlink_proc_pid_fd(tracee->pid, dirfd, accum);
-            if (status < 0)
-                return status;
-            status = detranslate_path(tracee, accum, NULL);
-            if (status < 0)
-                return status;
-        }
-    }
-
-    while (*cursor != '\0') {
-        char comp[NAME_MAX];
-        char guest[PATH_MAX];
-        char host[PATH_MAX];
-        struct stat st;
-        size_t n = 0;
-        int is_last;
-
-        while (*cursor != '\0' && *cursor != '/') {
-            if (n + 1 >= NAME_MAX)
-                return -ENAMETOOLONG;
-            comp[n++] = *cursor++;
-        }
-        comp[n] = '\0';
-        while (*cursor == '/')
-            cursor++;
-        is_last = (*cursor == '\0');
-
-        if (comp[0] == '\0' || (comp[0] == '.' && comp[1] == '\0'))
-            continue;
-        if (comp[0] == '.' && comp[1] == '.' && comp[2] == '\0') {
-            pop_guest_component(accum);
-            continue;
-        }
-
-        status = join_paths(2, guest, accum, comp);
-        if (status < 0)
-            return status;
-        strcpy(accum, guest);
-        strcpy(host, guest);
-        status = substitute_binding(tracee, GUEST, host);
-        if (status < 0)
-            return status;
-        if (lstat(host, &st) < 0) {
-            if (errno == ENOENT && is_last && (flags & O_CREAT) != 0)
-                return 0;
-            return errno ? -errno : -ENOENT;
-        }
-        if (!S_ISLNK(st.st_mode))
-            continue;
-        if ((resolve & RESOLVE_NO_SYMLINKS) != 0) {
-            if (is_last && (flags & O_PATH) != 0 && (flags & O_NOFOLLOW) != 0)
-                return 0;
-            return -ELOOP;
-        }
-        if ((resolve & RESOLVE_NO_MAGICLINKS) != 0 &&
-            is_proc_magic_guest(guest))
-            return -ELOOP;
-    }
-    return 0;
 }
 
 static int check_openat2_beneath(Tracee *tracee, int dirfd, const char *host_result)
@@ -2805,20 +2695,24 @@ int translate_syscall_enter(Tracee *tracee)
             break;
         }
 
-        status = check_openat2_link_resolve(tracee, resolve_dirfd, path,
-                                            flags, resolve);
-        if (status < 0)
-            break;
-
+        if ((resolve & (RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)) != 0) {
+            tracee->openat2_resolve = resolve;
+            tracee->openat2_oflags = flags;
+        }
         if (((flags & O_NOFOLLOW) != 0) || ((flags & O_EXCL) != 0 && (flags & O_CREAT) != 0) ||
             (resolve & RESOLVE_NO_SYMLINKS) != 0)
             status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
         else
             status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
+        tracee->openat2_resolve = 0;
+        tracee->openat2_oflags = 0;
         if (status < 0)
             break;
 
-        if ((resolve & RESOLVE_BENEATH) != 0 && !skip_beneath) {
+        /* Single-component relative + no follow cannot leave dirfd. */
+        if ((resolve & RESOLVE_BENEATH) != 0 && !skip_beneath &&
+            !((resolve & RESOLVE_NO_SYMLINKS) != 0 && is_single_rel_component(path)) &&
+            !((flags & O_NOFOLLOW) != 0 && is_single_rel_component(path))) {
             char host_result[PATH_MAX];
             status = get_sysarg_path(tracee, host_result, SYSARG_2);
             if (status < 0)

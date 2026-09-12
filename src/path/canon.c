@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <arm_neon.h>
 
+#include <fcntl.h>
+
 #include "path/canon.h"
 #include "path/path.h"
 #include "path/binding.h"
@@ -16,6 +18,11 @@
 #include "path/proc.h"
 #include "path/f2fs-bug.h"
 #include "extension/extension.h"
+#include "compat.h"
+
+#ifndef O_PATH
+#define O_PATH 010000000
+#endif
 
 #define NEON_VEC_BYTES        16
 
@@ -151,6 +158,24 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
         if (UNLIKELY(res < 0)) return res;
         res = substitute_binding_stat(tracee, fin, recursion_level, scratch_path, host_path);
         if (UNLIKELY(res < 0)) return res;
+        if (res > 0 && tracee->openat2_resolve != 0) {
+            unsigned long long resolve = tracee->openat2_resolve;
+            if ((resolve & RESOLVE_NO_SYMLINKS) != 0) {
+                if (!(IS_FINAL(fin) && recursion_level == 0 &&
+                      (tracee->openat2_oflags & O_PATH) != 0 &&
+                      (tracee->openat2_oflags & O_NOFOLLOW) != 0))
+                    return -ELOOP;
+                path_strcpy(scratch_path, guest_path);
+                res = join_paths(2, guest_path, scratch_path, comp);
+                if (UNLIKELY(res < 0)) return res;
+                continue;
+            }
+            if ((resolve & RESOLVE_NO_MAGICLINKS) != 0) {
+                Comparison proc_cmp = compare_paths("/proc", scratch_path);
+                if (proc_cmp == PATHS_ARE_EQUAL || proc_cmp == PATH1_IS_PREFIX)
+                    return -ELOOP;
+            }
+        }
         if (res <= 0 || (fin == FINAL_NORMAL && !deref_final)) {
             path_strcpy(scratch_path, guest_path);
             res = join_paths(2, guest_path, scratch_path, comp);
