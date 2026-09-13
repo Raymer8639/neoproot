@@ -21,6 +21,7 @@
 #include "path/canon.h"
 #include "path/path.h"
 #include "extension/sysvipc/sysvipc.h"
+#include "extension/fake_id0/config.h"
 #include "syscall/seccomp.h"
 
 #include "build.h"
@@ -347,6 +348,82 @@ int proot_main(int argc, char *const argv[]) {
     }
     status = parse_config(tracee, (size_t)argc, argv);
     if (UNLIKELY(status < 0)) goto error;
+    if (tracee->stat_shim_lib != NULL
+        && get_extension(tracee, link2symlink_callback) != NULL
+        && !tracee->seccomp_notify) {
+        /* L2S result disguise needs to read real symlink chains, which the shim
+         * cannot do in-process (the tracer also intercepts readlink).  The
+         * flag-gated USER_NOTIF fallback is the only correct path, so refuse to
+         * run the shim rather than hand back wrong link types/nlink. */
+        note(tracee, WARNING, USER,
+             "stat-shim: --link2symlink requires --seccomp-notify for L2S "
+             "result disguise; --stat-shim disabled");
+        tracee->stat_shim_lib = NULL;
+    }
+    if (tracee->stat_shim_lib != NULL) {
+        /* The shim serves path stat in-process, so its raw syscalls must not
+         * be traced (set_seccomp_filters drops them). Hand it, through the
+         * environment, everything the tracer would have applied to a stat
+         * result: the exact binding map, the fake_id0 ids and the L2S flag.
+         * launch_process's child inherits environ via execvp. */
+        char preload[PATH_MAX * 2];
+        const char *old_preload = SAFE_GETENV("LD_PRELOAD");
+        if (old_preload != NULL && old_preload[0] != '\0')
+            snprintf(preload, sizeof preload, "%s %s", tracee->stat_shim_lib, old_preload);
+        else
+            snprintf(preload, sizeof preload, "%s", tracee->stat_shim_lib);
+        setenv("LD_PRELOAD", preload, 1);
+        if (tracee->rootfs != NULL)
+            setenv("NEOPROOT_STATSHIM_ROOTFS", tracee->rootfs, 1);
+
+        if (tracee->fs != NULL && tracee->fs->bindings.guest != NULL) {
+            const Binding *binding;
+            size_t total = 1;
+            CIRCLEQ_FOREACH(binding, tracee->fs->bindings.guest, link.guest)
+                total += binding->guest.length + binding->host.length + 3;
+            char *binds = talloc_array(tracee->ctx, char, total);
+            if (binds != NULL) {
+                size_t off = 0;
+                CIRCLEQ_FOREACH(binding, tracee->fs->bindings.guest, link.guest) {
+                    int n = snprintf(binds + off, total - off, "%.*s\t%.*s\n",
+                                     (int)binding->guest.length, binding->guest.path,
+                                     (int)binding->host.length, binding->host.path);
+                    if (UNLIKELY(n < 0 || (size_t)n >= total - off))
+                        break;
+                    off += (size_t)n;
+                }
+                setenv("NEOPROOT_STATSHIM_BINDS", binds, 1);
+                talloc_free(binds);
+            }
+        }
+
+        {
+            Extension *fid = get_extension(tracee, fake_id0_callback);
+            if (fid != NULL && fid->config != NULL) {
+                Config *cfg = (Config *)fid->config;
+                char idbuf[64];
+                snprintf(idbuf, sizeof idbuf, "%lu", (unsigned long)getuid());
+                setenv("NEOPROOT_STATSHIM_UID_REAL", idbuf, 1);
+                snprintf(idbuf, sizeof idbuf, "%lu", (unsigned long)cfg->suid);
+                setenv("NEOPROOT_STATSHIM_UID_FAKE", idbuf, 1);
+                snprintf(idbuf, sizeof idbuf, "%lu", (unsigned long)getgid());
+                setenv("NEOPROOT_STATSHIM_GID_REAL", idbuf, 1);
+                snprintf(idbuf, sizeof idbuf, "%lu", (unsigned long)cfg->sgid);
+                setenv("NEOPROOT_STATSHIM_GID_FAKE", idbuf, 1);
+            }
+        }
+
+        if (get_extension(tracee, link2symlink_callback) != NULL)
+            setenv("NEOPROOT_STATSHIM_L2S", "1", 1);
+        /* Tell the shim that the flag-gated USER_NOTIF fallback is available for
+         * L2S-correlated results. */
+        if (tracee->seccomp_notify)
+            setenv("NEOPROOT_STATSHIM_NOTIF", "1", 1);
+
+        note(tracee, WARNING, USER,
+             "stat-shim: %s (rootfs=%s); newfstatat/statx/fstatat64 are NOT traced",
+             tracee->stat_shim_lib, tracee->rootfs != NULL ? tracee->rootfs : "");
+    }
     if (tracee->seccomp_notify) {
         int probe = probe_seccomp_user_notif();
         if (probe < 0) {

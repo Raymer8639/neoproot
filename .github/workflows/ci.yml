@@ -49,6 +49,23 @@ jobs:
           ls -lh src/neoproot
           test -x src/neoproot
 
+      - name: Build stat-shim
+        run: |
+          # The preload library must match the guest ABI; ubuntu-24.04-arm is
+          # aarch64 glibc, which matches the reference container. Also run its
+          # self-contained self-test (no proot needed).
+          CC=gcc sh stat-shim/build.sh stat-shim
+          file stat-shim/libstatfast.so
+          stat-shim/shim_test
+
+      - name: Upload stat-shim
+        if: matrix.mode == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stat-shim-${{ github.sha }}
+          path: stat-shim/libstatfast.so
+          if-no-files-found: error
+
       - name: Run test suite
         run: |
           cd tests
@@ -103,9 +120,10 @@ jobs:
               *-portable-*) cp "$d/neoproot" dist/neoproot-portable ;;
             esac
           done
+          cp artifacts/stat-shim-*/libstatfast.so dist/libstatfast.so
           ls -lh dist
       - name: Generate checksums
-        run: (cd dist && sha256sum neoproot neoproot-portable > SHA256SUMS)
+        run: (cd dist && sha256sum neoproot neoproot-portable libstatfast.so > SHA256SUMS)
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

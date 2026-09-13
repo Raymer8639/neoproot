@@ -481,6 +481,12 @@ int handle_seccomp_user_notif(int listener_fd)
     path[sizeof(path) - 1] = '\0';
     flags = want_fstatat ? (int)notif_req->data.args[3]
                          : (int)notif_req->data.args[2];
+    /* --stat-shim sentinel: the kernel must never see this bit (it is not a
+     * valid AT_* flag) and the call has to be emulated, not CONTINUEd, so
+     * link2symlink/fake_id0 can rewrite the result. */
+    const bool stat_shim_forced =
+        ((unsigned int)flags & NEOPROOT_STAT_SHIM_FLAG) != 0;
+    flags = (int)((unsigned int)flags & ~NEOPROOT_STAT_SHIM_FLAG);
 
     seccomp_user_notif_lock();
     tracee = get_tracee(NULL, target, false);
@@ -490,7 +496,8 @@ int handle_seccomp_user_notif(int listener_fd)
         return 0;
     }
 
-    if (want_fstatat && notif_can_continue_fstatat(tracee, dirfd, path, flags)) {
+    if (want_fstatat && !stat_shim_forced
+        && notif_can_continue_fstatat(tracee, dirfd, path, flags)) {
         if (notif_send_flags(listener_fd, 0, 0,
                              SECCOMP_USER_NOTIF_FLAG_CONTINUE) == 0) {
             notif_note("fstatat continue");

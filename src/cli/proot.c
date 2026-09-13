@@ -43,7 +43,10 @@ static ALWAYS_INLINE void apply_bindings(Tracee *restrict t, const char *list[],
 static int handle_option_r(Tracee *restrict t, const Cli *restrict c, const char *val) {
     (void)c;
     Binding *b = new_binding(t, val, "/", true);
-    return b ? 0 : -1;
+    if (b == NULL)
+        return -1;
+    t->rootfs = talloc_strdup(t->ctx, val);
+    return t->rootfs ? 0 : -1;
 }
 
 static int handle_option_b(Tracee *restrict t, const Cli *restrict c, const char *val) {
@@ -122,6 +125,16 @@ static int handle_option_seccomp_notify(Tracee *restrict t, const Cli *restrict 
     (void)c; (void)v;
     t->seccomp_notify = true;
     return 0;
+}
+
+static int handle_option_stat_shim(Tracee *restrict t, const Cli *restrict c, const char *val) {
+    (void)c;
+    if (val == NULL || val[0] == '\0') {
+        note(t, ERROR, USER, "--stat-shim requires a guest path to the shim library");
+        return -1;
+    }
+    t->stat_shim_lib = talloc_strdup(t->ctx, val);
+    return t->stat_shim_lib != NULL ? 0 : -1;
 }
 
 static int handle_option_v(Tracee *restrict t, const Cli *restrict c, const char *val) {
