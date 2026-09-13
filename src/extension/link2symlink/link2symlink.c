@@ -4,6 +4,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <errno.h>
 #include <limits.h>
 #include <ctype.h>
@@ -637,62 +638,128 @@ proc_final:
     return UNLIKELY(status < 0) ? status : 0;
 }
 
+static bool resolve_l2s_stat_path(Tracee *tracee, const char *host_path,
+				  char final[PATH_MAX])
+{
+	char original[PATH_MAX] ALIGNED, intermediate[PATH_MAX] ALIGNED;
+	struct stat statl;
+	char *filename;
+	ssize_t size;
+
+	if (tracee == NULL || host_path == NULL || final == NULL)
+		return false;
+	if (get_extension(tracee, link2symlink_callback) == NULL)
+		return false;
+	if (strlen(host_path) >= PATH_MAX)
+		return false;
+	strcpy(original, host_path);
+	if (UNLIKELY(l2s_lstat(original, &statl) < 0))
+		return false;
+	if (is_l2s_internal_path(original)) {
+		if (!S_ISLNK(statl.st_mode)) {
+			strcpy(final, original);
+			return true;
+		}
+		strcpy(intermediate, original);
+		return my_readlink(intermediate, final, PATH_MAX) >= 0;
+	}
+	if (UNLIKELY(!S_ISLNK(statl.st_mode)))
+		return false;
+	size = my_readlink(original, intermediate, PATH_MAX);
+	if (UNLIKELY(size < 0))
+		return false;
+	filename = get_filename(intermediate, NULL);
+	if (UNLIKELY(filename == NULL ||
+		     strncmp(filename, PREFIX, PREFIX_LEN) != 0))
+		return false;
+	return my_readlink(intermediate, final, PATH_MAX) >= 0;
+}
+
 /* USER_NOTIF twin of handle_sysexit_end: same L2S walk, but fills *st
  * instead of poking guest memory. Errors are swallowed so a failed
  * disguise does not fail the guest stat (TRACE path can return -errno). */
 int link2symlink_disguise_stat(Tracee *tracee, const char *host_path, struct stat *st)
 {
-	char original[PATH_MAX] ALIGNED, intermediate[PATH_MAX] ALIGNED, final[PATH_MAX] ALIGNED;
-	struct stat final_stat, statl;
-	char *filename;
-	ssize_t size;
-	int status;
+	char final[PATH_MAX] ALIGNED;
+	struct stat final_stat;
+	int final_count;
 
-	if (tracee == NULL || host_path == NULL || st == NULL)
+	if (st == NULL || !resolve_l2s_stat_path(tracee, host_path, final))
 		return 0;
-	if (get_extension(tracee, link2symlink_callback) == NULL)
+	if (UNLIKELY(l2s_lstat(final, &final_stat) < 0))
 		return 0;
-	if (strlen(host_path) >= PATH_MAX)
+	if (UNLIKELY(!parse_l2s_final_count(final, &final_count)))
 		return 0;
-	strcpy(original, host_path);
-	filename = get_filename(original, NULL);
-	status = l2s_lstat(original, &statl);
-	if (UNLIKELY(status < 0))
-		return 0;
-	if (is_l2s_internal_path(original)) {
-		if (S_ISLNK(statl.st_mode)) {
-			strcpy(intermediate, original);
-			goto proc_intermediate_notif;
-		}
-		strcpy(final, original);
-		goto proc_final_notif;
-	}
-	if (UNLIKELY(!S_ISLNK(statl.st_mode)))
-		return 0;
-	size = my_readlink(original, intermediate, PATH_MAX);
-	if (UNLIKELY(size < 0))
-		return 0;
-	filename = get_filename(intermediate, NULL);
-	if (UNLIKELY(strncmp(filename, PREFIX, PREFIX_LEN) != 0))
-		return 0;
-
-proc_intermediate_notif:
-	size = my_readlink(intermediate, final, PATH_MAX);
-	if (UNLIKELY(size < 0))
-		return 0;
-
-proc_final_notif:
-	status = l2s_lstat(final, &final_stat);
-	if (UNLIKELY(status < 0))
-		return 0;
-	{
-		int final_count;
-		if (UNLIKELY(!parse_l2s_final_count(final, &final_count)))
-			return 0;
-		final_stat.st_nlink = final_count;
-	}
+	final_stat.st_nlink = final_count;
 	*st = final_stat;
-	return 0;
+	return 1;
+}
+
+static void fill_statx_from_stat(struct statx *stx, const struct stat *st,
+				 unsigned int mask)
+{
+	if (mask & (STATX_TYPE | STATX_MODE))
+		stx->stx_mode = st->st_mode;
+	if (mask & STATX_NLINK)
+		stx->stx_nlink = st->st_nlink;
+	if (mask & STATX_UID)
+		stx->stx_uid = st->st_uid;
+	if (mask & STATX_GID)
+		stx->stx_gid = st->st_gid;
+	if (mask & STATX_INO)
+		stx->stx_ino = st->st_ino;
+	if (mask & STATX_SIZE)
+		stx->stx_size = st->st_size;
+	if (mask & STATX_BLOCKS)
+		stx->stx_blocks = st->st_blocks;
+	if (mask & STATX_ATIME) {
+		stx->stx_atime.tv_sec = st->st_atim.tv_sec;
+		stx->stx_atime.tv_nsec = st->st_atim.tv_nsec;
+	}
+	if (mask & STATX_MTIME) {
+		stx->stx_mtime.tv_sec = st->st_mtim.tv_sec;
+		stx->stx_mtime.tv_nsec = st->st_mtim.tv_nsec;
+	}
+	if (mask & STATX_CTIME) {
+		stx->stx_ctime.tv_sec = st->st_ctim.tv_sec;
+		stx->stx_ctime.tv_nsec = st->st_ctim.tv_nsec;
+	}
+	if (mask & STATX_BTIME) {
+		stx->stx_btime.tv_sec = 0;
+		stx->stx_btime.tv_nsec = 0;
+		stx->stx_mask &= ~STATX_BTIME;
+	}
+	stx->stx_blksize = st->st_blksize;
+	stx->stx_rdev_major = major(st->st_rdev);
+	stx->stx_rdev_minor = minor(st->st_rdev);
+	stx->stx_dev_major = major(st->st_dev);
+	stx->stx_dev_minor = minor(st->st_dev);
+}
+
+int link2symlink_disguise_statx(Tracee *tracee, const char *host_path,
+				struct statx *stx, unsigned int mask)
+{
+	char final[PATH_MAX] ALIGNED;
+	struct stat final_stat;
+	int final_count;
+	const char *base;
+
+	if (stx == NULL || host_path == NULL)
+		return 0;
+	base = strrchr(host_path, '/');
+	base = base ? base + 1 : host_path;
+	if ((stx->stx_mode & S_IFMT) != S_IFLNK &&
+	    strncmp(base, PREFIX, PREFIX_LEN) != 0)
+		return 0;
+	if (!resolve_l2s_stat_path(tracee, host_path, final))
+		return 0;
+	if (UNLIKELY(l2s_lstat(final, &final_stat) < 0))
+		return 0;
+	if (UNLIKELY(!parse_l2s_final_count(final, &final_count)))
+		return 0;
+	final_stat.st_nlink = final_count;
+	fill_statx_from_stat(stx, &final_stat, mask);
+	return 1;
 }
 
 static FORCE_INLINE void link2symlink_handle_statx(struct statx_syscall_state *state) {

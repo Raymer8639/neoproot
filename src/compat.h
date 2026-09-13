@@ -218,6 +218,9 @@
 #    ifndef SECCOMP_RET_USER_NOTIF
 #        define SECCOMP_RET_USER_NOTIF	0x7fc00000U
 #    endif
+#    ifndef SECCOMP_USER_NOTIF_FLAG_CONTINUE
+#        define SECCOMP_USER_NOTIF_FLAG_CONTINUE	(1UL << 0)
+#    endif
 #    ifndef talloc_get_type_abort
 #        define talloc_get_type_abort talloc_get_type
 #    endif

@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <linux/stat.h>
 
 #ifndef AT_FDCWD
 #define AT_FDCWD -100
@@ -20,6 +21,22 @@ static int do_fstatat(int dirfd, const char *path, struct stat *st, int flags)
 	return syscall(__NR_newfstatat, dirfd, path, st, flags);
 #else
 	return fstatat(dirfd, path, st, flags);
+#endif
+}
+
+static int do_statx(int dirfd, const char *path, int flags,
+		    unsigned int mask, struct statx *stx)
+{
+#ifdef __NR_statx
+	return syscall(__NR_statx, dirfd, path, flags, mask, stx);
+#else
+	(void)dirfd;
+	(void)path;
+	(void)flags;
+	(void)mask;
+	(void)stx;
+	errno = ENOSYS;
+	return -1;
 #endif
 }
 
@@ -58,6 +75,7 @@ int main(int argc, char **argv)
 			return 1;
 	} else if (strcmp(mode, "expect-translated") == 0) {
 		int dirfd;
+		struct statx stx;
 
 		if (expect_reg_size("file", "marker", 5) != 0)
 			return 1;
@@ -108,6 +126,29 @@ int main(int argc, char **argv)
 				close(dirfd);
 				return 1;
 			}
+		}
+
+		if (do_statx(dirfd, "inside", AT_SYMLINK_NOFOLLOW,
+			     STATX_TYPE | STATX_SIZE, &stx) != 0) {
+			fprintf(stderr, "statx(dirfd, inside): %s\n", strerror(errno));
+			close(dirfd);
+			return 1;
+		}
+		if ((stx.stx_mode & S_IFMT) != S_IFREG || stx.stx_size != 4) {
+			fprintf(stderr, "statx dirfd: mode=%o size=%llu\n",
+				(unsigned)stx.stx_mode,
+				(unsigned long long)stx.stx_size);
+			close(dirfd);
+			return 1;
+		}
+
+		if (do_statx(AT_FDCWD, "link-to-marker", AT_SYMLINK_NOFOLLOW,
+			     STATX_TYPE, &stx) != 0 ||
+		    (stx.stx_mode & S_IFMT) != S_IFLNK) {
+			fprintf(stderr, "statx symlink: %s, mode=%o\n",
+				strerror(errno), (unsigned)stx.stx_mode);
+			close(dirfd);
+			return 1;
 		}
 
 		{
@@ -168,6 +209,7 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	} else if (strcmp(mode, "expect-l2s") == 0) {
+		struct statx stx;
 		if (unlink("l2s-b") < 0 && errno != ENOENT) {
 			fprintf(stderr, "unlink(l2s-b): %s\n", strerror(errno));
 			return 1;
@@ -185,6 +227,26 @@ int main(int argc, char **argv)
 				(unsigned)st.st_mode, (unsigned long)st.st_nlink);
 			return 1;
 		}
+		if (do_statx(AT_FDCWD, "l2s-a", AT_SYMLINK_NOFOLLOW,
+			     STATX_TYPE | STATX_NLINK | STATX_SIZE, &stx) != 0) {
+			fprintf(stderr, "statx(l2s-a): %s\n", strerror(errno));
+			return 1;
+		}
+		if ((stx.stx_mode & S_IFMT) != S_IFREG ||
+		    stx.stx_nlink != 2 || stx.stx_size != 2) {
+			fprintf(stderr, "statx l2s: mode=%o nlink=%u size=%llu\n",
+				(unsigned)stx.stx_mode, stx.stx_nlink,
+				(unsigned long long)stx.stx_size);
+			return 1;
+		}
+		if (do_statx(AT_FDCWD, "l2s-a", 0,
+			     STATX_TYPE | STATX_SIZE, &stx) != 0 ||
+		    (stx.stx_mode & S_IFMT) != S_IFREG || stx.stx_size != 2) {
+			fprintf(stderr, "statx followed l2s: %s, mode=%o size=%llu\n",
+				strerror(errno), (unsigned)stx.stx_mode,
+				(unsigned long long)stx.stx_size);
+			return 1;
+		}
 		if (do_fstatat(AT_FDCWD, "l2s-b", &st, AT_SYMLINK_NOFOLLOW) != 0) {
 			fprintf(stderr, "fstatat(l2s-b): %s\n", strerror(errno));
 			return 1;
@@ -199,8 +261,22 @@ int main(int argc, char **argv)
 			fprintf(stderr, "open(.): %s\n", strerror(errno));
 			return 1;
 		}
+		if (do_statx(fd, "l2s-a", AT_SYMLINK_NOFOLLOW,
+			     STATX_TYPE | STATX_NLINK | STATX_SIZE, &stx) != 0) {
+			fprintf(stderr, "statx(dirfd, l2s-a): %s\n", strerror(errno));
+			close(fd);
+			return 1;
+		}
 		if (do_fstatat(fd, "l2s-a", &st, AT_SYMLINK_NOFOLLOW) != 0) {
 			fprintf(stderr, "fstatat(dirfd, l2s-a): %s\n", strerror(errno));
+			close(fd);
+			return 1;
+		}
+		if ((stx.stx_mode & S_IFMT) != S_IFREG ||
+		    stx.stx_nlink != 2 || stx.stx_size != 2) {
+			fprintf(stderr, "statx dirfd l2s: mode=%o nlink=%u size=%llu\n",
+				(unsigned)stx.stx_mode, stx.stx_nlink,
+				(unsigned long long)stx.stx_size);
 			close(fd);
 			return 1;
 		}
@@ -213,6 +289,24 @@ int main(int argc, char **argv)
 	} else {
 		fprintf(stderr, "unknown mode %s\n", mode);
 		return 1;
+	}
+
+	fd = open("marker", O_RDONLY);
+	if (fd >= 0) {
+		struct statx stx;
+		if (do_statx(fd, "", AT_EMPTY_PATH,
+			     STATX_TYPE | STATX_SIZE, &stx) != 0) {
+			fprintf(stderr, "statx empty path: %s\n", strerror(errno));
+			close(fd);
+			return 1;
+		}
+		close(fd);
+		if ((stx.stx_mode & S_IFMT) != S_IFREG || stx.stx_size != 5) {
+			fprintf(stderr, "statx empty path: mode=%o size=%llu\n",
+				(unsigned)stx.stx_mode,
+				(unsigned long long)stx.stx_size);
+			return 1;
+		}
 	}
 
 	fd = open("marker", O_RDONLY);

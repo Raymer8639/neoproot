@@ -83,7 +83,7 @@ static ALWAYS_INLINE int add_trace_syscall(struct sock_fprog *restrict program,
 }
 
 static ALWAYS_INLINE bool is_user_notif_sysnum(Sysnum value) {
-    return value == PR_newfstatat || value == PR_fstatat64;
+    return value == PR_newfstatat || value == PR_fstatat64 || value == PR_statx;
 }
 
 /* ioctl 等按参数条件过滤的变体：只有 args[1] 匹配特定值才停靠，

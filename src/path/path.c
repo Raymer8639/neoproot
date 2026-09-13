@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <linux/stat.h>
 #ifndef KCMP_FILE
 #define KCMP_FILE 0
 #endif
@@ -463,11 +464,15 @@ static struct {
     pid_t pid;
     int fd;
     int host_fd;
+    dev_t host_dev;
+    ino_t host_ino;
+    bool host_identity_valid;
     char proc_path[PATH_MAX];
     char guest_dir[PATH_MAX];
 } dirfd_cache[DIRFD_CACHE_SIZE];
 static size_t dirfd_cache_next;
 static bool dirfd_cache_inited;
+static int dirfd_cache_last = -1;
 static int dirfd_fast_test = -1;
 static int host_dirfd_test = -1;
 
@@ -518,6 +523,7 @@ static void close_host_dirfd_slot(size_t index)
         close(dirfd_cache[index].host_fd);
         dirfd_cache[index].host_fd = -1;
     }
+    dirfd_cache[index].host_identity_valid = false;
 }
 
 static int dup_cloexec(int fd)
@@ -559,9 +565,16 @@ static int dirfd_cache_slot(pid_t pid, int fd)
     dirfd_cache_init();
     if (fd < 0)
         return -1;
-    for (index = 0; index < DIRFD_CACHE_SIZE; index++) {
+    if (dirfd_cache_last >= 0) {
+        index = (size_t)dirfd_cache_last;
         if (dirfd_cache[index].pid == pid && dirfd_cache[index].fd == fd)
+            return dirfd_cache_last;
+    }
+    for (index = 0; index < DIRFD_CACHE_SIZE; index++) {
+        if (dirfd_cache[index].pid == pid && dirfd_cache[index].fd == fd) {
+            dirfd_cache_last = (int)index;
             return (int)index;
+        }
     }
     return -1;
 }
@@ -573,6 +586,8 @@ void forget_translated_dirfd(pid_t pid, int fd)
     if (slot < 0)
         return;
     close_host_dirfd_slot((size_t)slot);
+    if (dirfd_cache_last == slot)
+        dirfd_cache_last = -1;
     dirfd_cache[slot].pid = 0;
     dirfd_cache[slot].fd = -1;
     dirfd_cache[slot].proc_path[0] = '\0';
@@ -625,6 +640,7 @@ static void remember_translated_dirfd(pid_t pid, int fd,
     dirfd_cache[slot].pid = pid;
     dirfd_cache[slot].fd = fd;
     dirfd_cache[slot].host_fd = -1;
+    dirfd_cache[slot].host_identity_valid = false;
     strncpy(dirfd_cache[slot].proc_path, proc_path, PATH_MAX - 1);
     dirfd_cache[slot].proc_path[PATH_MAX - 1] = '\0';
     strncpy(dirfd_cache[slot].guest_dir, guest_dir, PATH_MAX - 1);
@@ -633,10 +649,15 @@ static void remember_translated_dirfd(pid_t pid, int fd,
 
 static void attach_host_dirfd(pid_t pid, int fd, int host_fd)
 {
+    struct stat host_st;
     int slot;
 
     if (host_fd < 0)
         return;
+    if (fstat(host_fd, &host_st) < 0) {
+        close(host_fd);
+        return;
+    }
     slot = dirfd_cache_slot(pid, fd);
     if (slot < 0) {
         close(host_fd);
@@ -644,6 +665,9 @@ static void attach_host_dirfd(pid_t pid, int fd, int host_fd)
     }
     close_host_dirfd_slot((size_t)slot);
     dirfd_cache[slot].host_fd = host_fd;
+    dirfd_cache[slot].host_dev = host_st.st_dev;
+    dirfd_cache[slot].host_ino = host_st.st_ino;
+    dirfd_cache[slot].host_identity_valid = true;
 }
 
 void copy_translated_dirfd(pid_t pid, int source_fd, int target_fd)
@@ -753,8 +777,8 @@ static int ensure_host_dirfd(int slot, pid_t pid, int guest_fd)
     fd = open(procfd, O_PATH | O_DIRECTORY | O_CLOEXEC);
     if (fd < 0)
         return -1;
-    dirfd_cache[slot].host_fd = fd;
-    return fd;
+    attach_host_dirfd(pid, guest_fd, fd);
+    return dirfd_cache[slot].host_fd;
 }
 
 /* dup2/SCM_RIGHTS may change the guest fd without a TRACE stop (dup is
@@ -763,28 +787,38 @@ static int ensure_host_dirfd(int slot, pid_t pid, int guest_fd)
 static bool host_dirfd_still_valid(int slot, pid_t pid, int guest_fd)
 {
     int host_fd = dirfd_cache[slot].host_fd;
-    struct stat guest_st;
-    struct stat host_st;
-    char procfd[64];
 #ifdef __NR_kcmp
+    static int kcmp_status = -2; /* -2 unknown, 0 unsupported, 1 supported */
     long rc;
 #endif
+    struct stat guest_st;
+    char procfd[64];
 
     if (host_fd < 0)
         return false;
 #ifdef __NR_kcmp
-    /* Same open file description is sufficient. A fresh O_PATH of
-     * /proc/pid/fd/N is often a different description of the same
-     * inode, so inequality falls through to st_dev/st_ino. */
-    rc = syscall(__NR_kcmp, pid, getpid(), KCMP_FILE, guest_fd, host_fd);
-    if (rc == 0)
-        return true;
+    if (kcmp_status != 0) {
+        errno = 0;
+        rc = syscall(__NR_kcmp, pid, getpid(), KCMP_FILE, guest_fd, host_fd);
+        if (rc == 0) {
+            kcmp_status = 1;
+            return true;
+        }
+        if (errno == ENOSYS)
+            kcmp_status = 0;
+    }
 #endif
-    snprintf(procfd, sizeof(procfd), "/proc/%d/fd/%d", (int)pid, guest_fd);
-    if (stat(procfd, &guest_st) < 0 || fstat(host_fd, &host_st) < 0)
+    if (!dirfd_cache[slot].host_identity_valid)
         return false;
-    return guest_st.st_dev == host_st.st_dev &&
-           guest_st.st_ino == host_st.st_ino;
+
+    /* kcmp is often unavailable on Android. The cached O_PATH is stable in
+     * the tracer, so compare only the guest fd's current inode against the
+     * identity captured when that O_PATH was created. */
+    snprintf(procfd, sizeof(procfd), "/proc/%d/fd/%d", (int)pid, guest_fd);
+    if (stat(procfd, &guest_st) < 0)
+        return false;
+    return guest_st.st_dev == dirfd_cache[slot].host_dev &&
+           guest_st.st_ino == dirfd_cache[slot].host_ino;
 }
 
 static int populate_dirfd_cache(Tracee *tracee, int dir_fd)
@@ -805,9 +839,10 @@ static int populate_dirfd_cache(Tracee *tracee, int dir_fd)
     return slot;
 }
 
-int try_fstatat_cached_host_dirfd(Tracee *tracee, int dir_fd,
-                                  const char *user_path, int flags,
-                                  struct stat *st, char host_path[PATH_MAX])
+static int lookup_cached_host_dirfd(Tracee *tracee, int dir_fd,
+                                    const char *user_path, int flags,
+                                    char host_path[PATH_MAX],
+                                    int *host_fd_out)
 {
     int slot;
     int host_fd;
@@ -816,7 +851,8 @@ int try_fstatat_cached_host_dirfd(Tracee *tracee, int dir_fd,
     Binding *dir_binding;
     Binding *full_binding;
 
-    if (tracee == NULL || st == NULL || user_path == NULL || host_path == NULL)
+    if (tracee == NULL || user_path == NULL || host_path == NULL ||
+        host_fd_out == NULL)
         return 1;
     if (dir_fd == AT_FDCWD || dir_fd < 0)
         return 1;
@@ -870,14 +906,64 @@ int try_fstatat_cached_host_dirfd(Tracee *tracee, int dir_fd,
         return 1;
     }
 
-    if (fstatat(host_fd, user_path, st, flags) < 0)
-        return errno ? -errno : -ENOENT;
-
     if (join_paths(2, host_path, dirfd_cache[slot].proc_path, user_path) < 0)
         return 1;
 
+    *host_fd_out = host_fd;
     host_dirfd_note("hit");
     return 0;
+}
+
+int try_fstatat_cached_host_dirfd(Tracee *tracee, int dir_fd,
+                                  const char *user_path, int flags,
+                                  struct stat *st, char host_path[PATH_MAX])
+{
+    int host_fd;
+
+    if (st == NULL)
+        return 1;
+    if (lookup_cached_host_dirfd(tracee, dir_fd, user_path, flags,
+                                 host_path, &host_fd) != 0)
+        return 1;
+
+    if (fstatat(host_fd, user_path, st, flags) < 0)
+        return errno ? -errno : -ENOENT;
+    return 0;
+}
+
+int try_statx_cached_host_dirfd(Tracee *tracee, int dir_fd,
+                                const char *user_path, int flags,
+                                unsigned int mask, struct statx *stx,
+                                char host_path[PATH_MAX])
+{
+    int host_fd;
+
+    if (stx == NULL)
+        return 1;
+    if (lookup_cached_host_dirfd(tracee, dir_fd, user_path, flags,
+                                 host_path, &host_fd) != 0)
+        return 1;
+
+#if defined(SYS_statx)
+    if (syscall(SYS_statx, host_fd, user_path, flags, mask, stx) < 0)
+#elif defined(__NR_statx)
+    if (syscall(__NR_statx, host_fd, user_path, flags, mask, stx) < 0)
+#else
+    errno = ENOSYS;
+    return -ENOSYS;
+#endif
+        return errno ? -errno : -ENOENT;
+    return 0;
+}
+
+bool can_continue_cached_host_dirfd(Tracee *tracee, int dir_fd,
+                                    const char *user_path, int flags)
+{
+    char host_path[PATH_MAX];
+    int host_fd;
+
+    return lookup_cached_host_dirfd(tracee, dir_fd, user_path, flags,
+                                    host_path, &host_fd) == 0;
 }
 
 bool is_proc_fd_mountinfo(const Tracee *tracee, int dir_fd,
