@@ -60,6 +60,12 @@ typedef struct tracee {
 	bool         killall_on_exit;
 	/* Opt-in --seccomp-notify: USER_NOTIF emulates newfstatat. */
 	bool         seccomp_notify;
+	/* Opt-in --stat-shim=<lib>: preload a guest shim that serves path stat
+	 * in-process; newfstatat/statx/fstatat64 leave the seccomp filter so the
+	 * shim's raw syscalls run un-traced (env-gated at startup). */
+	char        *stat_shim_lib;
+	/* Host rootfs from -r, exposed to the shim via env. */
+	char        *rootfs;
 
 	/* openat2 how.resolve is preserved while the syscall is lowered to
 	 * openat, whose ABI has no equivalent resolve flag. Non-zero only

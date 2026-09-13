@@ -86,6 +86,12 @@ static ALWAYS_INLINE bool is_user_notif_sysnum(Sysnum value) {
     return value == PR_newfstatat || value == PR_fstatat64 || value == PR_statx;
 }
 
+/* --stat-shim: leave these path-stat syscalls un-traced so the preloaded shim
+ * can issue them raw in-process (no ptrace/USER_NOTIF round trip). */
+static ALWAYS_INLINE bool is_stat_shim_sysnum(Sysnum value) {
+    return value == PR_newfstatat || value == PR_fstatat64 || value == PR_statx;
+}
+
 /* ioctl 等按参数条件过滤的变体：只有 args[1] 匹配特定值才停靠，
  * 其余直通（nvim 等高频 ioctl 全部停靠会拖慢终端操作）。
  * 指令布局：JEQ nr 不匹配跳 SKIP；匹配则 LD args[1] 后逐个 JEQ+RET。
@@ -162,7 +168,7 @@ static ALWAYS_INLINE void free_program_filter(struct sock_fprog *restrict progra
 }
 
 static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
-                               bool user_notif, int *listener_fd) {
+                               bool user_notif, bool stat_shim, int *listener_fd) {
     SeccompArch archs[] = SECCOMP_ARCHS;
     size_t n_arch = sizeof(archs) / sizeof(SeccompArch);
     struct sock_fprog prog = { 0 };
@@ -180,6 +186,8 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
                 word_t sc = detranslate_sysnum(archs[i].abis[j], sysnums[k].value);
                 if (sc == SYSCALL_AVOIDER)
                     continue;
+                if (stat_shim && is_stat_shim_sysnum(sysnums[k].value))
+                    continue;
                 ++n_trace;
                 if (sysnums[k].value == PR_ioctl)
                     ioctl_extra += IOCTL_ARGS1_STMTS - 2; /* args1 版比普通版多出的指令 */
@@ -192,6 +200,8 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
             for (size_t k = 0; sysnums[k].value != PR_void; ++k) {
                 word_t sc = detranslate_sysnum(archs[i].abis[j], sysnums[k].value);
                 if (sc == SYSCALL_AVOIDER)
+                    continue;
+                if (stat_shim && is_stat_shim_sysnum(sysnums[k].value))
                     continue;
                 if (sysnums[k].value == PR_ioctl) {
                     /* 只对需要改写的 ioctl cmd 停靠（终端 termios2 兼容 + DRM），
@@ -422,7 +432,8 @@ int enable_syscall_filtering(const Tracee *restrict tracee) {
                 return ret;
         }
     }
-    ret = set_seccomp_filters(filtered, tracee->seccomp_notify, &listener);
+    ret = set_seccomp_filters(filtered, tracee->seccomp_notify,
+                              tracee->stat_shim_lib != NULL, &listener);
     if (ret < 0)
         return ret;
     if (tracee->seccomp_notify)

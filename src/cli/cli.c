@@ -347,6 +347,24 @@ int proot_main(int argc, char *const argv[]) {
     }
     status = parse_config(tracee, (size_t)argc, argv);
     if (UNLIKELY(status < 0)) goto error;
+    if (tracee->stat_shim_lib != NULL) {
+        /* The shim serves path stat in-process, so its raw syscalls must not
+         * be traced (set_seccomp_filters drops them). Pass the shim and the
+         * host rootfs to the guest through the environment: launch_process's
+         * child inherits environ via execvp. */
+        char preload[PATH_MAX * 2];
+        const char *old_preload = SAFE_GETENV("LD_PRELOAD");
+        if (old_preload != NULL && old_preload[0] != '\0')
+            snprintf(preload, sizeof preload, "%s %s", tracee->stat_shim_lib, old_preload);
+        else
+            snprintf(preload, sizeof preload, "%s", tracee->stat_shim_lib);
+        setenv("LD_PRELOAD", preload, 1);
+        if (tracee->rootfs != NULL)
+            setenv("NEOPROOT_STATSHIM_ROOTFS", tracee->rootfs, 1);
+        note(tracee, WARNING, USER,
+             "stat-shim: %s (rootfs=%s); newfstatat/statx/fstatat64 are NOT traced",
+             tracee->stat_shim_lib, tracee->rootfs != NULL ? tracee->rootfs : "");
+    }
     if (tracee->seccomp_notify) {
         int probe = probe_seccomp_user_notif();
         if (probe < 0) {

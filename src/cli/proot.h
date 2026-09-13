@@ -63,6 +63,7 @@ static int handle_option_ashmem_memfd(Tracee *, const Cli *, const char *);
 static int handle_option_sysvipc(Tracee *, const Cli *, const char *);
 static int handle_option_kill_on_exit(Tracee *, const Cli *, const char *);
 static int handle_option_seccomp_notify(Tracee *, const Cli *, const char *);
+static int handle_option_stat_shim(Tracee *, const Cli *, const char *);
 static int handle_option_L(Tracee *, const Cli *, const char *);
 static int handle_option_H(Tracee *, const Cli *, const char *);
 static int handle_option_p(Tracee *, const Cli *, const char *);
@@ -149,6 +150,16 @@ static Cli proot_cli = {
             .handler = handle_option_seccomp_notify,
             .description = "Opt-in seccomp USER_NOTIF (Linux 5.0+).",
             .detail = "Requires seccomp NEW_LISTENER. Without this option, kernel 4+ keeps ptrace TRACE. newfstatat/statx are emulated via USER_NOTIF (path translation, fake_id0, L2S nlink)."
+        },
+        {
+            .class = "Regular options",
+            .arguments = {
+                { .name = "--stat-shim", .separator = '=', .value = "lib" },
+                { .name = NULL, 0, NULL }
+            },
+            .handler = handle_option_stat_shim,
+            .description = "Opt-in in-process stat shim (experimental).",
+            .detail = "lib is the guest path of an LD_PRELOAD shim that serves path stat in-process. newfstatat/statx/fstatat64 are removed from the seccomp filter, so every guest process needs the shim. Speeds stat-heavy work; adds a per-exec library load."
         },
         {
             .class = "Regular options",
