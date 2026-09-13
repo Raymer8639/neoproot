@@ -407,3 +407,67 @@ int stat(const char *path, struct stat *st) {
 int lstat(const char *path, struct stat *st) {
     return fstatat(AT_FDCWD, path, st, AT_SYMLINK_NOFOLLOW);
 }
+
+/* glibc still uses the historical 64-bit symbol names from some internal
+ * filesystem/configuration code (notably i3 on a 64-bit guest).  Keep these
+ * entry points in the preload as well; otherwise that call can bypass the
+ * shim while the corresponding raw syscall is no longer tracer-translated. */
+int fstatat64(int dirfd, const char *path, struct stat64 *st, int flags) {
+    return fstatat(dirfd, path, (struct stat *)st, flags);
+}
+
+int stat64(const char *path, struct stat64 *st) {
+    return stat(path, (struct stat *)st);
+}
+
+int lstat64(const char *path, struct stat64 *st) {
+    return lstat(path, (struct stat *)st);
+}
+
+int fstat64(int fd, struct stat64 *st) {
+    return fstat(fd, (struct stat *)st);
+}
+
+/* Versioned glibc filesystem entry points.  Some applications call these
+ * symbols directly instead of the public stat/stat64 wrappers. */
+int __xstat(int version, const char *path, struct stat *st) {
+    (void)version;
+    return stat(path, st);
+}
+
+int __lxstat(int version, const char *path, struct stat *st) {
+    (void)version;
+    return lstat(path, st);
+}
+
+int __fxstat(int version, int fd, struct stat *st) {
+    (void)version;
+    return fstat(fd, st);
+}
+
+int __fxstatat(int version, int dirfd, const char *path,
+               struct stat *st, int flags) {
+    (void)version;
+    return fstatat(dirfd, path, st, flags);
+}
+
+int __xstat64(int version, const char *path, struct stat64 *st) {
+    (void)version;
+    return stat64(path, st);
+}
+
+int __lxstat64(int version, const char *path, struct stat64 *st) {
+    (void)version;
+    return lstat64(path, st);
+}
+
+int __fxstat64(int version, int fd, struct stat64 *st) {
+    (void)version;
+    return fstat64(fd, st);
+}
+
+int __fxstatat64(int version, int dirfd, const char *path,
+                 struct stat64 *st, int flags) {
+    (void)version;
+    return fstatat64(dirfd, path, st, flags);
+}

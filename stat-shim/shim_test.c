@@ -134,6 +134,21 @@ int main(void) {
         if (fd >= 0) close(fd);
     }
 
+    {   /* 9. the historical glibc *64 entry points hit the shim too.
+         *     A program built with -D_FILE_OFFSET_BITS=64 (e.g. i3) resolves
+         *     stat()/lstat() to stat64/lstat64, so interposing only the
+         *     public stat/lstat names lets that call bypass the shim and
+         *     issue an untranslated raw syscall (the "i3 cannot find its
+         *     config" regression).  These names are strong symbols in shim.c
+         *     and preempt libc's shared-library versions in this binary. */
+        struct stat64 s64;
+        CHECK(stat64("/bind/bar", &s64) == 0, "stat64(/bind/bar) via bind");
+        CHECK(S_ISREG(s64.st_mode), "  stat64 sees a regular file");
+        CHECK(lstat64("/foo", &s64) == 0, "lstat64(/foo) via rootfs");
+        CHECK(s64.st_uid == 4242 && s64.st_gid == 4343,
+              "  stat64/lstat64 uid/gid disguised");
+    }
+
     printf("%s (%d failure%s)\n", fails == 0 ? "PASS" : "FAIL",
            fails, fails == 1 ? "" : "s");
     return fails == 0 ? 0 : 1;

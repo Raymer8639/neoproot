@@ -122,6 +122,20 @@ build, `--seccomp-notify --link2symlink`), shim `4540d069`, 20000 iterations:
 | `/usr` `find -xdev -type f` | 36.11 s | 23.86 s | ~1.51x; 81419 paths, identical SHA256 |
 | 400 x `/bin/true` | 5.62 s | 6.27 s | -11.5% (preload tax) |
 
+Re-measured on the same device after the glibc-ABI fix (shim `f9a6e98a`,
+which interposes `stat64`/`lstat64`/`fstat64`/`fstatat64` and `__xstat*`):
+
+| Workload | OFF (traced) | ON (shim) | Notes |
+| --- | --- | --- | --- |
+| `du -As /usr` | 31.04 s | 16.88 s | ~1.84x; output hash identical |
+| `/usr` `find -xdev -type f` | 20.28 s | 17.83 s | 81419 paths, identical SHA256 |
+| `i3 -C ~/.config/i3/config` | exit 0 | exit 0 | config now found through the shim |
+
+The earlier `i3` "unable to find configuration file" regression was a glibc
+ABI gap: `stat()` is inlined to `__stat64`/`stat64` in the header, so the
+public-symbol-only preload never saw the call and the raw syscall went out
+untranslated. Covering the historical `*64`/`__*stat*` entry points fixes it.
+
 The per-process `LD_PRELOAD` cost shows up as a small regression on
 process-spawn-dominated workloads; the win dominates on anything that walks a
 file tree.
@@ -135,7 +149,7 @@ path is covered by the ON/OFF container A/B (`docs/stat-shim-exp/`).
 
 ## Limitations
 
-* `fstatat`/`fstatat64`/`statx` (`stat`, `lstat`) are accelerated; `fstat` is
+* `fstatat`/`fstatat64`/`statx` (`stat`, `lstat`) and glibc historical `stat64`/`__xstat*` entry points are accelerated; `fstat` is
   accelerated only when link2symlink is disabled (the CLI keeps it traced under
   L2S so fd-derived link metadata remains correct). `faccessat`/`faccessat2`
   and `statfs`/`statvfs` remain tracer-handled because their current translation
