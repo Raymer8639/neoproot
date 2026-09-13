@@ -21,6 +21,14 @@
   Release asset with a `SHA256SUMS` entry, and add `stat-shim/build.sh`,
   `stat-shim/shim_test.c` and `stat-shim/README.md`. Cache the last non-root
   bind prefix per thread to reduce repeated longest-prefix scans.
+- Cover the historical glibc stat ABI in the shim: `stat64`/`lstat64`/
+  `fstat64`/`fstatat64` and the versioned `__xstat*`/`__fxstatat*` entry points.
+  A guest built with `-D_FILE_OFFSET_BITS=64` resolves `stat()` to `stat64`, so
+  interposing only the public names let such a call bypass the shim and issue an
+  untranslated raw syscall (visible as i3 "unable to find the configuration
+  file" under `--stat-shim`). Device A/B: `du -As /usr` 31.04s -> 16.88s with an
+  identical output hash, `/usr` `find` unchanged at 81419 paths, L2S and
+  fake_id0 results identical ON/OFF.
 
 ## [v5.10.2] - 2026-09-12
 
