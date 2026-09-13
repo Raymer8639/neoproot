@@ -88,8 +88,10 @@ static ALWAYS_INLINE bool is_user_notif_sysnum(Sysnum value) {
 
 /* --stat-shim: leave these path-stat syscalls un-traced so the preloaded shim
  * can issue them raw in-process (no ptrace/USER_NOTIF round trip). */
-static ALWAYS_INLINE bool is_stat_shim_sysnum(Sysnum value) {
-    return value == PR_newfstatat || value == PR_fstatat64 || value == PR_statx;
+static ALWAYS_INLINE bool is_stat_shim_sysnum(Sysnum value, bool link2symlink) {
+    if (value == PR_newfstatat || value == PR_fstatat64 || value == PR_statx)
+        return true;
+    return !link2symlink && (value == PR_fstat || value == PR_fstat64);
 }
 
 /* ioctl 等按参数条件过滤的变体：只有 args[1] 匹配特定值才停靠，
@@ -118,6 +120,33 @@ static ALWAYS_INLINE int add_trace_syscall_args1(struct sock_fprog *restrict pro
     int ret = add_statements(program, idx, stmts);
     talloc_free(stmts);
     return ret;
+}
+
+/* --stat-shim overflow channel: route a stat syscall to USER_NOTIF only when
+ * the shim ORed NEOPROOT_STAT_SHIM_FLAG into its flags argument (args[1] is nr,
+ * args[2] path, args[arg_index] flags).  A is reloaded from nr both before and
+ * after, so the block is immune to the accumulator clobbering of the
+ * args1-filtered rules above it.  7 statements = 5 more than JEQ+RET:
+ *   LD nr ; JEQ nr,+5 ; LD args[i] ; AND mask ; JEQ mask,+1 ; RET NOTIF ; LD nr */
+static ALWAYS_INLINE int add_notif_syscall_flag(struct sock_fprog *restrict program,
+                                                word_t syscall, size_t arg_index,
+                                                uint32_t mask) {
+    if (UNLIKELY(syscall > UINT32_MAX || arg_index > 5))
+        return -ERANGE;
+    const size_t nr_off = offsetof(struct seccomp_data, nr);
+    if (UNLIKELY(nr_off > UINT32_MAX))
+        return -ERANGE;
+    const struct sock_filter stmts[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)nr_off),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)syscall, 0, 5),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 (uint32_t)offsetof(struct seccomp_data, args[arg_index])),
+        BPF_STMT(BPF_ALU | BPF_AND | BPF_K, mask),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, mask, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)nr_off),
+    };
+    return add_statements(program, sizeof(stmts)/sizeof(*stmts), stmts);
 }
 
 static ALWAYS_INLINE int end_arch_section(struct sock_fprog *restrict program,
@@ -168,7 +197,8 @@ static ALWAYS_INLINE void free_program_filter(struct sock_fprog *restrict progra
 }
 
 static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
-                               bool user_notif, bool stat_shim, int *listener_fd) {
+                               bool user_notif, bool stat_shim, bool link2symlink,
+                               int *listener_fd) {
     SeccompArch archs[] = SECCOMP_ARCHS;
     size_t n_arch = sizeof(archs) / sizeof(SeccompArch);
     struct sock_fprog prog = { 0 };
@@ -181,19 +211,31 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
     for (size_t i = 0; i < n_arch; ++i) {
         size_t n_trace = 0;
         size_t ioctl_extra = 0;
+        size_t stat_extra = 0;
         for (size_t j = 0; j < archs[i].nb_abis; ++j) {
             for (size_t k = 0; sysnums[k].value != PR_void; ++k) {
                 word_t sc = detranslate_sysnum(archs[i].abis[j], sysnums[k].value);
                 if (sc == SYSCALL_AVOIDER)
                     continue;
-                if (stat_shim && is_stat_shim_sysnum(sysnums[k].value))
+                if (stat_shim && is_stat_shim_sysnum(sysnums[k].value, link2symlink)) {
+                    /* --seccomp-notify keeps a flag-gated USER_NOTIF fallback for
+                     * L2S/fake_id0-correlated results; without it there is no
+                     * resolution channel and the syscall stays un-traced. */
+                    if (user_notif && (sysnums[k].value == PR_newfstatat
+                                       || sysnums[k].value == PR_fstatat64
+                                       || sysnums[k].value == PR_statx)) {
+                        ++n_trace;
+                        stat_extra += 7 - 2; /* add_notif_syscall_flag 指令数 */
+                    }
                     continue;
+                }
                 ++n_trace;
                 if (sysnums[k].value == PR_ioctl)
                     ioctl_extra += IOCTL_ARGS1_STMTS - 2; /* args1 版比普通版多出的指令 */
             }
         }
-        ret = start_arch_section(&prog, archs[i].value, n_trace, ioctl_extra);
+        ret = start_arch_section(&prog, archs[i].value, n_trace,
+                                 ioctl_extra + stat_extra);
         if (UNLIKELY(ret < 0))
             goto out;
         for (size_t j = 0; j < archs[i].nb_abis; ++j) {
@@ -201,8 +243,18 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
                 word_t sc = detranslate_sysnum(archs[i].abis[j], sysnums[k].value);
                 if (sc == SYSCALL_AVOIDER)
                     continue;
-                if (stat_shim && is_stat_shim_sysnum(sysnums[k].value))
+                if (stat_shim && is_stat_shim_sysnum(sysnums[k].value, link2symlink)) {
+                    if (user_notif && (sysnums[k].value == PR_newfstatat
+                                       || sysnums[k].value == PR_fstatat64
+                                       || sysnums[k].value == PR_statx)) {
+                        size_t arg_index = (sysnums[k].value == PR_statx) ? 2 : 3;
+                        ret = add_notif_syscall_flag(&prog, sc, arg_index,
+                                                     NEOPROOT_STAT_SHIM_FLAG);
+                        if (UNLIKELY(ret < 0))
+                            goto out;
+                    }
                     continue;
+                }
                 if (sysnums[k].value == PR_ioctl) {
                     /* 只对需要改写的 ioctl cmd 停靠（终端 termios2 兼容 + DRM），
                      * 其余 ioctl 直通——nvim 等高频终端 ioctl 不再每次 ptrace 停靠 */
@@ -226,7 +278,7 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
                     goto out;
             }
         }
-        ret = end_arch_section(&prog, n_trace, ioctl_extra);
+        ret = end_arch_section(&prog, n_trace, ioctl_extra + stat_extra);
         if (UNLIKELY(ret < 0))
             goto out;
     }
@@ -433,7 +485,9 @@ int enable_syscall_filtering(const Tracee *restrict tracee) {
         }
     }
     ret = set_seccomp_filters(filtered, tracee->seccomp_notify,
-                              tracee->stat_shim_lib != NULL, &listener);
+                              tracee->stat_shim_lib != NULL,
+                              get_extension((Tracee *)tracee, link2symlink_callback) != NULL,
+                              &listener);
     if (ret < 0)
         return ret;
     if (tracee->seccomp_notify)

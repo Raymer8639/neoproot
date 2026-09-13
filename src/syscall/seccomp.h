@@ -21,6 +21,14 @@ typedef struct {
 
 #define FILTER_SYSEXIT  0x1
 
+/* --stat-shim: sentinel bit the preloaded shim ORs into the flags argument of
+ * newfstatat/fstatat64/statx when it needs the tracer to resolve a result that
+ * involves link2symlink/fake_id0 state it cannot reproduce in-process.  The BPF
+ * filter routes only calls carrying this bit to USER_NOTIF; all other stat
+ * calls made by the shim stay un-traced.  Must match stat-shim/shim.c
+ * (NEOPROOT_STAT_SHIM_FLAG). */
+#define NEOPROOT_STAT_SHIM_FLAG 0x40000000u
+
 extern int enable_syscall_filtering(const Tracee *tracee);
 /* Implemented in seccomp_notify.c. 0 if NEW_LISTENER+USER_NOTIF can be
  * installed; -errno otherwise. Uses a throwaway child so the tracer is

@@ -32,6 +32,7 @@ On **ARM64 Linux** (not Termux), download `neoproot` or the lower-instruction-se
 - link2symlink hard-link emulation works with pnpm and TypeScript/tsgo workflows that probe real paths through `/proc/<pid>/fd/<fd>`.
 - High-frequency path operations avoid the fork's removed translation-thread-pool overhead, keeping nvim and package-manager workflows responsive.
 - Optional `--seccomp-notify` (Linux 5.0+) emulates `newfstatat` via seccomp USER_NOTIF so directory metadata scans skip a ptrace stop. Kernel 4+ without the flag is unchanged.
+- Optional `--stat-shim=<guest-lib>` preloads a guest-ABI `LD_PRELOAD` library that resolves `stat`/`lstat`/`statx` in-process (bind translation and fake_id0), keeping link2symlink results exact through a flag-gated USER_NOTIF fallback. Off by default. See [stat-shim/README.md](stat-shim/README.md).
 - Built-in high-priority scheduling (`setpriority(-20)`) improves CPU availability without root access.
 - Fixes include Chinese VNC exit hangs, logout/background-switch issues, and the misleading `signal 11` exit warning.
 - The codebase uses a lean C23/C++23 implementation tuned for ARMv8.2, trading generic architecture coverage for ARM64 performance.

@@ -348,6 +348,18 @@ int proot_main(int argc, char *const argv[]) {
     }
     status = parse_config(tracee, (size_t)argc, argv);
     if (UNLIKELY(status < 0)) goto error;
+    if (tracee->stat_shim_lib != NULL
+        && get_extension(tracee, link2symlink_callback) != NULL
+        && !tracee->seccomp_notify) {
+        /* L2S result disguise needs to read real symlink chains, which the shim
+         * cannot do in-process (the tracer also intercepts readlink).  The
+         * flag-gated USER_NOTIF fallback is the only correct path, so refuse to
+         * run the shim rather than hand back wrong link types/nlink. */
+        note(tracee, WARNING, USER,
+             "stat-shim: --link2symlink requires --seccomp-notify for L2S "
+             "result disguise; --stat-shim disabled");
+        tracee->stat_shim_lib = NULL;
+    }
     if (tracee->stat_shim_lib != NULL) {
         /* The shim serves path stat in-process, so its raw syscalls must not
          * be traced (set_seccomp_filters drops them). Hand it, through the
@@ -403,6 +415,10 @@ int proot_main(int argc, char *const argv[]) {
 
         if (get_extension(tracee, link2symlink_callback) != NULL)
             setenv("NEOPROOT_STATSHIM_L2S", "1", 1);
+        /* Tell the shim that the flag-gated USER_NOTIF fallback is available for
+         * L2S-correlated results. */
+        if (tracee->seccomp_notify)
+            setenv("NEOPROOT_STATSHIM_NOTIF", "1", 1);
 
         note(tracee, WARNING, USER,
              "stat-shim: %s (rootfs=%s); newfstatat/statx/fstatat64 are NOT traced",

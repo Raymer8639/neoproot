@@ -3,6 +3,25 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [Unreleased]
+
+**Optional `--stat-shim` in-process path-stat fast path**
+
+- Add `--stat-shim=<guest-lib>`: removes `newfstatat`/`fstatat64`/`statx`
+  from the seccomp filter and `LD_PRELOAD`s a guest-ABI library that performs
+  bind translation and fake_id0 in-process. Add a link2symlink-safe raw `fstat`
+  fast path (disabled while L2S is active). On the reference device
+  `du -As /usr` drops ~1.8x and a dirfd-relative `fstatat` ~70x.
+- link2symlink results stay exact: the BPF routes a stat to USER_NOTIF only
+  when the shim ORs the sentinel `NEOPROOT_STAT_SHIM_FLAG` (`0x40000000`) into
+  its flags, so only symlink / `.l2s.*` cases pay the tracer round trip.
+  `--link2symlink` without `--seccomp-notify` refuses `--stat-shim` instead of
+  returning wrong link types or counts.
+- Ship `stat-shim/libstatfast.so` (built on the aarch64 glibc CI runner) as a
+  Release asset with a `SHA256SUMS` entry, and add `stat-shim/build.sh`,
+  `stat-shim/shim_test.c` and `stat-shim/README.md`. Cache the last non-root
+  bind prefix per thread to reduce repeated longest-prefix scans.
+
 ## [v5.10.2] - 2026-09-12
 
 **Keep Git object-store files as real regular files under `--link2symlink`**
