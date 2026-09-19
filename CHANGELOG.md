@@ -5,6 +5,39 @@
 
 ## [Unreleased]
 
+## [v5.10.6] - 2026-09-19
+
+**Keep the guest `LD_PRELOAD` off the tracer**
+
+- Apply the `--stat-shim` preload only in the forked child, right before
+  `execvp`, and clear it before the sysvipc shm-helper re-execs the tracer.
+  Putting the guest-ABI path into the tracer's own environment made Android's
+  bionic linker resolve it on the next host `execl("/proc/self/exe")`, so `i3`
+  died with `CANNOT LINK EXECUTABLE "neoproot": library
+  ".../libstatfast.so" not found: needed by main executable`.
+
+**Translate the paths the in-process fast path cannot resolve**
+
+- Send a relative name at `AT_FDCWD` (the tracee's cwd is virtual) and any
+  stat whose raw host call fails (a component may be a symlink to a guest
+  absolute path, e.g. `fnm_multishells/<id> -> /home/...`) back through the
+  tracer's USER_NOTIF channel. Before this, `ls -al` printed the host mode of
+  the bind source and fnm/Node paths failed with ENOENT.
+- Interpose libc's variadic `syscall()` so code that issues `statx` itself
+  (libuv does, for `uv_fs_stat`) is translated as well; the shim's own raw
+  calls go through `dlsym(RTLD_NEXT, "syscall")` so they cannot recurse.
+- `--stat-shim` now requires `--seccomp-notify` unconditionally. Without that
+  channel the stat syscalls stay untraced and both cases above would silently
+  return host-resolved results, so the shim is refused with a warning.
+
+Device A/B (aarch64 Termux host, glibc guest): ON/OFF `find` over
+`/usr/share/doc` byte-identical (5723 paths), `dsh --version` = `0.1.5-rc.1`,
+`i3 -C` clean. Microbenchmark (3000 calls, us/op): absolute `stat` 343.6 ->
+11.8, dirfd-relative 122.9 -> 8.0, `du`/`find` still 1.08-1.62x faster than
+without the shim. The only change is that `AT_FDCWD`-relative stats now take a
+round trip (103 vs 110.6, no worse than the traced baseline) instead of
+returning wrong results in 7.7.
+
 **Optional `--stat-shim` in-process path-stat fast path**
 
 - Add `--stat-shim=<guest-lib>`: removes `newfstatat`/`fstatat64`/`statx`
