@@ -16,9 +16,13 @@ tens of microseconds per call.
 
 When `--stat-shim=<lib>` is given, neoproot removes those syscalls from its
 seccomp filter entirely (so the shim's raw syscalls are never traced) and
-injects the library with `LD_PRELOAD`. The result is a large speed-up for
-`stat`-heavy work such as `du`, `find`, `tar`, `git status`, and file-tree
-walking in general.
+injects the library with `LD_PRELOAD` **only in the first guest process**
+(after `fork`, before `execvp`). The tracer itself must not carry that
+variable: it is a Termux/bionic binary, and a later host re-exec (sysvipc
+shm-helper's `execl("/proc/self/exe")`) would make Android's linker look up
+the guest-ABI path and abort with `CANNOT LINK EXECUTABLE "neoproot"`. The
+result is a large speed-up for `stat`-heavy work such as `du`, `find`,
+`tar`, `git status`, and file-tree walking in general.
 
 link2symlink (L2S) result disguise needs the real symlink chain, which the
 tracer also intercepts, so it cannot be reproduced in-process. Instead the
@@ -154,10 +158,20 @@ path is covered by the ON/OFF container A/B (`docs/stat-shim-exp/`).
   L2S so fd-derived link metadata remains correct). `faccessat`/`faccessat2`
   and `statfs`/`statvfs` remain tracer-handled because their current translation
   and compatibility paths need further semantic and live-kernel validation.
-* A guest program that issues the raw syscall **without** libc (e.g. its own
-  `syscall(SYS_newfstatat, ...)`) bypasses the preload; with `--stat-shim` those
-  syscalls are not traced either, so such a call is not translated. Practically
-  all software uses libc, which the shim interposes.
+* The shim interposes both the public entry points and libc's variadic
+  `syscall()` (libuv issues `statx` through it), so software that calls the stat
+  syscalls itself is translated too. Only code that traps into the kernel
+  without libc at all (a hand-written `svc` stub) can bypass the preload; such a
+  call is not traced either, because `--stat-shim` removes those syscalls from
+  the seccomp filter.
+* Two shapes of path need the tracer rather than the local fast path, and are
+  re-issued through the flag-gated USER_NOTIF channel: a relative name at
+  `AT_FDCWD` (the guest cwd is virtual) and any path whose raw host resolution
+  fails because a component is a symlink to a guest absolute path (fnm stores
+  `fnm_multishells/<id> -> /home/...`). Both therefore require
+  `--seccomp-notify`; without that channel the shim falls back to the guest cwd
+  reported by `getcwd()` and to the raw result, and such paths can stay
+  untranslated.
 * The bind table is a snapshot taken at launch. The shim caches the last non-root bind prefix per thread, so repeated stats within one bind avoid the full prefix scan.
 * The sentinel bit `0x40000000` must stay free in the `AT_*` flag space; the
   kernel never sees it (the tracer clears it before emulating and never
