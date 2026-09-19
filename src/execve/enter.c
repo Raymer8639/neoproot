@@ -564,6 +564,25 @@ int translate_execve_enter(Tracee *tr)
 	if (UNLIKELY(!loader))
 		return -ENOENT;
 
+	/* --stat-shim: the shim and its configuration must reach every guest exec.
+	 * A setuid launcher (sudo) or any other environment sanitiser drops both,
+	 * and since --stat-shim leaves the stat syscalls untraced such a process
+	 * would resolve guest paths in the host namespace.  Host (bionic) binaries
+	 * must not get the guest-ABI preload. */
+	if (tr->stat_shim_lib != NULL && !is_host_elf(tr, host)) {
+		ArrayOfXPointers *env;
+
+		ret = fetch_array_of_xpointers(tr, &env, SYSARG_3, 0);
+		if (UNLIKELY(ret < 0))
+			return ret;
+		ret = ldso_inject_stat_shim_env(tr, env);
+		if (LIKELY(ret >= 0))
+			ret = push_array_of_xpointers(env, SYSARG_3);
+		talloc_unlink(tr, env);
+		if (UNLIKELY(ret < 0))
+			return ret;
+	}
+
 	ret = set_sysarg_path(tr, loader, SYSARG_1);
 	return ret;
 }

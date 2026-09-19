@@ -13,6 +13,8 @@ extern int ldso_env_passthru(const Tracee *tracee, ArrayOfXPointers *envp, Array
 extern int rebuild_host_ldso_paths(Tracee *tracee, const char t_program[PATH_MAX],
 				ArrayOfXPointers *envp);
 
+extern int ldso_inject_stat_shim_env(const Tracee *tracee, ArrayOfXPointers *envp);
+
 extern int compare_xpointee_env(ArrayOfXPointers *envp, size_t index, const char *name);
 
 extern bool is_env_name(const char *variable, const char *name);
