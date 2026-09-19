@@ -354,8 +354,15 @@ int new_child(Tracee *parent, word_t clone_flags) {
     child->verbose    = parent->verbose;
     child->seccomp    = parent->seccomp;
     child->seccomp_notify = parent->seccomp_notify;
-    child->stat_shim_lib = parent->stat_shim_lib;
-    child->rootfs = parent->rootfs;
+    /* Deep copies on the child's own life context: the two strings belong to
+     * whichever tracee parsed them and must outlive every get_tracee() ctx
+     * reset (and the parent itself). */
+    TALLOC_FREE(child->stat_shim_lib);
+    TALLOC_FREE(child->rootfs);
+    child->stat_shim_lib = parent->stat_shim_lib != NULL
+        ? talloc_strdup(child->life_context, parent->stat_shim_lib) : NULL;
+    child->rootfs = parent->rootfs != NULL
+        ? talloc_strdup(child->life_context, parent->rootfs) : NULL;
     child->sysexit_pending = parent->sysexit_pending;
     child->no_new_privs = parent->no_new_privs;
     child->seen_execve = parent->seen_execve;

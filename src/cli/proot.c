@@ -45,7 +45,10 @@ static int handle_option_r(Tracee *restrict t, const Cli *restrict c, const char
     Binding *b = new_binding(t, val, "/", true);
     if (b == NULL)
         return -1;
-    t->rootfs = talloc_strdup(t->ctx, val);
+    /* life_context, not ctx: get_tracee() frees and recreates ctx on every
+     * cache miss (i.e. at the first stop after parsing), which would turn this
+     * string into a dangling pointer reused by unrelated allocations. */
+    t->rootfs = talloc_strdup(t->life_context, val);
     return t->rootfs ? 0 : -1;
 }
 
@@ -133,7 +136,8 @@ static int handle_option_stat_shim(Tracee *restrict t, const Cli *restrict c, co
         note(t, ERROR, USER, "--stat-shim requires a guest path to the shim library");
         return -1;
     }
-    t->stat_shim_lib = talloc_strdup(t->ctx, val);
+    /* life_context, not ctx: see handle_option_r. */
+    t->stat_shim_lib = talloc_strdup(t->life_context, val);
     return t->stat_shim_lib != NULL ? 0 : -1;
 }
 
