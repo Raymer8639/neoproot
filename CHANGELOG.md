@@ -3,6 +3,42 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.10.8] - 2026-09-19
+
+**Handle `fchmodat2`, and stop hard-coding the `/proc` comparison**
+
+- Register `fchmodat2` (ARM64 452, Linux 6.6+) everywhere `fchmodat` already was:
+  `sysnums.list`, the aarch64 syscall table, the seccomp filter and the
+  path-translation switch. Without it a kernel that implements the syscall would
+  run guest calls with an untranslated path -- silently `ENOENT` for guest paths,
+  or acting on a host path that happens to exist. Ported from upstream
+  `ea1551f2`, except that the flags are read from `SYSARG_4`: upstream reads
+  `SYSARG_3`, which is the *mode* (a mode such as `0600` already carries the
+  `AT_SYMLINK_NOFOLLOW` bit), so upstream would almost always take the symlink
+  branch by accident. Not verifiable on the maintainer's device: Android's own
+  seccomp policy answers syscall 452 with `SECCOMP_RET_TRACE` (an event reaches
+  the tracer even with this filter entry removed) and the kernel does not
+  implement it either, so calls still end in `ENOSYS`; the filter entry itself is
+  confirmed emitted (`sc=452 name=fchmodat2`).
+- `readlink_proc2()` passed a hard-coded `PATH1_IS_PREFIX` to `readlink_proc()`.
+  For a direct child of `/proc` the base *is* `/proc` rather than a strict
+  subpath of it -- `/proc/self`, `/proc/thread-self`, and `/proc/device-tree` on
+  ARM, whose target is absolute -- and the wrong comparison sends that case down
+  the wrong branch. Compute `compare_paths("/proc", base)` instead (upstream
+  `59410ba6`).
+
+**Keep the release job honest about its own assets**
+
+- The tag job now checks out the repository, ships `scripts/install.sh` as a
+  release asset, and prepends the install block to the generated notes. Updating
+  a release needs `PATCH /releases/{id}`; the previous revision patched
+  `/releases/tags/{tag}`, which is a 404, and failed the `v5.10.7` run after a
+  successful publish. The step retries the by-tag lookup, patches by id, skips
+  itself when the block is already there, and downgrades any remaining failure to
+  a warning instead of failing a published release.
+- `scripts/install.sh` no longer clobbers the caller's workdir variable, which
+  had made the `EXIT` trap clean the wrong path and leak the download directory
+  on every Linux install.
 ## [v5.10.7] - 2026-09-19
 
 **Install in one command**
