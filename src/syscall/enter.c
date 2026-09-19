@@ -2633,6 +2633,7 @@ int translate_syscall_enter(Tracee *tracee)
 
     /* 写操作：先做 ro bind 只读检查 */
     case PR_fchmodat:
+    case PR_fchmodat2:
     case PR_futimesat:
     case PR_mknodat:
         dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
@@ -2644,7 +2645,15 @@ int translate_syscall_enter(Tracee *tracee)
         if (status < 0)
             break;
 
-        status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
+        /* fchmodat2(dfd, path, mode, flags)：flags 在第 4 个参数。上游补丁读的是
+         * SYSARG_3（那是 mode），几乎总被误判成 AT_SYMLINK_NOFOLLOW。 */
+        flags = (syscall_number == PR_fchmodat2)
+            ? peek_reg(tracee, CURRENT, SYSARG_4)
+            : 0;
+        if ((flags & AT_SYMLINK_NOFOLLOW) != 0)
+            status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
+        else
+            status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
         break;
 
     case PR_inotify_add_watch:
