@@ -348,16 +348,20 @@ int proot_main(int argc, char *const argv[]) {
     }
     status = parse_config(tracee, (size_t)argc, argv);
     if (UNLIKELY(status < 0)) goto error;
-    if (tracee->stat_shim_lib != NULL
-        && get_extension(tracee, link2symlink_callback) != NULL
-        && !tracee->seccomp_notify) {
-        /* L2S result disguise needs to read real symlink chains, which the shim
-         * cannot do in-process (the tracer also intercepts readlink).  The
-         * flag-gated USER_NOTIF fallback is the only correct path, so refuse to
-         * run the shim rather than hand back wrong link types/nlink. */
+    if (tracee->stat_shim_lib != NULL && !tracee->seccomp_notify) {
+        /* The in-process shim cannot reproduce three things by itself:
+         * relative names at AT_FDCWD (the tracee's cwd is virtual), a path
+         * whose components are symlinks to guest absolute paths (the host
+         * kernel would resolve the target in the host namespace), and the
+         * link2symlink result disguise.  All three are re-issued to the
+         * tracer through the flag-gated USER_NOTIF channel that
+         * --seccomp-notify installs.  Without that channel the stat syscalls
+         * stay untraced, so those paths would silently return host-resolved
+         * results; refuse to run the shim instead. */
         note(tracee, WARNING, USER,
-             "stat-shim: --link2symlink requires --seccomp-notify for L2S "
-             "result disguise; --stat-shim disabled");
+             "stat-shim: --seccomp-notify is required (relative paths, "
+             "guest absolute symlinks and L2S disguise fall back to the "
+             "tracer's USER_NOTIF channel); --stat-shim disabled");
         tracee->stat_shim_lib = NULL;
     }
     if (tracee->stat_shim_lib != NULL) {
