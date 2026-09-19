@@ -97,22 +97,25 @@ check_arch() {
 }
 
 install_binary() { # install_binary NEW_BINARY PREFIX
-	src=$1
-	prefix=$2
-	[ -n "$prefix" ] || die "empty install prefix"
-	bindir=$prefix/bin
-	mkdir -p "$bindir" || die "cannot create $bindir"
-	target=$bindir/neoproot
-	if [ -e "$target" ]; then
-		backup=$target.prev-$(date +%Y%m%d-%H%M%S)
-		cp -a "$target" "$backup"
-		log "previous binary kept as $backup"
+	# Every variable here is prefixed: POSIX sh has no locals, and clobbering the
+	# caller's workdir would make the EXIT trap clean up the wrong path (leaking
+	# the download/build directory).
+	bin_src=$1
+	bin_prefix=$2
+	[ -n "$bin_prefix" ] || die "empty install prefix"
+	bin_dir=$bin_prefix/bin
+	mkdir -p "$bin_dir" || die "cannot create $bin_dir"
+	bin_target=$bin_dir/neoproot
+	if [ -e "$bin_target" ]; then
+		bin_backup=$bin_target.prev-$(date +%Y%m%d-%H%M%S)
+		cp -a "$bin_target" "$bin_backup"
+		log "previous binary kept as $bin_backup"
 	fi
-	tmp=$bindir/.neoproot.new.$$
-	cp "$src" "$tmp" && chmod 755 "$tmp" && mv -f "$tmp" "$target" \
-		|| die "cannot install into $bindir"
-	log "installed $target"
-	"$target" --version 2>/dev/null || warn "installed binary did not report a version"
+	bin_stage=$bin_dir/.neoproot.new.$$
+	cp "$bin_src" "$bin_stage" && chmod 755 "$bin_stage" && mv -f "$bin_stage" "$bin_target" \
+		|| die "cannot install into $bin_dir"
+	log "installed $bin_target"
+	"$bin_target" --version 2>/dev/null || warn "installed binary did not report a version"
 }
 
 next_steps() {
@@ -170,36 +173,36 @@ if [ "$MODE" = "termux" ]; then
 		pkg install -y $missing >/dev/null 2>&1 \
 			|| die "pkg install failed; run 'pkg update' and try again"
 	fi
-	src=$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/neoproot-build.XXXXXX")
-	trap 'rm -rf "$src"' EXIT INT TERM
+	workdir=$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/neoproot-build.XXXXXX")
+	trap 'rm -rf "$workdir"' EXIT INT TERM
 	log "cloning $REPO at $tag"
-	git clone --quiet --depth 1 --branch "$tag" "https://github.com/$REPO.git" "$src/repo" \
+	git clone --quiet --depth 1 --branch "$tag" "https://github.com/$REPO.git" "$workdir/repo" \
 		|| die "git clone failed"
 	LOG=${TMPDIR:-$PREFIX/tmp}/neoproot-build.log
 	log "compiling (a few minutes on a phone; log: $LOG)"
-	if ! ( cd "$src/repo" && sh build.sh ) >"$LOG" 2>&1; then
+	if ! ( cd "$workdir/repo" && sh build.sh ) >"$LOG" 2>&1; then
 		tail -n 20 "$LOG" >&2
 		die "build failed, full log in $LOG"
 	fi
 	[ -n "$PREFIX_DIR" ] || PREFIX_DIR=${PREFIX:-}
-	install_binary "$src/repo/src/neoproot" "$PREFIX_DIR"
+	install_binary "$workdir/repo/src/neoproot" "$PREFIX_DIR"
 else
 	check_arch
 	tag=$(resolve_tag)
 	asset=neoproot
 	[ "$PORTABLE" = 1 ] && asset=neoproot-portable
 	base="https://github.com/$REPO/releases/download/$tag"
-	tmp=$(mktemp -d "${TMPDIR:-/tmp}/neoproot-install.XXXXXX")
-	trap 'rm -rf "$tmp"' EXIT INT TERM
+	workdir=$(mktemp -d "${TMPDIR:-/tmp}/neoproot-install.XXXXXX")
+	trap 'rm -rf "$workdir"' EXIT INT TERM
 	log "downloading $asset $tag"
-	fetch "$base/$asset" "$tmp/$asset" || die "download failed"
-	fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" || die "could not download SHA256SUMS"
-	grep -q " $asset\$" "$tmp/SHA256SUMS" \
+	fetch "$base/$asset" "$workdir/$asset" || die "download failed"
+	fetch "$base/SHA256SUMS" "$workdir/SHA256SUMS" || die "could not download SHA256SUMS"
+	grep -q " $asset\$" "$workdir/SHA256SUMS" \
 		|| die "$tag does not publish $asset (try --portable or another --version)"
-	( cd "$tmp" && grep " $asset\$" SHA256SUMS > selected.sum && sha256sum -c selected.sum ) \
+	( cd "$workdir" && grep " $asset\$" SHA256SUMS > selected.sum && sha256sum -c selected.sum ) \
 		|| die "checksum verification failed"
 	[ -n "$PREFIX_DIR" ] || PREFIX_DIR=${HOME:?}/.local
-	install_binary "$tmp/$asset" "$PREFIX_DIR"
+	install_binary "$workdir/$asset" "$PREFIX_DIR"
 fi
 
 next_steps
