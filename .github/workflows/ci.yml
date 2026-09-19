@@ -136,15 +136,15 @@ jobs:
           files: dist/*
           generate_release_notes: true
       # Put the install one-liner above the generated notes, so the release page
-      # answers "how do I install this" before it lists the merged PRs. Runs
-      # after the release exists, hence the PATCH.
+      # answers "how do I install this" before it lists the merged PRs. Everything
+      # happens in one python block: the API needs the release *id* for the PATCH
+      # (PATCHing /releases/tags/<tag> is a 404), the by-tag lookup can lag a second
+      # or two behind creation, and a failure here must never fail a published
+      # release, so it retries and then gives up with a warning.
       - name: Prepend install instructions to the release notes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -eu
-          tag="$GITHUB_REF_NAME"
-          body=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .body)
           header=$(cat <<'HEADER'
           ## Install (one command)
 
@@ -159,12 +159,46 @@ jobs:
           `sh build.sh install` from the source tarball.
 
           ---
-
           HEADER
           )
-          header=${header//__REPO__/$GITHUB_REPOSITORY}
-          # Command substitution strips trailing newlines, so add the separator
-          # explicitly instead of relying on the blank lines in the heredoc.
-          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
-            -f body="$(printf '%s\n\n%s' "$header" "$body")" >/dev/null
-          echo "release notes updated for $tag"
+          export RELEASE_HEADER=${header//__REPO__/$GITHUB_REPOSITORY}
+          export RELEASE_TAG=$GITHUB_REF_NAME
+          export RELEASE_API=https://api.github.com/repos/$GITHUB_REPOSITORY/releases
+          python3 <<'PY'
+          import json, os, time, urllib.error, urllib.request
+
+          api = os.environ['RELEASE_API']
+          tag = os.environ['RELEASE_TAG']
+          header = os.environ['RELEASE_HEADER']
+
+          def call(url, data=None, method='GET'):
+              req = urllib.request.Request(url, data=data, method=method, headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Accept': 'application/vnd.github+json',
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'neoproot-release-notes',
+              })
+              with urllib.request.urlopen(req) as r:
+                  return json.load(r)
+
+          release = None
+          for attempt in range(1, 11):
+              try:
+                  release = call('%s/tags/%s' % (api, tag))
+                  break
+              except urllib.error.HTTPError as exc:
+                  print('release %s not visible through the API yet (attempt %d): %s' % (tag, attempt, exc))
+                  time.sleep(3)
+          if release is None:
+              print('::warning::could not read release %s; leaving the generated notes as they are' % tag)
+              raise SystemExit(0)
+
+          body = release.get('body') or ''
+          if body.lstrip().startswith('## Install (one command)'):
+              print('install block already present for %s' % tag)
+              raise SystemExit(0)
+
+          payload = json.dumps({'body': header + '\n' + body}).encode()
+          call('%s/%d' % (api, release['id']), payload, 'PATCH')
+          print('release notes updated for %s' % tag)
+          PY
