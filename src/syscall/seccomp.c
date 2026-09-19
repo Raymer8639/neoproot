@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include <assert.h>
 #include <stdbool.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/syscall.h>
 
@@ -42,6 +43,19 @@ static_assert(offsetof(struct seccomp_data, nr) < UINT32_MAX, "nr offset too lar
 
 /* ioctl args1 过滤版指令数（1 JEQ nr + 1 LD args1 + 6 对 JEQ+RET = 14） */
 #define IOCTL_ARGS1_STMTS 16
+
+/* fcntl 的 args1（命令）白名单：只有 fd 复制类命令需要 tracer —— exit.c 在
+ * 它们上面重定位 proc-fd 路径缓存，kompat 的 F_DUPFD_CLOEXEC 模拟也需要
+ * enter/exit 两次停靠；F_GETFL/F_SETFD 在 du/find 遍历里每个目录各来一次，
+ * 没有任何处理器会看它们。args1 版指令数 = 1 JEQ nr + 1 LD args1 + 2*n。 */
+static const uint32_t fcntl_traced_cmds[] = {
+    F_DUPFD,
+#ifdef F_DUPFD_CLOEXEC
+    F_DUPFD_CLOEXEC,
+#endif
+};
+#define FCNTL_ARGS1_STMTS \
+    (2 + 2 * (sizeof fcntl_traced_cmds / sizeof fcntl_traced_cmds[0]))
 
 static ALWAYS_INLINE int new_program_filter(struct sock_fprog *restrict program) {
     program->filter = talloc_array(NULL, struct sock_filter, 0);
@@ -232,6 +246,8 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
                 ++n_trace;
                 if (sysnums[k].value == PR_ioctl)
                     ioctl_extra += IOCTL_ARGS1_STMTS - 2; /* args1 版比普通版多出的指令 */
+                else if (sysnums[k].value == PR_fcntl || sysnums[k].value == PR_fcntl64)
+                    ioctl_extra += FCNTL_ARGS1_STMTS - 2; /* fcntl 同样按命令参数过滤 */
             }
         }
         ret = start_arch_section(&prog, archs[i].value, n_trace,
@@ -269,6 +285,13 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
                     };
                     ret = add_trace_syscall_args1(&prog, sc, sysnums[k].flags,
                                                   ioctl_cmds, 7);
+                } else if (sysnums[k].value == PR_fcntl
+                           || sysnums[k].value == PR_fcntl64) {
+                    /* See fcntl_traced_cmds: only fd duplication needs this. */
+                    ret = add_trace_syscall_args1(&prog, sc, sysnums[k].flags,
+                                                  fcntl_traced_cmds,
+                                                  sizeof fcntl_traced_cmds
+                                                      / sizeof fcntl_traced_cmds[0]);
                 } else if (user_notif && is_user_notif_sysnum(sysnums[k].value)) {
                     ret = add_syscall_ret(&prog, sc, SECCOMP_RET_USER_NOTIF);
                 } else {
