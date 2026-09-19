@@ -5,6 +5,27 @@
 
 ## [Unreleased]
 
+**Correct the performance baseline quoted for `--stat-shim`**
+
+- The v5.10.6 entry below compared the shim against `--seccomp-notify` without
+  the shim, not against the plain tracer path. Re-measured against a
+  no-notify/no-shim baseline on the same device: `du -As /usr` 33.28s ->
+  14.37s (**2.32x**, identical output `4007438`), while `--seccomp-notify`
+  alone reaches only 31.15s (1.07x). On a small tree (1220 entries) the shim is
+  ~1.05x and notify-only is 1.8x *slower* than the plain path, because
+  `notif_can_continue_fstatat()` refuses `SECCOMP_USER_NOTIF_FLAG_CONTINUE`
+  whenever link2symlink or fake_id0 is active, so every stat is fully
+  emulated.
+- Per-call cost (2000 calls, us/op, plain / notify / shim): absolute `stat`
+  288.7 / 96.6 / 8.1, dirfd-relative 308.5 / 114.4 / 4.4, `AT_FDCWD`-relative
+  203.8 / 90.9 / 92.9, direct `syscall(SYS_statx)` 324.5 / 106.5 / 10.4. The
+  in-process shim is the optimisation; `--seccomp-notify` is the channel its
+  fallbacks need.
+- No effect on compilation: an 80-file `cc -O0` build takes 18.23 / 18.45 /
+  18.30s, `-O2` 18.99 / 19.12 / 19.29s, and `cc -M` 13.7 / 14.5 / 14.3s across
+  the three modes. Builds are bound by process startup, parsing/codegen CPU and
+  header I/O, not by the stat syscalls the shim accelerates.
+
 ## [v5.10.6] - 2026-09-19
 
 **Keep the guest `LD_PRELOAD` off the tracer**
