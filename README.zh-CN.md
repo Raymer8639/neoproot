@@ -11,12 +11,20 @@ GitHub Release 资产是 **ARM64 Linux（glibc）** CI 产物。Termux 必须用
 ![语言](https://img.shields.io/badge/C%2FC%2B%2B-C23%20%2F%20C%2B%2B23-orange)
 ![许可证](https://img.shields.io/badge/license-GPLv2-green)
 
-## 在 Termux 中开始
+## 安装（一条命令）
+
+```sh
+curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/install.sh | sh
+```
+
+脚本会自动识别平台：在 **Termux** 上安装编译依赖，用对应 tag 的源码编译出 bionic 二进制，备份旧二进制后装进 `$PREFIX/bin`；在 **ARM64 Linux** 上下载 release 二进制、用 `SHA256SUMS` 校验后放进 `PATH`。它**不会**改动正在运行的容器 rootfs。不放心管道执行可以先看 [scripts/install.sh](scripts/install.sh)，`sh scripts/install.sh --help` 可看 `--version`、`--prefix`、`--portable` 参数。
+
+## 在 Termux 中手动编译
 
 务必在 Termux 宿主上编译。Linux CI / Release 文件不能当 Termux 的 Android 二进制用。
 
 ```sh
-pkg install clang make llvm binutils pkg-config talloc
+pkg install clang make llvm binutils pkg-config libtalloc
 git clone https://github.com/Raymer8639/neoproot.git
 cd neoproot
 sh build.sh install
@@ -55,7 +63,32 @@ neoproot -0 -r /data/data/com.termux/files/home/rootfs \
 
 ## 性能依据
 
-下表来自仓库中的 sysbench 工作负载和 ARM64 真机。结果会受 SoC、温度、rootfs 和工作负载影响，应作为可复现起点，而不是普遍保证。
+以下均为 Termux aarch64 真机 + Arch Linux ARM 容器的实测，各模式输出完全一致。容器真正花时间的是 stat 类调用，而 neoproot 恰好把它们去掉了：
+
+**`du -As /usr`（整树元数据遍历，各模式输出均为 `4007438`）**
+
+| 模式 | 耗时 | 相对纯 ptrace |
+|------|------|---------------|
+| 纯 ptrace 路径 | 33.3 s | — |
+| 仅 `--seccomp-notify` | 31.2 s | 1.07× |
+| **`--stat-shim` + `--seccomp-notify`** | **14.4 s** | **2.32×** |
+
+后续版本进一步削减了剩余停靠（`fcntl` 现在只对两个 fd 复制类命令停靠），同一测试从 15.7 s 降到 13.1 s，部署到设备后实测 11–12 s。
+
+**单次 `stat` 调用（µs/次，纯 ptrace / notify / shim）**
+
+| 调用 | 纯 ptrace | notify | shim |
+|------|-----------|--------|------|
+| 绝对路径 | 288.7 | 96.6 | **8.1** |
+| dirfd 相对 | 308.5 | 114.4 | **4.4** |
+| `AT_FDCWD` 相对 | 203.8 | 90.9 | 92.9 |
+| 原生 `syscall(SYS_statx)` | 324.5 | 106.5 | **10.4** |
+
+`AT_FDCWD` 相对名是**故意**留在 tracer 里的：guest 的当前目录是虚拟的，shim 会把这类调用经 `--seccomp-notify` 通道转交，而不是靠猜。代价与不加速的路径基本持平（103 µs 对 111 µs），换来语义正确。
+
+编译不受影响（80 文件 `cc -O0`：三模式 18.2 / 18.5 / 18.3 s）；收益来自进程启动、解析与头文件 I/O。
+
+更早的 sysbench 结果，供参考：
 
 | 负载 | 相对官方 PRoot |
 |------|----------------|
@@ -89,4 +122,4 @@ neoproot 由 `proot-scicat` / `uproot` 更名而来，并持续跟进 [termux/pr
 
 ## 许可证
 
-GPLv2，详见 [COPYING](COPYING)。
+GPLv2。标准全文见 [LICENSE](LICENSE)；[COPYING](COPYING) 保留上游 PRoot/CARE 的原始版权声明。

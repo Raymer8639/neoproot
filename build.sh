@@ -61,12 +61,12 @@ check_cmd binutils as ld.bfd
 
 # talloc 是头文件库依赖，检查 pkg-config
 if ! pkg-config --exists talloc 2>/dev/null; then
-    MISSING="$MISSING talloc"
+    MISSING="$MISSING libtalloc"
 fi
 
 if [ -n "$MISSING" ]; then
     echo "==> 缺少依赖:$MISSING"
-    echo "    请先安装: pkg install clang make llvm binutils pkg-config talloc"
+    echo "    请先安装: pkg install clang make llvm binutils pkg-config libtalloc"
     echo "    （可选: pkg install upx，可显著减小二进制体积）"
     exit 1
 fi

@@ -11,12 +11,20 @@ GitHub Release assets are **ARM64 Linux (glibc)** CI builds. Termux needs a **lo
 ![Language](https://img.shields.io/badge/C%2FC%2B%2B-C23%20%2F%20C%2B%2B23-orange)
 ![License](https://img.shields.io/badge/license-GPLv2-green)
 
-## Start in Termux
+## Install (one command)
+
+```sh
+curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/install.sh | sh
+```
+
+The script detects the platform and does the right thing: on **Termux** it installs the build dependencies, builds the bionic binary from the tagged source, backs up the previous binary and installs the new one into `$PREFIX/bin`; on **ARM64 Linux** it downloads the release binary, verifies it against `SHA256SUMS`, and installs it into your `PATH`. It never touches a running container's rootfs. Read [scripts/install.sh](scripts/install.sh) before piping it to a shell if you prefer; `sh scripts/install.sh --help` lists `--version`, `--prefix` and `--portable`.
+
+## Start in Termux (manual)
 
 Always build on the Termux host. Linux CI / Release files will not run correctly as the Termux Android binary.
 
 ```sh
-pkg install clang make llvm binutils pkg-config talloc
+pkg install clang make llvm binutils pkg-config libtalloc
 git clone https://github.com/Raymer8639/neoproot.git
 cd neoproot
 sh build.sh install
@@ -56,7 +64,32 @@ The command-line interface follows official PRoot conventions. You do not need t
 
 ## Performance evidence
 
-The table below is from the repository's sysbench workload on an ARM64 device. Results vary with SoC, thermal state, rootfs, and workload; treat them as a reproducible starting point, not a universal guarantee.
+Measured on a Termux aarch64 device, Arch Linux ARM container, identical output in every mode. Stat-heavy work is what a container spends its time on, and that is what neoproot removes:
+
+**`du -As /usr` (whole-tree metadata walk, output `4007438` in all modes)**
+
+| Mode | Time | vs plain ptrace |
+|------|------|-----------------|
+| Plain ptrace path | 33.3 s | — |
+| `--seccomp-notify` only | 31.2 s | 1.07x |
+| **`--stat-shim` + `--seccomp-notify`** | **14.4 s** | **2.32x** |
+
+Later releases cut the remaining ptrace stops further (`fcntl` is now traced only for the two fd-duplication commands), taking the same run from 15.7 s to 13.1 s, and 11-12 s on the device after deployment.
+
+**Single `stat` call (µs/op, plain / notify / shim)**
+
+| Call | plain | notify | shim |
+|------|-------|--------|------|
+| absolute path | 288.7 | 96.6 | **8.1** |
+| dirfd-relative | 308.5 | 114.4 | **4.4** |
+| `AT_FDCWD`-relative | 203.8 | 90.9 | 92.9 |
+| raw `syscall(SYS_statx)` | 324.5 | 106.5 | **10.4** |
+
+`AT_FDCWD`-relative names keep the tracer in the loop on purpose: the guest's cwd is virtual, so the shim re-issues them through the `--seccomp-notify` channel instead of guessing. That costs about the same as the plain path (103 vs 111 µs) while staying correct.
+
+Compilation is unaffected (80-file `cc -O0` build: 18.2 / 18.5 / 18.3 s across the three modes); the wins are in process startup, parsing and header I/O.
+
+The older sysbench workload, for reference:
 
 | Load | vs official PRoot |
 |------|-------------------|
@@ -90,4 +123,4 @@ Versions follow the termux/proot style. Releases before 2026-08-15 used the hist
 
 ## License
 
-GPLv2; see [COPYING](COPYING).
+GPLv2. The canonical text is in [LICENSE](LICENSE); [COPYING](COPYING) carries the original PRoot/CARE copyright notice from upstream.
