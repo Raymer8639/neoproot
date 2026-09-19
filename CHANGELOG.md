@@ -3,7 +3,24 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
-## [Unreleased]
+## [v5.10.7] - 2026-09-19
+
+**Install in one command**
+
+- Add `scripts/install.sh`, shipped as a release asset so
+  `curl -fsSL .../releases/latest/download/install.sh | sh` works: it builds from
+  the tagged source on Termux (bionic) and downloads the verified release binary
+  elsewhere, backing up any binary it replaces. The release job now attaches it
+  and puts the install block above the auto-generated notes.
+- The maintenance dependency is the Termux package `libtalloc`, not `talloc`:
+  the documented `pkg install ... talloc` failed with `E: Unable to locate
+  package talloc` on a clean Termux. Fixed in `build.sh`, both READMEs and the
+  installer, which now installs only what is actually missing.
+- READMEs lead with the installer and carry the measured metadata numbers
+  (`du -As /usr` 33.3 s -> 14.4 s, single `stat` 288.7 -> 8.1 µs) instead of the
+  older sysbench-only table. Add the canonical GPLv2 text as `LICENSE` so the
+  repository no longer reports `NOASSERTION`; `COPYING` keeps the upstream
+  PRoot/CARE notice.
 
 **Keep the `--stat-shim` environment on every guest exec**
 
