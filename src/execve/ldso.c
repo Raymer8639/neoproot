@@ -244,6 +244,106 @@ static int read_ldso_rpaths(const Tracee *t, int fd, const ElfHeader *eh,
 	return 0;
 }
 
+/* Replace the entry with the same variable name, or append it.  @name is the
+ * bare variable name -- that is what compare_xpointee_env() matches, passing
+ * the whole "NAME=value" pair would never match and would append a duplicate
+ * on every single exec. */
+static int upsert_env_entry(ArrayOfXPointers *envp, const char *name,
+			    const char *entry)
+{
+	size_t terminator = (envp->length > 0) ? envp->length - 1 : 0;
+	int idx = find_xpointee(envp, name);
+	int ret;
+
+	if (idx >= 0)
+		return write_xpointee_as_string(envp, (size_t)idx, entry);
+	if (UNLIKELY(idx != -ENOENT))
+		return idx;
+
+	/* fetch_array_of_xpointers() keeps the NULL terminator as the last
+	 * entry of the array, so a new variable has to be inserted before it:
+	 * appending after it only buries the entry behind the terminator and
+	 * the kernel never looks at it. */
+	ret = resize_array_of_xpointers(envp, terminator, 1);
+	if (UNLIKELY(ret < 0))
+		return ret;
+	return write_xpointee_as_string(envp, terminator, entry);
+}
+
+/* --stat-shim removes the stat syscalls from the seccomp filter, so path
+ * translation depends entirely on the preloaded library.  A setuid launcher
+ * (sudo) or anything else that sanitizes the environment drops LD_PRELOAD and
+ * the NEOPROOT_STATSHIM_* configuration, and the program behind it would then
+ * resolve guest paths in the host namespace -- every stat looks like ENOENT.
+ * Re-inject the variables into the execve environment here: this runs after
+ * the caller built whatever environment it wanted, so it cannot be undone. */
+int ldso_inject_stat_shim_env(const Tracee *tracee, ArrayOfXPointers *envp)
+{
+	static const char *const names[] = {
+		"NEOPROOT_STATSHIM_ROOTFS",
+		"NEOPROOT_STATSHIM_BINDS",
+		"NEOPROOT_STATSHIM_L2S",
+		"NEOPROOT_STATSHIM_NOTIF",
+		"NEOPROOT_STATSHIM_UID_REAL",
+		"NEOPROOT_STATSHIM_UID_FAKE",
+		"NEOPROOT_STATSHIM_GID_REAL",
+		"NEOPROOT_STATSHIM_GID_FAKE",
+	};
+	char entry[PATH_MAX + 64];
+	char rest[PATH_MAX];
+	int idx;
+	int ret;
+	size_t i;
+
+	if (tracee == NULL || tracee->stat_shim_lib == NULL || envp == NULL)
+		return 0;
+
+	/* Match entries by variable name (the array was fetched with the generic
+	 * comparator). */
+	envp->compare_xpointee = (compare_xpointee_t)compare_xpointee_env;
+
+	/* Keep whatever preload the caller asked for, with the shim in front --
+	 * the same order launch_process uses for the very first exec. */
+	rest[0] = '\0';
+	idx = find_xpointee(envp, "LD_PRELOAD");
+	if (idx >= 0) {
+		char *current = NULL;
+
+		if (read_xpointee_as_string(envp, (size_t)idx, &current) > 0
+		    && current != NULL) {
+			const char *eq = strchr(current, '=');
+
+			if (eq != NULL)
+				snprintf(rest, sizeof rest, "%s", eq + 1);
+			TALLOC_FREE(current);
+		}
+	}
+	if (strstr(rest, tracee->stat_shim_lib) == NULL) {
+		if (snprintf(entry, sizeof entry, "LD_PRELOAD=%s%s%s",
+			     tracee->stat_shim_lib, rest[0] != '\0' ? " " : "", rest)
+		    >= (int)sizeof entry)
+			return -ENAMETOOLONG;
+		ret = upsert_env_entry(envp, "LD_PRELOAD", entry);
+		if (UNLIKELY(ret < 0))
+			return ret;
+	}
+
+	for (i = 0; i < sizeof names / sizeof names[0]; i++) {
+		const char *value = getenv(names[i]);
+
+		if (value == NULL)
+			continue;
+		if (snprintf(entry, sizeof entry, "%s=%s", names[i], value)
+		    >= (int)sizeof entry)
+			return -ENAMETOOLONG;
+		ret = upsert_env_entry(envp, names[i], entry);
+		if (UNLIKELY(ret < 0))
+			return ret;
+	}
+
+	return 0;
+}
+
 int rebuild_host_ldso_paths(Tracee *t, const char host_path[PATH_MAX], ArrayOfXPointers *envp)
 {
 	static char *init_ld = NULL;

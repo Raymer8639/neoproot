@@ -5,6 +5,28 @@
 
 ## [Unreleased]
 
+**Keep the `--stat-shim` environment on every guest exec**
+
+- `--stat-shim` leaves the stat syscalls untraced, so a guest program resolves
+  guest paths only while it holds both the preloaded shim and the
+  `NEOPROOT_STATSHIM_*` configuration in its environment. Anything that
+  sanitizes the environment takes path translation away with it: `sudo` is
+  setuid, glibc drops `LD_*` for `AT_SECURE` programs and sudoers resets the
+  rest, so `sudo pacman -Q` died with `error: failed to initialize alpm
+  library: (root: /, dbpath: /var/lib/pacman/) could not find or read
+  directory` while the same command without `sudo` worked. The tracer now
+  re-injects the preload and the configuration into the environment of every
+  guest `execve`, after the caller built it, so no launcher can undo it; host
+  (bionic) binaries are skipped because the shim is guest ABI. Verified with
+  the environment stripped the way `sudo` strips it: `pacman -Q` returns 0 and
+  the injected variables appear exactly once at every exec depth.
+- Fix the lifetime of the strings the shim path and the rootfs are read from:
+  they were allocated on `tracee->ctx`, a per-stop scratch context that
+  `get_tracee()` frees and recreates at the first stop after the command line
+  is parsed. The `/tmp/proot-loader-XXXXXX` path allocated right afterwards
+  reused that memory, so the tracer ended up injecting the loader path as
+  `LD_PRELOAD`. Both strings now live on the tracee's life context, and
+  children get a copy instead of a shared pointer.
 **Correct the performance baseline quoted for `--stat-shim`**
 
 - The v5.10.6 entry below compared the shim against `--seccomp-notify` without
