@@ -365,14 +365,16 @@ int proot_main(int argc, char *const argv[]) {
          * be traced (set_seccomp_filters drops them). Hand it, through the
          * environment, everything the tracer would have applied to a stat
          * result: the exact binding map, the fake_id0 ids and the L2S flag.
-         * launch_process's child inherits environ via execvp. */
-        char preload[PATH_MAX * 2];
-        const char *old_preload = SAFE_GETENV("LD_PRELOAD");
-        if (old_preload != NULL && old_preload[0] != '\0')
-            snprintf(preload, sizeof preload, "%s %s", tracee->stat_shim_lib, old_preload);
-        else
-            snprintf(preload, sizeof preload, "%s", tracee->stat_shim_lib);
-        setenv("LD_PRELOAD", preload, 1);
+         *
+         * LD_PRELOAD is applied only in launch_process's child, after fork.
+         * The tracer itself is a Termux/bionic binary; putting a guest-ABI
+         * path into the tracer environ makes later host re-execs (notably
+         * sysvipc shm-helper's execl("/proc/self/exe")) fail with:
+         *   CANNOT LINK EXECUTABLE "neoproot": library "...libstatfast.so"
+         *   not found: needed by main executable
+         * Android's linker reports missing DT_NEEDED that way even for
+         * LD_PRELOAD. NEOPROOT_STATSHIM_* remain on the tracer so they are
+         * inherited by every guest execve. */
         if (tracee->rootfs != NULL)
             setenv("NEOPROOT_STATSHIM_ROOTFS", tracee->rootfs, 1);
 

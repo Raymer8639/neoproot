@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include <assert.h>
 #include <stdlib.h>
@@ -450,6 +451,22 @@ int launch_process(Tracee *tracee, char *const argv[])
                 }
             } else if (notify_socks[1] >= 0) {
                 (void)fcntl(notify_socks[1], F_SETFD, FD_CLOEXEC);
+            }
+
+            /* Guest-only LD_PRELOAD: libstatfast.so is a guest-ABI library
+             * and must not leak onto the tracer (see cli.c). Applied here
+             * after fork so execvp of the first guest program inherits it,
+             * and later guest execve keeps it via the inherited environ. */
+            if (tracee->stat_shim_lib != NULL) {
+                char preload[PATH_MAX * 2];
+                const char *old_preload = getenv("LD_PRELOAD");
+                if (old_preload != NULL && old_preload[0] != '\0')
+                    snprintf(preload, sizeof preload, "%s %s",
+                             tracee->stat_shim_lib, old_preload);
+                else
+                    snprintf(preload, sizeof preload, "%s",
+                             tracee->stat_shim_lib);
+                setenv("LD_PRELOAD", preload, 1);
             }
 
             execvp(tracee->exe, argv[0] != NULL ? argv : default_argv);

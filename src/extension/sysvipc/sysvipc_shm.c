@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include <assert.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -119,6 +120,11 @@ static int sysvipc_shm_launch_helper(void) {
         pid_t child = fork();
         if (child < 0) _exit(1);
         if (child == 0) {
+            /* Host re-exec: drop any guest LD_PRELOAD that might have leaked
+             * onto the tracer. Android's bionic linker treats a missing
+             * preload as "needed by main executable" and aborts before main.
+             * Also belt-and-suspenders if a future change sets it again. */
+            unsetenv("LD_PRELOAD");
             execl("/proc/self/exe", "neoproot", "--shm-helper", NULL);
             _exit(1);
         }

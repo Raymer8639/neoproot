@@ -27,9 +27,11 @@
  *   src/extension/link2symlink/link2symlink.c  link2symlink_disguise_stat
  */
 #define _GNU_SOURCE
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,10 +80,36 @@ static _Thread_local int    g_last_bind = -1;
 static _Thread_local size_t g_last_bind_len;
 static int   g_inited;
 
-/* ---- raw syscalls: never recurse into our own interposers ---- */
+/* ---- raw syscalls: never recurse into our own interposers ----
+ *
+ * Programs that issue the stat syscalls themselves -- libuv's statx path is
+ * one -- never reach the interposers below, and --stat-shim removes those
+ * syscalls from the tracer filter, so their guest paths would be resolved by
+ * the host kernel.  syscall() (defined at the end of this file) catches that
+ * entry point, which makes every raw call here go through libc directly. */
+
+typedef long (*syscall_fn)(long, ...);
+static syscall_fn g_real_syscall;
+
+__attribute__((constructor))
+static void shim_bind_real_syscall(void) {
+    g_real_syscall = (syscall_fn)dlsym(RTLD_NEXT, "syscall");
+}
+
+static long raw_syscall6(long number, long a1, long a2, long a3,
+                         long a4, long a5, long a6) {
+    if (g_real_syscall == NULL)
+        g_real_syscall = (syscall_fn)dlsym(RTLD_NEXT, "syscall");
+    if (g_real_syscall == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return g_real_syscall(number, a1, a2, a3, a4, a5, a6);
+}
 
 static int raw_lstat(const char *path, struct stat *st) {
-    return (int)syscall(SYS_newfstatat, AT_FDCWD, path, st, AT_SYMLINK_NOFOLLOW);
+    return (int)raw_syscall6(SYS_newfstatat, AT_FDCWD, (long)path, (long)st,
+                             AT_SYMLINK_NOFOLLOW, 0, 0);
 }
 
 /* L2S links are only detectable through the nofollow view of the same path.
@@ -96,7 +124,8 @@ static int probe_is_symlink(int dirfd, const char *path, const char *host) {
     if (path[0] == '/')
         r = raw_lstat(host, &probe);
     else
-        r = (int)syscall(SYS_newfstatat, dirfd, path, &probe, AT_SYMLINK_NOFOLLOW);
+        r = (int)raw_syscall6(SYS_newfstatat, dirfd, (long)path, (long)&probe,
+                              AT_SYMLINK_NOFOLLOW, 0, 0);
     return r == 0 && S_ISLNK(probe.st_mode);
 }
 
@@ -150,6 +179,9 @@ static void shim_init(void) {
     g_debug = getenv("NEOPROOT_STATSHIM_DEBUG") != NULL;
     g_use_l2s = getenv("NEOPROOT_STATSHIM_L2S") != NULL;
     g_have_notif = getenv("NEOPROOT_STATSHIM_NOTIF") != NULL;
+    if (g_debug)
+        fprintf(stderr, "[stat-shim] init rootfs='%s' notif=%d l2s=%d\n",
+                g_rootfs, g_have_notif, g_use_l2s);
 
     ur = getenv("NEOPROOT_STATSHIM_UID_REAL");
     uf = getenv("NEOPROOT_STATSHIM_UID_FAKE");
@@ -175,9 +207,9 @@ static int prefix_match(const char *path, const Bind *b) {
     return path[b->glen] == '\0' || path[b->glen] == '/';
 }
 
-/* Translate a guest absolute path to its host path.  Relative paths and
- * dirfd-relative names are already host-rooted (the kernel dirfd/cwd is a real
- * host fd), so they pass through untouched. */
+/* Translate a guest absolute path to its host path.  Absolute paths are the
+ * only ones this can serve: a relative path at AT_FDCWD belongs to the
+ * tracee's virtual cwd, which the tracer owns (see relative_to_host). */
 static const char *to_host(const char *path, char *buf, size_t bufsz) {
     const Bind *best = NULL;
     const char *rest;
@@ -245,6 +277,43 @@ static const char *to_host(const char *path, char *buf, size_t bufsz) {
     return path;
 }
 
+/* Host path of a relative name at AT_FDCWD when no USER_NOTIF channel is
+ * available.  PR_getcwd is emulated by the tracer, so it reports the guest cwd
+ * even though the tracee's real cwd is a host path; translating the joined
+ * guest path keeps the bind table authoritative.  Callers with a channel must
+ * prefer tracer_fstatat()/tracer_statx(): only the tracer reproduces ".."
+ * across a bind boundary and the L2S result disguise. */
+static const char *relative_to_host(const char *path, char *buf, size_t bufsz) {
+    char cwd[PATH_MAX];
+    char guest[PATH_MAX];
+    const char *host;
+    size_t clen;
+    size_t glen;
+    int n;
+
+    if (getcwd(cwd, sizeof cwd) == NULL)
+        return path;
+    clen = strlen(cwd);
+    n = snprintf(guest, sizeof guest, "%s%s%s", cwd,
+                 (clen > 1 && cwd[clen - 1] == '/') ? "" : "/", path);
+    if (n < 0 || (size_t)n >= sizeof guest) {
+        errno = ENAMETOOLONG;
+        return path;
+    }
+    host = to_host(guest, buf, bufsz);
+    if (host != guest)
+        return host;
+    /* to_host() echoes its argument when no binding or rootfs applies; the
+     * guest buffer is local to this frame, so hand back a stable copy. */
+    glen = strlen(guest) + 1;
+    if (glen > bufsz) {
+        errno = ENAMETOOLONG;
+        return path;
+    }
+    memmove(buf, guest, glen);
+    return buf;
+}
+
 /* ---- fake_id0 ---- */
 
 static void disguise_ids_stat(struct stat *st) {
@@ -290,17 +359,18 @@ static int l2s_ambiguous(const char *guest, const char *host, int is_link) {
 static int tracer_fstatat(int dirfd, const char *path, struct stat *st, int flags) {
     if (!g_have_notif || path == NULL)
         return 0;
-    return syscall(SYS_newfstatat, dirfd, path, st,
-                   (int)((unsigned int)flags | NEOPROOT_STAT_SHIM_FLAG)) == 0;
+    return raw_syscall6(SYS_newfstatat, dirfd, (long)path, (long)st,
+                        (int)((unsigned int)flags | NEOPROOT_STAT_SHIM_FLAG),
+                        0, 0) == 0;
 }
 
 static int tracer_statx(int dirfd, const char *path, int flags, unsigned int mask,
                         struct statx *stx) {
     if (!g_have_notif || path == NULL)
         return 0;
-    return syscall(SYS_statx, dirfd, path,
-                   (int)((unsigned int)flags | NEOPROOT_STAT_SHIM_FLAG),
-                   mask, stx) == 0;
+    return raw_syscall6(SYS_statx, dirfd, (long)path,
+                        (int)((unsigned int)flags | NEOPROOT_STAT_SHIM_FLAG),
+                        mask, (long)stx, 0) == 0;
 }
 
 /* ---- interposed entry points ---- */
@@ -311,13 +381,47 @@ int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
     int is_link = 0;
 
     shim_init();
-    host = to_host(path, buf, sizeof(buf));
+    /* A relative name at AT_FDCWD resolves against the tracee's *virtual*
+     * cwd, which differs from the real one (--cwd is applied virtually and a
+     * bind source is a host path).  Only the tracer can translate that, so
+     * re-issue through its USER_NOTIF channel: exactly the emulation used
+     * when --stat-shim is off.  Without that channel fall back to the guest
+     * cwd the tracer reports for getcwd(). */
+    if (dirfd == AT_FDCWD && path != NULL && path[0] != '/') {
+        if (g_have_notif) {
+            if (tracer_fstatat(dirfd, path, st, flags))
+                return 0;
+            return -1;
+        }
+        host = relative_to_host(path, buf, sizeof(buf));
+    } else {
+        host = to_host(path, buf, sizeof(buf));
+    }
     if (g_debug)
         fprintf(stderr, "[stat-shim] fstatat(%d,'%s')->'%s' flags=%#x\n",
                 dirfd, path != NULL ? path : "", host != NULL ? host : "", flags);
-    if (syscall(SYS_newfstatat, dirfd, host, st, flags) < 0) {
+    if (raw_syscall6(SYS_newfstatat, dirfd, (long)host, (long)st, flags, 0, 0) < 0) {
+        int raw_errno = errno;
         if (g_debug)
-            fprintf(stderr, "[stat-shim]   RAW FAIL errno=%d\n", errno);
+            fprintf(stderr, "[stat-shim]   RAW FAIL errno=%d\n", raw_errno);
+        /* A raw failure is not conclusive.  The host kernel resolves the
+         * translated path by itself, and the guest filesystem stores
+         * symlinks whose targets are guest absolute paths (fnm's
+         * multishell link -> /home/..., a library alias foo.so -> foo.so.1).
+         * Those targets do not exist in the host namespace, so only the
+         * tracer can resolve the guest path.  Retry through USER_NOTIF; it
+         * is also the side that owns the binding map. */
+        if (g_have_notif) {
+            int fb = tracer_fstatat(dirfd, path, st, flags);
+            if (g_debug)
+                fprintf(stderr, "[stat-shim]   FALLBACK fstatat %s errno=%d '%s'\n",
+                        fb ? "ok" : "fail", fb ? 0 : errno,
+                        path != NULL ? path : "");
+            if (fb)
+                return 0;
+            return -1;
+        }
+        errno = raw_errno;
         return -1;
     }
     if (g_debug)
@@ -351,13 +455,31 @@ int statx(int dirfd, const char *path, int flags, unsigned int mask,
     int is_link = 0;
 
     shim_init();
-    host = to_host(path, buf, sizeof(buf));
+    /* Same virtual-cwd rule as fstatat(). */
+    if (dirfd == AT_FDCWD && path != NULL && path[0] != '/') {
+        if (g_have_notif) {
+            if (tracer_statx(dirfd, path, flags, mask, stx))
+                return 0;
+            return -1;
+        }
+        host = relative_to_host(path, buf, sizeof(buf));
+    } else {
+        host = to_host(path, buf, sizeof(buf));
+    }
     if (g_debug)
         fprintf(stderr, "[stat-shim] statx(%d,'%s')->'%s' flags=%#x mask=%#x\n",
                 dirfd, path != NULL ? path : "", host != NULL ? host : "", flags, mask);
-    if (syscall(SYS_statx, dirfd, host, flags, mask, stx) < 0) {
+    if (raw_syscall6(SYS_statx, dirfd, (long)host, flags, mask, (long)stx, 0) < 0) {
+        int raw_errno = errno;
         if (g_debug)
-            fprintf(stderr, "[stat-shim]   statx RAW FAIL errno=%d\n", errno);
+            fprintf(stderr, "[stat-shim]   statx RAW FAIL errno=%d\n", raw_errno);
+        /* Same guest-absolute-symlink reasoning as fstatat(). */
+        if (g_have_notif) {
+            if (tracer_statx(dirfd, path, flags, mask, stx))
+                return 0;
+            return -1;
+        }
+        errno = raw_errno;
         return -1;
     }
     if (g_debug)
@@ -391,9 +513,10 @@ int fstat(int fd, struct stat *st) {
     /* neoproot removes fstat from the filter only when link2symlink is off.
      * Under L2S this same raw call remains traced, preserving fd/path state. */
 #ifdef SYS_fstat
-    r = (int)syscall(SYS_fstat, fd, st);
+    r = (int)raw_syscall6(SYS_fstat, fd, (long)st, 0, 0, 0, 0);
 #else
-    r = (int)syscall(SYS_newfstatat, fd, "", st, AT_EMPTY_PATH);
+    r = (int)raw_syscall6(SYS_newfstatat, fd, (long)"", (long)st,
+                          AT_EMPTY_PATH, 0, 0);
 #endif
     if (r == 0)
         disguise_ids_stat(st);
@@ -470,4 +593,44 @@ int __fxstatat64(int version, int dirfd, const char *path,
                  struct stat64 *st, int flags) {
     (void)version;
     return fstatat64(dirfd, path, st, flags);
+}
+
+/* libc's variadic syscall() entry point.  Code that issues the stat syscalls
+ * itself (libuv's statx path, for instance) never reaches the wrappers above,
+ * and with --stat-shim the tracer does not see those syscalls either, so the
+ * kernel would resolve a guest path in the host namespace.  Route the stat
+ * family through the same translation and forward everything else verbatim. */
+long syscall(long number, ...) {
+    va_list ap;
+    long a1, a2, a3, a4, a5, a6;
+
+    va_start(ap, number);
+    a1 = va_arg(ap, long);
+    a2 = va_arg(ap, long);
+    a3 = va_arg(ap, long);
+    a4 = va_arg(ap, long);
+    a5 = va_arg(ap, long);
+    a6 = va_arg(ap, long);
+    va_end(ap);
+
+    switch (number) {
+#ifdef SYS_newfstatat
+    case SYS_newfstatat:
+        return (long)fstatat((int)a1, (const char *)a2, (struct stat *)a3,
+                             (int)a4);
+#endif
+#ifdef SYS_fstatat64
+    case SYS_fstatat64:
+        return (long)fstatat64((int)a1, (const char *)a2, (struct stat64 *)a3,
+                               (int)a4);
+#endif
+#ifdef SYS_statx
+    case SYS_statx:
+        return (long)statx((int)a1, (const char *)a2, (int)a3,
+                           (unsigned int)a4, (struct statx *)a5);
+#endif
+    default:
+        break;
+    }
+    return raw_syscall6(number, a1, a2, a3, a4, a5, a6);
 }
