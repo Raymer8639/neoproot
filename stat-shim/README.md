@@ -91,9 +91,15 @@ Add the option to the neoproot command line, next to `--seccomp-notify`:
         /usr/bin/zsh -l
 
 The shim is **off by default**: omitting `--stat-shim` changes nothing, so this
-feature carries no regression risk for existing setups. When L2S is active
-(`--link2symlink`) `--seccomp-notify` must also be present, otherwise neoproot
-prints a warning and runs with the normal traced stats.
+feature carries no regression risk for existing setups.
+
+`--seccomp-notify` is **required** with `--stat-shim`. The shim re-issues three
+shapes of request to the tracer through that flag-gated USER_NOTIF channel: a
+relative name at `AT_FDCWD` (the tracee's cwd is virtual), a path whose
+components are symlinks to guest absolute paths, and the link2symlink result
+disguise. Without the channel the stat syscalls stay untraced and those paths
+would silently return host-resolved results, so neoproot prints a warning and
+runs with the normal traced stats instead.
 
 ### Environment (set by neoproot, read by the library)
 
@@ -168,10 +174,11 @@ path is covered by the ON/OFF container A/B (`docs/stat-shim-exp/`).
   re-issued through the flag-gated USER_NOTIF channel: a relative name at
   `AT_FDCWD` (the guest cwd is virtual) and any path whose raw host resolution
   fails because a component is a symlink to a guest absolute path (fnm stores
-  `fnm_multishells/<id> -> /home/...`). Both therefore require
-  `--seccomp-notify`; without that channel the shim falls back to the guest cwd
-  reported by `getcwd()` and to the raw result, and such paths can stay
-  untranslated.
+  `fnm_multishells/<id> -> /home/...`). Because of these fallbacks (and the L2S
+  disguise) `--stat-shim` requires `--seccomp-notify`: without the channel
+  neoproot refuses to enable the shim. Should the library ever be loaded with
+  that channel missing, the wrappers still fall back to the guest cwd reported
+  by `getcwd()` (relative names) and to the raw result (everything else).
 * The bind table is a snapshot taken at launch. The shim caches the last non-root bind prefix per thread, so repeated stats within one bind avoid the full prefix scan.
 * The sentinel bit `0x40000000` must stay free in the `AT_*` flag space; the
   kernel never sees it (the tracer clears it before emulating and never
