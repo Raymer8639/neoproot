@@ -186,6 +186,11 @@ ssize_t readlink_proc2(const Tracee *tracee, char result[PATH_MAX], const char r
 	if (component[0] == '\0')
 		return 0;
 
-	action = readlink_proc(tracee, result, base, component, PATH1_IS_PREFIX);
+	/* @base 对 "/proc" 的直接子项（如 /proc/self、/proc/device-tree）就是 "/proc" 本身，
+	 * 不是它的严格子路径；硬编码 PATH1_IS_PREFIX 会让绝对目标那一类走错分支
+	 * （上游 59410ba6）。 */
+	Comparison comparison = compare_paths("/proc", base);
+
+	action = readlink_proc(tracee, result, base, component, comparison);
 	return (action == CANONICALIZE ? strlen(result) : 0);
 }
