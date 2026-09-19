@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include <assert.h>
 #include <stdbool.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/syscall.h>
 
@@ -232,6 +233,8 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
                 ++n_trace;
                 if (sysnums[k].value == PR_ioctl)
                     ioctl_extra += IOCTL_ARGS1_STMTS - 2; /* args1 版比普通版多出的指令 */
+                else if (sysnums[k].value == PR_fcntl || sysnums[k].value == PR_fcntl64)
+                    ioctl_extra += IOCTL_ARGS1_STMTS - 2; /* fcntl 同样按命令参数过滤 */
             }
         }
         ret = start_arch_section(&prog, archs[i].value, n_trace,
@@ -269,6 +272,22 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
                     };
                     ret = add_trace_syscall_args1(&prog, sc, sysnums[k].flags,
                                                   ioctl_cmds, 7);
+                } else if (sysnums[k].value == PR_fcntl
+                           || sysnums[k].value == PR_fcntl64) {
+                    /* Only the fd-duplication commands need the tracer: exit.c
+                     * re-keys the proc-fd path cache on them, and kompat's
+                     * F_DUPFD_CLOEXEC emulation needs both stops.  A du/find
+                     * walk issues F_GETFL and F_SETFD once per opened directory
+                     * and no handler looks at those, so stop tracing them. */
+                    static const uint32_t fcntl_cmds[] = {
+                        F_DUPFD,
+#ifdef F_DUPFD_CLOEXEC
+                        F_DUPFD_CLOEXEC,
+#endif
+                    };
+                    ret = add_trace_syscall_args1(&prog, sc, sysnums[k].flags,
+                                                  fcntl_cmds,
+                                                  sizeof fcntl_cmds / sizeof fcntl_cmds[0]);
                 } else if (user_notif && is_user_notif_sysnum(sysnums[k].value)) {
                     ret = add_syscall_ret(&prog, sc, SECCOMP_RET_USER_NOTIF);
                 } else {
