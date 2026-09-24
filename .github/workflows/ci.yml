@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang llvm lld libtalloc-dev pkg-config upx binutils busybox-static
+          sudo apt-get install -y -qq clang llvm lld meson ninja-build libtalloc-dev pkg-config upx binutils busybox-static
 
       - name: Verify process_vm build
         run: sh tests/test-process-vm-build.sh
@@ -42,6 +42,18 @@ jobs:
             # 通用构建（例如老设备可降级指令集），验证 MARCH 可覆盖性
             make -C src -B neoproot CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
           fi
+
+      - name: Meson frontend smoke test
+        run: |
+          # The phase-1 Meson frontend delegates to GNUmakefile, which writes
+          # src/neoproot. Build a source archive copy so this smoke test cannot
+          # overwrite the release/portable artifact or the following test input.
+          rm -rf /tmp/neoproot-meson-src meson-build
+          mkdir -p /tmp/neoproot-meson-src
+          git archive HEAD | tar -x -C /tmp/neoproot-meson-src
+          meson setup meson-build /tmp/neoproot-meson-src --buildtype=release
+          meson compile -C meson-build
+          test -x meson-build/neoproot
 
       - name: Check binary
         run: |
@@ -156,7 +168,7 @@ jobs:
           matching binary elsewhere. These assets are **ARM64 glibc** builds for
           containers and ARM64 Linux hosts: do not install `neoproot` from here as
           the Termux `$PREFIX/bin/neoproot`. On Termux use the installer or
-          `sh build.sh install` from the source tarball.
+          `sh install.sh` from the source tarball (or `meson setup builddir && meson compile -C builddir`).
 
           ---
           HEADER

@@ -27,7 +27,13 @@ Always build on the Termux host. Linux CI / Release files will not run correctly
 pkg install clang make llvm binutils pkg-config libtalloc
 git clone https://github.com/Raymer8639/neoproot.git
 cd neoproot
-sh build.sh install
+sh install.sh
+
+# Or build with Meson (GNUmakefile remains the reference implementation):
+# Install meson+ninja with your package manager first.
+meson setup builddir
+meson compile -C builddir
+meson install -C builddir
 ```
 
 The installer places `neoproot` in `$PREFIX/bin`.
