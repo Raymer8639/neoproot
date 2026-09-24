@@ -1,0 +1,1 @@
+option('march', type: 'string', value: '-march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto -mtune=generic', description: 'ARM64 compiler flags passed to the reference Make build')
