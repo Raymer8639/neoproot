@@ -27,7 +27,13 @@ curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/insta
 pkg install clang make llvm binutils pkg-config libtalloc
 git clone https://github.com/Raymer8639/neoproot.git
 cd neoproot
-sh build.sh install
+sh install.sh
+
+# 或使用 Meson 构建（GNUmakefile 仍是基准实现）：
+# 请先用包管理器安装 meson+ninja。
+meson setup builddir
+meson compile -C builddir
+meson install -C builddir
 ```
 
 安装脚本会把 `neoproot` 放到 `$PREFIX/bin`。
