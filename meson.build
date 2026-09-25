@@ -22,7 +22,8 @@ configure_file(output: 'build.h', configuration: conf)
 if cc.has_header('linux/seccomp.h') and cc.has_header('linux/filter.h') and cc.has_header('sys/syscall.h')
   add_project_arguments('-DHAVE_SECCOMP_FILTER', language: ['c', 'cpp'])
 endif
-vm_probe = '''#include <sys/uio.h>
+vm_probe = '''#define _GNU_SOURCE
+#include <sys/uio.h>
 #include <sys/syscall.h>
 int main(void){ return (int)syscall(SYS_process_vm_readv, 0, 0, 0, 0, 0, 0); }'''
 if cc.compiles(vm_probe, name: 'process_vm_readv')
