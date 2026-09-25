@@ -262,7 +262,7 @@ loader/loader.o: $(SRC)loader/loader.cpp
 
 loader/assembly.o: $(SRC)loader/assembly.S
 	@mkdir -p $(dir $@)
-	$($(quiet)CC) $(CPPFLAGS) $(filter-out -std=c23 -munaligned-access,$(CFLAGS)) $(LOADER_CFLAGS) -MD -c $(SRC)$< -o $@
+	$($(quiet)CC) $(CPPFLAGS) $(filter-out -std=c23 -flto=thin -munaligned-access,$(CFLAGS)) $(LOADER_CFLAGS) -MD -c $(SRC)$< -o $@
 
 loader/loader: $(LOADER_OBJECTS)
 	$($(quiet)LD) -o $@ $^ $(LOADER_LDFLAGS)
