@@ -258,7 +258,7 @@ endif
 
 loader/loader.o: $(SRC)loader/loader.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CPPFLAGS) $(filter-out -flto=thin,$(CXXFLAGS)) $(LOADER_CFLAGS) -MD -c $(SRC)$< -o $@
+	$(CXX) $(CPPFLAGS) $(filter-out -flto=thin -munaligned-access,$(CXXFLAGS)) $(LOADER_CFLAGS) -MD -c $(SRC)$< -o $@
 
 loader/assembly.o: $(SRC)loader/assembly.S
 	@mkdir -p $(dir $@)
