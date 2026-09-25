@@ -31,7 +31,7 @@ sh install.sh
 
 # Or build with Meson (GNUmakefile remains the reference implementation):
 # Install meson+ninja with your package manager first.
-meson setup builddir
+CC=clang CXX=clang++ meson setup builddir
 meson compile -C builddir
 meson install -C builddir
 ```
