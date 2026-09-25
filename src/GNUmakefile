@@ -58,7 +58,7 @@ LDFLAGS += -fuse-ld=lld
 endif
 
 # cli/cli.o 去掉 flto 避免链接错误
-cli/cli.o: CFLAGS := -std=c23 -Wall -Wextra -O3 -ffunction-sections -fdata-sections $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
+cli/cli.o: CFLAGS := -std=c2x -Wall -Wextra -O3 -ffunction-sections -fdata-sections $(MARCH) -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
 
 # syscall 专用高性能优化
 syscall/%.o: CFLAGS   := -std=c23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections -fomit-frame-pointer -funroll-loops -fno-stack-protector -fno-strict-overflow -fno-trapping-math $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
