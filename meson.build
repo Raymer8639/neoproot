@@ -101,6 +101,6 @@ c_sources = files('src/cli/neoproot.c',
   'src/extension/fix_symlink_size/fix_symlink_size.c')
 cpp_sources = files('src/tracee/mem.cpp',
   'src/tracee/reg.cpp')
-loader = custom_target('loader-wrapped', output: 'loader-wrapped.o', depend_files: files('src/GNUmakefile', 'src/loader/loader.cpp', 'src/loader/assembly.S'), command: [run, '-c', 'make -C "' + srcdir + '" loader/loader-wrapped.o && cp "' + srcdir + '/loader/loader-wrapped.o" "@OUTDIR@/loader-wrapped.o"'], build_by_default: true, console: true)
+loader = custom_target('loader-wrapped', output: 'loader-wrapped.o', depend_files: files('src/GNUmakefile', 'src/loader/loader.cpp', 'src/loader/assembly.S'), command: [run, '-c', 'make -C "' + srcdir + '" CC="' + ' '.join(cc.cmd_array()) + '" CXX="' + ' '.join(cxx.cmd_array()) + '" loader/loader-wrapped.o && cp "' + srcdir + '/loader/loader-wrapped.o" "@OUTDIR@/loader-wrapped.o"'], build_by_default: true, console: true)
 link_args = ['-flto=thin', '-Wl,-z,noexecstack', '-Wl,--gc-sections', '-Wl,-z,relro', '-Wl,-z,now', '-Wl,--strip-all', '-lpthread', '-s']
 executable('neoproot', c_sources + cpp_sources + loader, dependencies: dep, c_args: c_args, cpp_args: cpp_args, link_args: link_args, install: true, install_dir: get_option('bindir'))

@@ -58,7 +58,7 @@ LDFLAGS += -fuse-ld=lld
 endif
 
 # cli/cli.o 去掉 flto 避免链接错误
-cli/cli.o: CFLAGS := -std=c2x -Wall -Wextra -O3 -ffunction-sections -fdata-sections $(MARCH) -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
+cli/cli.o: CFLAGS := -std=c23 -Wall -Wextra -O3 -ffunction-sections -fdata-sections $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
 
 # syscall 专用高性能优化
 syscall/%.o: CFLAGS   := -std=c23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections -fomit-frame-pointer -funroll-loops -fno-stack-protector -fno-strict-overflow -fno-trapping-math $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
@@ -258,11 +258,11 @@ endif
 
 loader/loader.o: $(SRC)loader/loader.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CPPFLAGS) $(filter-out -flto=thin -munaligned-access,$(CXXFLAGS)) $(LOADER_CFLAGS) -MD -c $(SRC)$< -o $@
+	$(CXX) $(CPPFLAGS) $(filter-out -flto=thin,$(CXXFLAGS)) $(LOADER_CFLAGS) -MD -c $(SRC)$< -o $@
 
 loader/assembly.o: $(SRC)loader/assembly.S
 	@mkdir -p $(dir $@)
-	$($(quiet)CC) $(CPPFLAGS) $(filter-out -std=c23 -flto=thin -munaligned-access,$(CFLAGS)) $(LOADER_CFLAGS) -MD -c $(SRC)$< -o $@
+	$(COMPILE) $(LOADER_CFLAGS)
 
 loader/loader: $(LOADER_OBJECTS)
 	$($(quiet)LD) -o $@ $^ $(LOADER_LDFLAGS)
