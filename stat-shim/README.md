@@ -146,6 +146,8 @@ ABI gap: `stat()` is inlined to `__stat64`/`stat64` in the header, so the
 public-symbol-only preload never saw the call and the raw syscall went out
 untranslated. Covering the historical `*64`/`__*stat*` entry points fixes it.
 
+The same glibc-internal-call issue affected `eaccess()`: glibc calls its own `stat()` and then `access()`, which need opposite path forms under the shim. The preload now implements `eaccess()` with `faccessat2(AT_EACCESS)` on the guest path; the access syscall remains tracer-translated. This requires a Linux 5.8+ kernel with `faccessat2` (the shim returns `ENOSYS` if it is unavailable). It fixes GNU make 4.4 direct recursive spawns without changing the `fstatat`/`statx` fast path. The manual reproduction is `make -f tests/recursive-make.mk all` under `--stat-shim`; the `shell` target is the shell-mediated control.
+
 The per-process `LD_PRELOAD` cost shows up as a small regression on
 process-spawn-dominated workloads; the win dominates on anything that walks a
 file tree.

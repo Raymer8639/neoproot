@@ -1,4 +1,4 @@
-project('neoproot', ['c', 'cpp'], version: '5.10.8', meson_version: '>=0.61.0', default_options: ['warning_level=2'])
+project('neoproot', ['c', 'cpp'], version: '5.10.9', meson_version: '>=0.61.0', default_options: ['warning_level=2'])
 cc = meson.get_compiler('c')
 cxx = meson.get_compiler('cpp')
 if host_machine.cpu_family() not in ['aarch64', 'arm64']

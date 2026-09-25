@@ -531,6 +531,49 @@ int lstat(const char *path, struct stat *st) {
     return fstatat(AT_FDCWD, path, st, AT_SYMLINK_NOFOLLOW);
 }
 
+/* glibc implements eaccess() on top of an *internal* stat() call: a direct
+ * intra-libc branch to stat@@GLIBC_2.33, not a PLT call, so LD_PRELOAD cannot
+ * interpose that stat().  Under --stat-shim the path-stat syscalls are removed
+ * from the tracer's seccomp filter and a non-sentinel stat is ALLOWed, i.e.
+ * executed by the kernel directly.  glibc's internal stat() therefore runs
+ * against the *host* namespace with the untranslated guest path and wrongly
+ * returns ENOENT for a guest-absolute name.  GNU make 4.4 calls
+ * eaccess(program, X_OK) before posix_spawn(), so a recursive $(MAKE)
+ * recipe aborts with 127 "No such file or directory" without ever cloning.
+ *
+ * The two halves need opposite path forms (stat() wants the host path because
+ * it is ALLOWed kernel-direct; access() wants the guest path because it is
+ * still traced and translated), so glibc's eaccess() cannot work under the
+ * shim no matter which form the caller passes.
+ *
+ * Fix: interpose the public eaccess() symbol and implement it as a single
+ * faccessat2(AT_FDCWD, path, mode, AT_EACCESS) on the untouched guest path.
+ * The access family is never removed from the tracer's filter, so neoproot
+ * translates that one syscall correctly for absolute and relative names alike. */
+int eaccess(const char *path, int mode) {
+    shim_init();
+
+    /* faccessat2(AT_FDCWD, path, mode, AT_EACCESS) is exactly eaccess() and,
+     * unlike glibc's stat()+access() pair, it is a single syscall that the
+     * tracer still translates in shim mode (the access family is never removed
+     * from the filter).  Hand it the *guest* path untouched and let neoproot
+     * resolve it against the virtual cwd / bindings -- correct for both
+     * absolute and relative names.  raw_syscall6() reaches libc's syscall()
+     * via RTLD_NEXT, so it does not recurse into this preload's syscall(). */
+#ifdef SYS_faccessat2
+    {
+        long r = raw_syscall6(SYS_faccessat2, AT_FDCWD, (long)path, mode,
+                              AT_EACCESS, 0, 0);
+        if (r == 0 || errno != ENOSYS)
+            return (int)r;
+    }
+#endif
+
+    /* faccessat2 is required for correct eaccess semantics in shim mode. */
+    errno = ENOSYS;
+    return -1;
+}
+
 /* glibc still uses the historical 64-bit symbol names from some internal
  * filesystem/configuration code (notably i3 on a 64-bit guest).  Keep these
  * entry points in the preload as well; otherwise that call can bypass the
