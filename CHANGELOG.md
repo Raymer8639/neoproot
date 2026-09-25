@@ -3,6 +3,14 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.10.9] - 2026-09-25
+
+**Fix `--stat-shim` breaking `eaccess()` and recursive GNU make**
+
+- glibc implements `eaccess()` as an internal `stat()` followed by `access()`. The internal stat bypasses LD_PRELOAD, while the shim-mode filter lets non-sentinel stat syscalls reach the host kernel directly. The two halves require opposite path forms, so glibc `eaccess()` returns `ENOENT` for guest paths. GNU make 4.4 uses `eaccess(program, X_OK)` before `posix_spawn()`, causing direct recursive `$(MAKE)` recipes to fail with exit 127 before a child is created.
+- Interpose `eaccess()` and issue one `faccessat2(AT_FDCWD, path, mode, AT_EACCESS)` with the untouched guest path. The tracer still translates the access family, preserving virtual-cwd and binding semantics.
+- Add `tests/recursive-make.mk` as a minimal manual regression fixture. Validated the direct-spawn target and Linux/UML `make -n defconfig` with the production tracer and fixed shim. Interleaved 50,000-iteration absolute `fstatat` measurements averaged 6.812 us/op with both old and fixed shims.
+
 ## [v5.10.8] - 2026-09-19
 
 **Handle `fchmodat2`, and stop hard-coding the `/proc` comparison**
