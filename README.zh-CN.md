@@ -31,7 +31,7 @@ sh install.sh
 
 # 或使用 Meson 构建（GNUmakefile 仍是基准实现）：
 # 请先用包管理器安装 meson+ninja。
-meson setup builddir
+CC=clang CXX=clang++ meson setup builddir
 meson compile -C builddir
 meson install -C builddir
 ```

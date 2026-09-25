@@ -51,7 +51,7 @@ jobs:
           rm -rf /tmp/neoproot-meson-src meson-build
           mkdir -p /tmp/neoproot-meson-src
           git archive HEAD | tar -x -C /tmp/neoproot-meson-src
-          meson setup meson-build /tmp/neoproot-meson-src --buildtype=release
+          CC=clang CXX=clang++ meson setup meson-build /tmp/neoproot-meson-src --buildtype=release
           meson compile -C meson-build
           test -x meson-build/neoproot
 
