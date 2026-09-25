@@ -118,6 +118,11 @@ neoproot was renamed from `proot-scicat` / `uproot` and continues to track usefu
 
 ## Contributing and support
 
+Maintainers may use AI tools to assist with research, drafting, coding, or review.
+AI output is treated as untrusted input: maintainers remain responsible for
+reviewing and testing changes before merge. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for expectations when submitting AI-assisted work.
+
 - [Report a bug](https://github.com/Raymer8639/neoproot/issues/new?template=bug_report.yml)
 - [Request a feature](https://github.com/Raymer8639/neoproot/issues/new?template=feature_request.yml)
 - [Ask a usage question](https://github.com/Raymer8639/neoproot/discussions)

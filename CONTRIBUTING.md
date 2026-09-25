@@ -42,6 +42,18 @@ On Termux, install `clang make llvm binutils pkg-config talloc` and use `sh buil
 The published release assets are built on Ubuntu ARM64; a native Termux build
 is the compatibility fallback when a release asset does not run on a device.
 
+## AI-assisted work
+
+Maintainers may use AI tools to assist with research, drafting, implementation, or
+review. AI output is not treated as authoritative; maintainers are responsible
+for the final changes and their tests.
+
+If a contribution contains substantial AI-generated code or text, disclose that
+in the pull request and identify the affected parts. Contributors remain
+responsible for checking provenance and license compatibility, reviewing the
+output, and supplying appropriate tests. Disclosure does not replace human
+review or the project's GPLv2 contribution terms.
+
 ## Pull requests
 
 - Start from the current default branch and keep each PR focused.
