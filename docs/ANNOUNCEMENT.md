@@ -1,6 +1,6 @@
 # neoproot — announcement drafts
 
-Ready-to-paste drafts for v5.10.9. Every benchmark number below is from
+Ready-to-paste drafts for v5.10.10. Every benchmark number below is from
 `CHANGELOG.md` and was measured on a Termux aarch64 device with an Arch Linux ARM
 container. Nothing here is projected: if a number is not in the CHANGELOG, it is
 not in the drafts. The repair release also fixes GNU make 4.4 direct recursive
@@ -57,10 +57,12 @@ curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/insta
 
 Also in there: link2symlink that survives pnpm/TypeScript real-path probing, a
 launcher that handles the Termux host setup (wake-lock, fd limits, `LD_*`), and
-fixes for VNC exit hangs and the misleading `signal 11` warning. v5.10.9 also fixes GNU make 4.4 direct recursive spawns under `--stat-shim`:
-glibc `eaccess()` now uses one tracer-translated `faccessat2` call, so `$(MAKE)`
-no longer fails before its child is created. Meson and GNUmake builds are both
-available; Termux builds locally because release binaries are glibc. Earlier
+fixes for VNC exit hangs and the misleading `signal 11` warning. v5.10.10 fixes
+raw stat syscalls under `--stat-shim` so Go programs such as `gh` work again, and
+makes the Meson build produce the embedded loader itself. It also keeps the
+glibc `eaccess()` fix from v5.10.9, so `$(MAKE)` recursive spawns no longer fail
+before a child is created. Meson and GNUmake builds are both available; Termux
+builds locally because release binaries are glibc. Earlier
 releases also keep `sudo` working under the shim: the tracer re-injects the shim
 environment into every guest `execve`.
 
