@@ -22,17 +22,19 @@ configure_file(output: 'build.h', configuration: conf)
 if cc.has_header('linux/seccomp.h') and cc.has_header('linux/filter.h') and cc.has_header('sys/syscall.h')
   add_project_arguments('-DHAVE_SECCOMP_FILTER', language: ['c', 'cpp'])
 endif
-vm_probe = '''#define _GNU_SOURCE
-#include <sys/uio.h>
-#include <sys/syscall.h>
-int main(void){ return (int)syscall(SYS_process_vm_readv, 0, 0, 0, 0, 0, 0); }'''
-if cc.compiles(vm_probe, name: 'process_vm_readv')
+vm_probe = '''#include <sys/uio.h>
+#include <stdlib.h>
+int main(void){
+  return process_vm_readv(0, NULL, 0, NULL, 0, 0)
+       + process_vm_writev(0, NULL, 0, NULL, 0, 0);
+}'''
+if cc.compiles(vm_probe, args: ['-D_GNU_SOURCE'], name: 'process_vm_readv')
   add_project_arguments('-DHAVE_PROCESS_VM', language: ['c', 'cpp'])
 endif
 common = ['-D_FILE_OFFSET_BITS=64', '-D_GNU_SOURCE', '-I' + gen, '-I' + srcdir]
 arm = get_option('march').split()
-c_args = common + arm + ['-std=c23', '-O3', '-ffunction-sections', '-fdata-sections', '-ffast-math', '-D__ARM_NEON', '-D__ARM_FEATURE_DOTPROD']
-cpp_args = common + arm + ['-std=c++23', '-O3', '-ffunction-sections', '-fdata-sections', '-ffast-math', '-D__ARM_NEON', '-D__ARM_FEATURE_DOTPROD']
+c_args = common + arm + ['-std=c23', '-Wall', '-Wextra', '-O3', '-flto=thin', '-ffunction-sections', '-fdata-sections', '-munaligned-access', '-ffast-math', '-D__ARM_NEON', '-D__ARM_FEATURE_DOTPROD']
+cpp_args = common + arm + ['-std=c++23', '-Wall', '-Wextra', '-O3', '-flto=thin', '-ffunction-sections', '-fdata-sections', '-munaligned-access', '-ffast-math', '-D__ARM_NEON', '-D__ARM_FEATURE_DOTPROD']
 dep = dependency('talloc', required: true)
 c_sources = files('src/cli/neoproot.c',
   'src/cli/cli.c',
@@ -102,6 +104,12 @@ c_sources = files('src/cli/neoproot.c',
   'src/extension/fix_symlink_size/fix_symlink_size.c')
 cpp_sources = files('src/tracee/mem.cpp',
   'src/tracee/reg.cpp')
-loader = custom_target('loader-wrapped', output: 'loader-wrapped.o', depend_files: files('src/GNUmakefile', 'src/loader/loader.cpp', 'src/loader/assembly.S'), command: [run, '-c', 'make -C "' + srcdir + '" CC="' + ' '.join(cc.cmd_array()) + '" CXX="' + ' '.join(cxx.cmd_array()) + '" loader/loader-wrapped.o && cp "' + srcdir + '/loader/loader-wrapped.o" "@OUTDIR@/loader-wrapped.o"'], build_by_default: true, console: true)
-link_args = ['-flto=thin', '-Wl,-z,noexecstack', '-Wl,--gc-sections', '-Wl,-z,relro', '-Wl,-z,now', '-Wl,--strip-all', '-lpthread', '-s']
+objcopy = find_program('objcopy', required: true)
+strip = find_program('strip', required: true)
+loader_cpp_args = common + arm + ['-std=c++23', '-Wall', '-Wextra', '-O3', '-ffunction-sections', '-fdata-sections', '-munaligned-access', '-ffast-math', '-D__ARM_NEON', '-D__ARM_FEATURE_DOTPROD', '-fPIC', '-ffreestanding']
+loader_c_args = common + arm + ['-std=c23', '-Wall', '-Wextra', '-O3', '-ffunction-sections', '-fdata-sections', '-munaligned-access', '-ffast-math', '-D__ARM_NEON', '-D__ARM_FEATURE_DOTPROD', '-fPIC', '-ffreestanding']
+# Build the freestanding AArch64 loader directly; GNUmake remains a compatibility entry point.
+loader_cmd = ' '.join(cxx.cmd_array()) + ' ' + ' '.join(loader_cpp_args) + ' -c "' + srcdir + '/loader/loader.cpp" -o "@OUTDIR@/loader.o" && ' + ' '.join(cc.cmd_array()) + ' ' + ' '.join(loader_c_args) + ' -c "' + srcdir + '/loader/assembly.S" -o "@OUTDIR@/assembly.o" && ' + ' '.join(cc.cmd_array()) + ' -o "@OUTDIR@/loader.exe" "@OUTDIR@/loader.o" "@OUTDIR@/assembly.o" -static -nostdlib -Wl,-Ttext=0x2000000000,--rosegment,-z,noexecstack && ' + strip.full_path() + ' "@OUTDIR@/loader.exe" && cd "@OUTDIR@" && ' + objcopy.full_path() + ' --input-target=binary --output-target=elf64-littleaarch64 --binary-architecture=aarch64 loader.exe "@OUTPUT@"'
+loader = custom_target('loader-wrapped', output: 'loader-wrapped.o', depend_files: files('src/loader/loader.cpp', 'src/loader/assembly.S', 'src/loader/assembly-arm64.h', 'src/loader/script.h', 'src/arch.h', 'src/compat.h'), command: [run, '-c', loader_cmd], build_by_default: true, console: true)
+link_args = ['-flto=thin', '-fuse-ld=lld', '-Wl,--icf=all', '-Wl,-z,noexecstack', '-Wl,--gc-sections', '-Wl,-z,relro', '-Wl,-z,now', '-Wl,--strip-all', '-lpthread', '-s']
 executable('neoproot', c_sources + cpp_sources + loader, dependencies: dep, c_args: c_args, cpp_args: cpp_args, link_args: link_args, install: true, install_dir: get_option('bindir'))
