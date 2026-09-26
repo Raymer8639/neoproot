@@ -21,6 +21,7 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-dirfd-fast-path.sh \
 	test-seccomp-notify-cli.sh \
 	test-seccomp-notify-pipe.sh \
+	test-stat-shim-raw-stat.sh \
 	test-bwrap-oldroot-bind.sh \
 	test-bwrap-proc-dirfd.sh test-bwrap-procfd-mount-target.sh \
 	test-bwrap-resolve-in-root.sh test-bwrap-cwd-dirfd.sh \
