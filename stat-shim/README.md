@@ -17,8 +17,8 @@ tens of microseconds per call.
 When `--stat-shim=<lib>` is given, the shim marks its own translated raw
 syscalls in an upper register word and the seccomp filter allows only those
 fast-path calls through. Direct raw stat syscalls from applications are sent
-through USER_NOTIF so guest paths are still translated, and
-injects the library with `LD_PRELOAD` **only in the first guest process**
+through USER_NOTIF so guest paths are still translated. Neoproot injects the
+library with `LD_PRELOAD` **only in the first guest process**
 (after `fork`, before `execvp`). The tracer itself must not carry that
 variable: it is a Termux/bionic binary, and a later host re-exec (sysvipc
 shm-helper's `execl("/proc/self/exe")`) would make Android's linker look up
