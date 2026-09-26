@@ -98,6 +98,8 @@ jobs:
           PROOT=../src/neoproot sh test-link2symlink-node-workflow.sh
           PROOT=../src/neoproot sh test-openat2.sh
           PROOT=../src/neoproot sh test-faccessat2.sh
+          # Needs a kernel that implements fchmodat2 (Linux 6.6+); exit 125 skips.
+          PROOT=../src/neoproot sh test-fchmodat2.sh || test $? -eq 125
           PROOT=../src/neoproot sh test-dirfd-fast-path.sh
           PROOT=../src/neoproot sh test-seccomp-notify-cli.sh
           PROOT=../src/neoproot sh test-seccomp-notify-pipe.sh
