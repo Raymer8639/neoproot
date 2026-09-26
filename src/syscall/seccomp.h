@@ -21,12 +21,11 @@ typedef struct {
 
 #define FILTER_SYSEXIT  0x1
 
-/* --stat-shim: sentinel bit the preloaded shim ORs into the flags argument of
- * newfstatat/fstatat64/statx when it needs the tracer to resolve a result that
- * involves link2symlink/fake_id0 state it cannot reproduce in-process.  The BPF
- * filter routes only calls carrying this bit to USER_NOTIF; all other stat
- * calls made by the shim stay un-traced.  Must match stat-shim/shim.c
- * (NEOPROOT_STAT_SHIM_FLAG). */
+/* The shim marks its raw fast calls in the upper 32 bits of the flags register.
+ * The kernel consumes only the low 32-bit int flags; BPF sees the full register.
+ * Untagged direct syscalls (e.g. from Go) require tracer translation.
+ * Keep both constants in sync with stat-shim/shim.c. */
+#define NEOPROOT_STAT_SHIM_RAW_TAG 0x4e50524fu
 #define NEOPROOT_STAT_SHIM_FLAG 0x40000000u
 
 extern int enable_syscall_filtering(const Tracee *tracee);
