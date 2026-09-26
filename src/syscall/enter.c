@@ -2645,10 +2645,9 @@ int translate_syscall_enter(Tracee *tracee)
         if (status < 0)
             break;
 
-        /* fchmodat2(dfd, path, mode, flags)：flags 在第 4 个参数。上游补丁读的是
-         * SYSARG_3（那是 mode），几乎总被误判成 AT_SYMLINK_NOFOLLOW。 */
+        /* BUG CHECK ONLY (do not merge): upstream reads SYSARG_3 (mode). */
         flags = (syscall_number == PR_fchmodat2)
-            ? peek_reg(tracee, CURRENT, SYSARG_4)
+            ? peek_reg(tracee, CURRENT, SYSARG_3)
             : 0;
         if ((flags & AT_SYMLINK_NOFOLLOW) != 0)
             status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
