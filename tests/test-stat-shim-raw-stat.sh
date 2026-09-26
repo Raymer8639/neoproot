@@ -1,18 +1,19 @@
 #!/bin/sh
-# --stat-shim must still translate raw, non-libc stat syscalls.
+# --stat-shim must still translate raw, non-wrapper stat syscalls.
 #
 # Regression for the gh failure: the shim removes the stat family from the
 # seccomp filter, and before PR #58 an untagged raw newfstatat/statx (Go's
-# runtime, any program issuing svc directly) was allowed straight to the host
-# kernel.  Guest paths were then resolved in the host namespace and silently
-# returned wrong results, which made `gh` report "unable to find git
+# runtime, or syscall(2) with no interposer loaded) was allowed straight to
+# the host kernel.  Guest paths were then resolved in the host namespace and
+# silently returned wrong results, which made `gh` report "unable to find git
 # executable in PATH".  The fix routes untagged raw stat syscalls through the
 # tracer's USER_NOTIF channel.
 #
-# The probe is freestanding (-static -nostdlib) so no libc wrapper or
-# LD_PRELOAD can turn the calls into the tagged fast path: every check is the
-# untagged raw syscall.  The shim library itself is not needed here; the BPF
-# routing is what this test pins down.
+# The probe issues syscall(SYS_newfstatat) directly.  --stat-shim is pointed
+# at a stub library that interposes nothing, so the seccomp fast path is
+# removed exactly as in a real deployment while every stat call in the probe
+# stays the untagged raw path under test.  Both probe paths exist only inside
+# the guest namespace, so an untranslated call returns ENOENT.
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -45,26 +46,30 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-printf 'thirteenbytes' > "$BOUND/inside" # 13 bytes
-printf 'relx' > "$ROOT/rel-marker"                    # 4 bytes
+mkdir -p "$ROOT/rawstat-dir"
+printf 'relx' > "$ROOT/rawstat-dir/inside"
+printf 'bound-data' > "$BOUND/inside"
 
-if ! "$CC" -nostdlib -static -fno-stack-protector \
-	-Wl,-e,_start -Wl,--build-id=none \
-	-o "$ROOT/probe" "$SCRIPT_DIR/test-stat-shim-raw-stat.c"; then
-	printf '%s\n' 'skip: freestanding probe build failed'
-	exit 125
+# A preloadable library with no interposers: satisfies LD_PRELOAD injection
+# without turning the probe's raw syscalls into the tagged fast path.
+printf '%s\n' 'void neoproot_raw_stat_stub(void) {}' > "$ROOT/stub.c"
+"$CC" -O2 -fPIC -shared -o "$ROOT/empty.so" "$ROOT/stub.c"
+
+if "$CC" -static -O2 -o "$ROOT/probe" "$SCRIPT_DIR/test-stat-shim-raw-stat.c" 2>/dev/null; then
+	BINDS=""
+else
+	"$CC" -O2 -o "$ROOT/probe" "$SCRIPT_DIR/test-stat-shim-raw-stat.c"
+	if [ -n "${PREFIX:-}" ]; then
+		BINDS="-b $PREFIX:$PREFIX -b /system -b /apex"
+	else
+		BINDS="-b /usr -b /lib -b /lib64"
+	fi
 fi
 
-# Guest rootfs $ROOT, guest cwd "/", and a bind whose guest path does not exist
-# on the host.  Without the fix the raw syscalls are resolved by the host kernel
-# and both checks fail.
 set +e
-(
-	cd /
-	PROOT_UNSET_DONE=1 "$PROOT" --seccomp-notify \
-		--stat-shim=/nonexistent/libstatfast.so \
-		-r "$ROOT" -w / -b "$BOUND/inside:/bound/inside" /probe
-)
+PROOT_UNSET_DONE=1 "$PROOT" --seccomp-notify \
+	--stat-shim=/empty.so \
+	-r "$ROOT" -w / $BINDS -b "$BOUND/inside:/rawstat-bound" /probe
 status=$?
 set -e
 

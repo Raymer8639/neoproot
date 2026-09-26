@@ -1,60 +1,69 @@
 /*
- * Direct-syscall stat probe for the --stat-shim raw-syscall regression.
+ * Raw stat syscall probe for the --stat-shim regression.
  *
- * Go's runtime (and any program that issues stat syscalls without going
- * through libc) uses a raw svc instruction.  --stat-shim leaves the stat
- * family out of the seccomp filter, so before the fix that raw call was
- * resolved by the host kernel against the *host* namespace and silently
- * returned wrong results (this broke `gh` repository discovery).  The fix
- * routes untagged raw stat syscalls through the tracer's USER_NOTIF channel.
+ * --stat-shim removes newfstatat/statx from the seccomp filter so the preload
+ * shim can issue them in-process.  A caller that reaches the kernel without
+ * going through the shim's wrappers (Go's runtime, or simply syscall(2) while
+ * the shim library is absent) used to be allowed straight through, so the host
+ * kernel resolved guest paths in the host namespace and returned wrong
+ * results.  gh reported this as "unable to find git executable in PATH".
  *
- * This file is compiled -static -nostdlib so no libc wrapper or preload can
- * intervene: every check below is the untagged raw syscall path.
+ * This program calls syscall(SYS_newfstatat) directly; the test runs it with
+ * --stat-shim pointing at a non-existent library, so no interposer is active
+ * and every call is the untagged raw path the fix must route through the
+ * tracer's USER_NOTIF channel.
  *
- * The checks look only at the syscall return value.  Both probe paths exist
- * only inside the guest namespace, so an untranslated call (the bug) returns
- * ENOENT while a translated call succeeds.  Reading struct stat is left out
- * on purpose: its layout is kernel-specific and a misread would obscure the
- * regression this test pins down.
+ * Both probe paths exist only inside the guest namespace, so an untranslated
+ * call returns ENOENT while a translated call succeeds.
  */
-#define AT_FDCWD (-100) /* arm64 uses the generic value; no libc header here */
-#define NR_newfstatat 79
-#define NR_exit 93
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
-static char sbuf[256] __attribute__((aligned(16)));
+#ifndef AT_FDCWD
+#define AT_FDCWD -100
+#endif
 
-static long raw_newfstatat(long dirfd, const char *path, long flags)
+static int raw_stat(const char *path)
 {
-	register long x8 asm("x8") = NR_newfstatat;
-	register long x0 asm("x0") = dirfd;
-	register long x1 asm("x1") = (long)path;
-	register long x2 asm("x2") = (long)sbuf;
-	register long x3 asm("x3") = flags;
+	struct stat st;
+	long r;
 
-	asm volatile("svc #0"
-		     : "+r"(x0)
-		     : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
-		     : "memory");
-	return x0;
+	errno = 0;
+#ifdef SYS_newfstatat
+	r = syscall(SYS_newfstatat, AT_FDCWD, path, &st, 0);
+#else
+	r = syscall(SYS_fstatat64, AT_FDCWD, path, &st, 0);
+#endif
+	return r == 0 ? 0 : (errno != 0 ? errno : -1);
 }
 
-static void raw_exit(int code)
+int main(void)
 {
-	register long x8 asm("x8") = NR_exit;
-	register long x0 asm("x0") = code;
+	int err;
 
-	asm volatile("svc #0" : : "r"(x0), "r"(x8) : "memory");
-	for (;;)
-		;
-}
+	/* Absolute guest path that is a bind the host namespace does not have. */
+	err = raw_stat("/rawstat-bound");
+	if (err != 0) {
+		fprintf(stderr, "raw newfstatat(abs guest path) failed: %d\n", err);
+		return 1;
+	}
 
-/* Exit 1: relative name at AT_FDCWD (guest virtual cwd) not translated.
- * Exit 2: absolute path across a bind not translated. */
-void _start(void)
-{
-	if (raw_newfstatat(AT_FDCWD, "rel-marker", 0) != 0)
-		raw_exit(1);
-	if (raw_newfstatat(AT_FDCWD, "/bound/inside", 0) != 0)
-		raw_exit(2);
-	raw_exit(0);
+	/* Relative name at AT_FDCWD: the guest cwd is virtual. */
+	if (chdir("/rawstat-dir") != 0) {
+		fprintf(stderr, "chdir guest dir failed: %d\n", errno);
+		return 2;
+	}
+	err = raw_stat("inside");
+	if (err != 0) {
+		fprintf(stderr, "raw newfstatat(relative guest name) failed: %d\n", err);
+		return 3;
+	}
+
+	puts("raw stat syscall passed");
+	return 0;
 }
