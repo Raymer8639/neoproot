@@ -18,6 +18,7 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-binding-cache.sh \
 	test-openat2.sh \
 	test-faccessat2.sh \
+	test-fchmodat2.sh \
 	test-dirfd-fast-path.sh \
 	test-seccomp-notify-cli.sh \
 	test-seccomp-notify-pipe.sh \
