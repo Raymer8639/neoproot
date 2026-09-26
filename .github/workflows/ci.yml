@@ -43,17 +43,21 @@ jobs:
             make -C src -B neoproot CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
           fi
 
-      - name: Meson frontend smoke test
+      - name: Meson native ARM64 smoke test
         run: |
-          # The phase-1 Meson frontend delegates to GNUmakefile, which writes
-          # src/neoproot. Build a source archive copy so this smoke test cannot
-          # overwrite the release/portable artifact or the following test input.
+          # Meson owns the complete source graph, including the freestanding loader.
+          # Build a source archive copy so this check cannot overwrite the GNUmake artifact.
           rm -rf /tmp/neoproot-meson-src meson-build
           mkdir -p /tmp/neoproot-meson-src
           git archive HEAD | tar -x -C /tmp/neoproot-meson-src
           CC=clang CXX=clang++ meson setup meson-build /tmp/neoproot-meson-src --buildtype=release
           meson compile -C meson-build
           test -x meson-build/neoproot
+          meson-build/neoproot --version | tee /tmp/neoproot-meson-version
+          grep -q "process_vm = yes" /tmp/neoproot-meson-version
+          grep -q "seccomp_filter = yes" /tmp/neoproot-meson-version
+          meson-build/neoproot --help >/dev/null
+          ! meson-build/neoproot --definitely-invalid >/dev/null 2>&1
 
       - name: Check binary
         run: |
