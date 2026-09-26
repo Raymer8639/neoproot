@@ -109,7 +109,17 @@ strip = find_program('strip', required: true)
 loader_cpp_args = common + arm + ['-std=c++23', '-Wall', '-Wextra', '-O3', '-ffunction-sections', '-fdata-sections', '-munaligned-access', '-ffast-math', '-D__ARM_NEON', '-D__ARM_FEATURE_DOTPROD', '-fPIC', '-ffreestanding']
 loader_c_args = common + arm + ['-std=c23', '-Wall', '-Wextra', '-O3', '-ffunction-sections', '-fdata-sections', '-munaligned-access', '-ffast-math', '-D__ARM_NEON', '-D__ARM_FEATURE_DOTPROD', '-fPIC', '-ffreestanding']
 # Build the freestanding AArch64 loader directly; GNUmake remains a compatibility entry point.
-loader_cmd = ' '.join(cxx.cmd_array()) + ' ' + ' '.join(loader_cpp_args) + ' -c "' + srcdir + '/loader/loader.cpp" -o "@OUTDIR@/loader.o" && ' + ' '.join(cc.cmd_array()) + ' ' + ' '.join(loader_c_args) + ' -c "' + srcdir + '/loader/assembly.S" -o "@OUTDIR@/assembly.o" && ' + ' '.join(cc.cmd_array()) + ' -o "@OUTDIR@/loader.exe" "@OUTDIR@/loader.o" "@OUTDIR@/assembly.o" -static -nostdlib -Wl,-Ttext=0x2000000000,--rosegment,-z,noexecstack && ' + strip.full_path() + ' "@OUTDIR@/loader.exe" && cd "@OUTDIR@" && ' + objcopy.full_path() + ' --input-target=binary --output-target=elf64-littleaarch64 --binary-architecture=aarch64 loader.exe "@OUTPUT@"'
+# Use explicit build-dir paths instead of @OUTDIR@: some distro Meson versions
+# (Ubuntu 1.3.2) leave that placeholder unsubstituted in custom_target commands.
+builddir = meson.current_build_dir()
+loader_obj = builddir / 'loader.o'
+assembly_obj = builddir / 'assembly.o'
+loader_exe = builddir / 'loader.exe'
+wrapped_obj = builddir / 'loader-wrapped.o'
+# objcopy derives the embedded symbol names from the input basename, so run
+# it from the build dir with the relative "loader.exe" (matching GNUmake's
+# _binary_loader_exe_start/_end) rather than passing an absolute path.
+loader_cmd = ' '.join(cxx.cmd_array()) + ' ' + ' '.join(loader_cpp_args) + ' -c "' + srcdir + '/loader/loader.cpp" -o "' + loader_obj + '" && ' + ' '.join(cc.cmd_array()) + ' ' + ' '.join(loader_c_args) + ' -c "' + srcdir + '/loader/assembly.S" -o "' + assembly_obj + '" && ' + ' '.join(cc.cmd_array()) + ' -o "' + loader_exe + '" "' + loader_obj + '" "' + assembly_obj + '" -static -nostdlib -Wl,-Ttext=0x2000000000,--rosegment,-z,noexecstack && ' + strip.full_path() + ' "' + loader_exe + '" && cd "' + builddir + '" && ' + objcopy.full_path() + ' --input-target=binary --output-target=elf64-littleaarch64 --binary-architecture=aarch64 loader.exe "' + wrapped_obj + '"'
 loader = custom_target('loader-wrapped', output: 'loader-wrapped.o', depend_files: files('src/loader/loader.cpp', 'src/loader/assembly.S', 'src/loader/assembly-arm64.h', 'src/loader/script.h', 'src/arch.h', 'src/compat.h'), command: [run, '-c', loader_cmd], build_by_default: true, console: true)
 link_args = ['-flto=thin', '-fuse-ld=lld', '-Wl,--icf=all', '-Wl,-z,noexecstack', '-Wl,--gc-sections', '-Wl,-z,relro', '-Wl,-z,now', '-Wl,--strip-all', '-lpthread', '-s']
 executable('neoproot', c_sources + cpp_sources + loader, dependencies: dep, c_args: c_args, cpp_args: cpp_args, link_args: link_args, install: true, install_dir: get_option('bindir'))
