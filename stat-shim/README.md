@@ -14,8 +14,10 @@ tens of microseconds per call.
 1. **guest -> host path translation** from the binding map neoproot exports;
 2. **fake_id0 ownership disguise**.
 
-When `--stat-shim=<lib>` is given, neoproot removes those syscalls from its
-seccomp filter entirely (so the shim's raw syscalls are never traced) and
+When `--stat-shim=<lib>` is given, the shim marks its own translated raw
+syscalls in an upper register word and the seccomp filter allows only those
+fast-path calls through. Direct raw stat syscalls from applications are sent
+through USER_NOTIF so guest paths are still translated, and
 injects the library with `LD_PRELOAD` **only in the first guest process**
 (after `fork`, before `execvp`). The tracer itself must not carry that
 variable: it is a Termux/bionic binary, and a later host re-exec (sysvipc
@@ -26,12 +28,12 @@ result is a large speed-up for `stat`-heavy work such as `du`, `find`,
 
 link2symlink (L2S) result disguise needs the real symlink chain, which the
 tracer also intercepts, so it cannot be reproduced in-process. Instead the
-seccomp filter keeps those stat syscalls routed to `USER_NOTIF` **only** when
-the shim ORs the sentinel bit `NEOPROOT_STAT_SHIM_FLAG` (`0x40000000`) into the
-flags argument. Whenever a raw result is a symlink (or an `.l2s.*` storage
-name) the shim re-issues the call with that sentinel and lets the tracer do the
-full L2S/fake_id0 emulation. Ordinary regular-file stats never pay the round
-trip. This requires `--seccomp-notify`; without it, `--stat-shim` together with
+seccomp filter routes untagged direct stat syscalls to `USER_NOTIF`; the shim
+uses its sentinel bit `NEOPROOT_STAT_SHIM_FLAG` (`0x40000000`) when a raw result
+needs tracer-owned L2S/fake_id0 handling. Whenever a raw result is a symlink (or
+an `.l2s.*` storage name) the shim re-issues the call with that sentinel.
+Ordinary wrapper-based regular-file stats use the tagged fast path. This
+requires `--seccomp-notify`; without it, `--stat-shim` together with
 `--link2symlink` is refused (the shim is disabled and a warning is printed)
 rather than returning wrong link types or link counts.
 

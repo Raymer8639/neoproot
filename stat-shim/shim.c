@@ -50,6 +50,7 @@
 /* Sentinel ORed into the flags argument to ask the tracer for one
  * USER_NOTIF-serviced stat.  Must match src/syscall/seccomp.h. */
 #define NEOPROOT_STAT_SHIM_FLAG 0x40000000u
+#define NEOPROOT_STAT_SHIM_RAW_TAG 0x4e50524ful
 
 #define MAX_BINDS    512
 #define BIND_ENTRY   '\n'
@@ -104,6 +105,14 @@ static long raw_syscall6(long number, long a1, long a2, long a3,
         errno = ENOSYS;
         return -1;
     }
+    /* Distinguish translated host-path calls from direct guest syscalls in BPF.
+     * The kernel takes flags as int, so these upper bits never reach AT_* flags. */
+    if (number == SYS_newfstatat && ((unsigned long)a4 & NEOPROOT_STAT_SHIM_FLAG) == 0)
+        a4 |= NEOPROOT_STAT_SHIM_RAW_TAG << 32;
+#ifdef SYS_statx
+    if (number == SYS_statx && ((unsigned long)a3 & NEOPROOT_STAT_SHIM_FLAG) == 0)
+        a3 |= NEOPROOT_STAT_SHIM_RAW_TAG << 32;
+#endif
     return g_real_syscall(number, a1, a2, a3, a4, a5, a6);
 }
 

@@ -136,15 +136,12 @@ static ALWAYS_INLINE int add_trace_syscall_args1(struct sock_fprog *restrict pro
     return ret;
 }
 
-/* --stat-shim overflow channel: route a stat syscall to USER_NOTIF only when
- * the shim ORed NEOPROOT_STAT_SHIM_FLAG into its flags argument (args[1] is nr,
- * args[2] path, args[arg_index] flags).  A is reloaded from nr both before and
- * after, so the block is immune to the accumulator clobbering of the
- * args1-filtered rules above it.  7 statements = 5 more than JEQ+RET:
- *   LD nr ; JEQ nr,+5 ; LD args[i] ; AND mask ; JEQ mask,+1 ; RET NOTIF ; LD nr */
+/* Only calls tagged by the shim can bypass translation.  Go and other
+ * direct-syscall callers have untagged guest paths and need USER_NOTIF.
+ * Six instructions: tagged calls continue to the fast path; untagged calls notify. */
 static ALWAYS_INLINE int add_notif_syscall_flag(struct sock_fprog *restrict program,
                                                 word_t syscall, size_t arg_index,
-                                                uint32_t mask) {
+                                                uint32_t tag) {
     if (UNLIKELY(syscall > UINT32_MAX || arg_index > 5))
         return -ERANGE;
     const size_t nr_off = offsetof(struct seccomp_data, nr);
@@ -152,13 +149,12 @@ static ALWAYS_INLINE int add_notif_syscall_flag(struct sock_fprog *restrict prog
         return -ERANGE;
     const struct sock_filter stmts[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)nr_off),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)syscall, 0, 5),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)syscall, 0, 4),
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
-                 (uint32_t)offsetof(struct seccomp_data, args[arg_index])),
-        BPF_STMT(BPF_ALU | BPF_AND | BPF_K, mask),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, mask, 0, 1),
+                 (uint32_t)offsetof(struct seccomp_data, args[arg_index]) + sizeof(uint32_t)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, tag, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)nr_off),
     };
     return add_statements(program, sizeof(stmts)/sizeof(*stmts), stmts);
 }
@@ -239,7 +235,7 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
                                        || sysnums[k].value == PR_fstatat64
                                        || sysnums[k].value == PR_statx)) {
                         ++n_trace;
-                        stat_extra += 7 - 2; /* add_notif_syscall_flag 指令数 */
+                        stat_extra += 6 - 2; /* add_notif_syscall_flag 指令数 */
                     }
                     continue;
                 }
@@ -265,7 +261,7 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
                                        || sysnums[k].value == PR_statx)) {
                         size_t arg_index = (sysnums[k].value == PR_statx) ? 2 : 3;
                         ret = add_notif_syscall_flag(&prog, sc, arg_index,
-                                                     NEOPROOT_STAT_SHIM_FLAG);
+                                                     NEOPROOT_STAT_SHIM_RAW_TAG);
                         if (UNLIKELY(ret < 0))
                             goto out;
                     }
