@@ -15,7 +15,9 @@
 #define NR_newfstatat 79
 #define NR_exit 93
 
-static char sbuf[256];
+/* The arm64 kernel writes a struct stat here and st_size() loads a 64-bit
+ * field, so the buffer must be 8-byte aligned. */
+static char sbuf[256] __attribute__((aligned(8)));
 
 static long raw_newfstatat(long dirfd, const char *path, long flags)
 {
