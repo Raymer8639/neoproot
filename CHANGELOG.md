@@ -3,6 +3,42 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.10.10] - 2026-09-26
+
+**Fix direct stat syscalls under `--stat-shim` (Go, `gh`), and make Meson a
+first-class build**
+
+- Fix a silent wrong-result bug for programs that issue `newfstatat`/`statx`
+  themselves instead of going through libc. Go's runtime does exactly that, and
+  `--stat-shim` had removed those syscalls from the seccomp filter, so an
+  untagged raw call reached the host kernel and had a guest path resolved in the
+  host namespace. The visible symptom was `gh` failing with
+  `unable to find git executable in PATH`. The shim now tags its own translated
+  calls in an upper register word; the BPF filter allows only tagged calls onto
+  the fast path and routes untagged direct stat syscalls through the tracer's
+  USER_NOTIF channel. Ordinary libc-wrapped stats keep the in-process fast path.
+- Add `tests/test-stat-shim-raw-stat.{c,sh}`: a probe that calls
+  `syscall(SYS_newfstatat)` directly with an empty stub shim, covering an
+  absolute guest path and an AT_FDCWD-relative name. It fails on the previous
+  tracer with `ENOENT` and passes on this one.
+- Build the freestanding AArch64 loader directly inside the Meson graph instead
+  of recursing into the GNUmakefile, and line the compiler/linker flags up with
+  it. Fixes two portability problems found by CI: Ubuntu's Meson 1.3.2 does not
+  substitute the `@OUTDIR@` placeholder in `custom_target` commands, and its
+  GNU ld rejects the lld-only `--rosegment`. Meson now computes explicit
+  build-dir paths, runs `objcopy` from the build directory with a relative
+  `loader.exe` so the embedded `_binary_loader_exe_*` symbols match GNUmake,
+  and selects `--rosegment` only when `ld.lld` is available.
+- Add a `fchmodat2` flag-semantics regression
+  (`tests/test-fchmodat2.{c,sh}`). It runs on a kernel that implements syscall
+  452 (verified on a Linux 6.8 ARM64 runner) and skips elsewhere. The tracer
+  reads `fchmodat2` flags from the fourth register; the upstream patch reads the
+  *mode* (`SYSARG_3`), so a mode carrying the `0x100` bit was mistaken for
+  `AT_SYMLINK_NOFOLLOW`. Confirmed discriminating: the test fails when that
+  bug is reintroduced.
+- GNUmakefile is still present and kept in sync; it is not removed in this
+  release.
+
 ## [v5.10.9] - 2026-09-25
 
 **Fix `--stat-shim` breaking `eaccess()` and recursive GNU make**
