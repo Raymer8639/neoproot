@@ -82,13 +82,8 @@ static Cli proot_cli = {
         "https://gitee.com/scicat-team/proot-scicat",
 
     .logo =
-"\n"
-"  UU   UU  PPPP   RRRR   OOO   OOO   TTTTT\n"
-"  UU   UU  PP  P  RR  R OO OO OO OO   TTT\n"
-"  UU   UU  PPPP   RRRR  OO OO OO OO   TTT\n"
-"  UU   UU  PP     RR R  OO OO OO OO   TTT\n"
-"   UUUUU   PP     RR  R  OOO   OOO    TTT\n"
-"\nUproot: next generation Proot.\n"
+"\nNEOPROOT\n"
+"\nNeoproot: next generation Proot.\n"
 "built by scicat-team.\n",
 
     .pre_initialize_bindings = pre_initialize_bindings,
