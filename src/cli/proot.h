@@ -79,12 +79,17 @@ static Cli proot_cli = {
 
     .colophon =
         "Copyright (C) 2026 scicat, GPLv2+\n"
-        "https://gitee.com/scicat-team/proot-scicat",
+        "https://github.com/Raymer8639/neoproot",
 
     .logo =
-"\nNEOPROOT\n"
+"\n"
+"  N   N  EEEEE   OOO   PPPP   RRRR    OOO    OOO   TTTTT\n"
+"  NN  N  E      O   O  P   P  R   R  O   O  O   O    T\n"
+"  N N N  EEEE   O   O  PPPP   RRRR   O   O  O   O    T\n"
+"  N  NN  E      O   O  P      R  R   O   O  O   O    T\n"
+"  N   N  EEEEE   OOO   P      R   R   OOO    OOO     T\n"
 "\nNeoproot: next generation Proot.\n"
-"built by scicat-team.\n",
+"built by Raymer8639.\n",
 
     .pre_initialize_bindings = pre_initialize_bindings,
     .post_initialize_exe     = post_initialize_exe,

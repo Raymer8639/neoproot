@@ -3,6 +3,12 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.10.13] - 2026-09-30
+
+- Render NEOPROOT as a five-line ASCII banner in version/help output.
+- Update builder credit to Raymer8639 and the project URL to the maintained
+  GitHub repository; preserve the original copyright notice.
+
 ## [v5.10.12] - 2026-09-30
 
 - Fix Codex 0.159.2 SIGBUS during stat-shim-enabled startup: retain remote
