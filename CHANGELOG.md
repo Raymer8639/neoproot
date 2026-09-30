@@ -3,6 +3,20 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.10.12] - 2026-09-30
+
+- Fix Codex 0.159.2 SIGBUS during stat-shim-enabled startup: retain remote
+  pointers for untouched argv/env strings instead of copying cached reads
+  onto a small shared CLONE_VM/CLONE_VFORK spawn stack.
+- Do not inject a guest preload into static ELF files, which cannot load it;
+  their raw stat syscalls remain handled by USER_NOTIF.
+- Add a shared spawn-stack canary regression; old tracer fails, fixed tracer
+  passes. Codex startup and terminal mouse-mode cleanup verified on Termux.
+
+## [v5.10.11] - 2026-09-27
+
+- Replace the legacy UPROOT version banner with NEOPROOT.
+
 ## [v5.10.10] - 2026-09-26
 
 **Fix direct stat syscalls under `--stat-shim` (Go, `gh`), and make Meson a
