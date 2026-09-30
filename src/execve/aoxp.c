@@ -140,6 +140,8 @@ int write_xpointee_as_string(ArrayOfXPointers *array, size_t index, const char *
         return -ENOMEM;
 
     array->_xpointers[index].local = dup;
+    /* A cached read keeps its original address; a replacement needs copying. */
+    array->_xpointers[index].remote = 0;
     return 0;
 }
 
@@ -251,7 +253,7 @@ int push_array_of_xpointers(ArrayOfXPointers *a, Reg reg)
 
     for (size_t i = 0; LIKELY(i < nr_ptr); i++) {
         void *loc = a->_xpointers[i].local;
-        if (UNLIKELY(!loc))
+        if (UNLIKELY(!loc) || a->_xpointers[i].remote != 0)
             continue;
 
         ssize_t sz = sizeof_xpointee(a, i);
@@ -277,7 +279,7 @@ int push_array_of_xpointers(ArrayOfXPointers *a, Reg reg)
      * 路径，env/node 的 ld.so 误判 argv[0] 为脚本而反复 exec，死循环）。 */
     word_t off = word_sz * nr_ptr;
     for (size_t i = 0; LIKELY(i < nr_ptr); i++) {
-        if (a->_xpointers[i].local) {
+        if (a->_xpointers[i].local && a->_xpointers[i].remote == 0) {
             a->_xpointers[i].remote = base + off;
             off += sizeof_xpointee(a, i);
         }

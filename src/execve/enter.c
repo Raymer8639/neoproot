@@ -568,8 +568,10 @@ int translate_execve_enter(Tracee *tr)
 	 * A setuid launcher (sudo) or any other environment sanitiser drops both,
 	 * and since --stat-shim leaves the stat syscalls untraced such a process
 	 * would resolve guest paths in the host namespace.  Host (bionic) binaries
-	 * must not get the guest-ABI preload. */
-	if (tr->stat_shim_lib != NULL && !is_host_elf(tr, host)) {
+	 * must not get the guest-ABI preload. Static ELF files cannot load it
+	 * either; their raw stat calls use USER_NOTIF instead. */
+	if (tr->stat_shim_lib != NULL && tr->load_info->interp != NULL
+	    && !is_host_elf(tr, host)) {
 		ArrayOfXPointers *env;
 
 		ret = fetch_array_of_xpointers(tr, &env, SYSARG_3, 0);
