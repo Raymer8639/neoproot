@@ -7,6 +7,8 @@ int main(void)
 	for (int i = 0; i < 128; i++) {
 		if (stat("/probe", &st) < 0)
 			return 1;
+		if (stat("/probe-dir-sibling", &st) < 0)
+			return 1;
 	}
 	return 0;
 }

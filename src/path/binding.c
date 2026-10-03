@@ -156,6 +156,9 @@ static Binding *find_best_prefix(const Tracee *restrict tracee, const char *rest
 			continue;
 		if (b->guest.path[0] != path_first)
 			continue;
+		if (b->guest.length > 1 && b->guest.length < path_len &&
+		    path[b->guest.length] != '/')
+			continue;
 		if (fast_strncmp(b->guest.path, path, b->guest.length) == 0)
 			return b;
 	}
@@ -309,6 +312,23 @@ Binding *insort_binding4(const Tracee *restrict tracee, const TALLOC_CTX *restri
 Binding *insort_binding3(const Tracee *restrict tracee, const TALLOC_CTX *restrict ctx,
                          const char *host, const char *guest) {
 	return insort_binding4(tracee, ctx, host, guest, BINDING_MOUNT_NONE);
+}
+
+Binding *copy_binding(const Tracee *tracee, const TALLOC_CTX *context,
+                     const Binding *binding, const char *guest_path) {
+	bool readonly = binding->readonly;
+	bool source_readonly = binding->source_readonly;
+	unsigned long mount_flags = binding->mount_flags;
+	unsigned long source_mount_flags = binding->source_mount_flags;
+	Binding *copy = insort_binding4(tracee, context, binding->host.path,
+				       guest_path, binding->mount_kind);
+	if (copy != NULL) {
+		copy->readonly = readonly;
+		copy->source_readonly = source_readonly;
+		copy->mount_flags = mount_flags;
+		copy->source_mount_flags = source_mount_flags;
+	}
+	return copy;
 }
 
 static int remove_bindings(Bindings *restrict bindings) {

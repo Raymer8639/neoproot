@@ -133,7 +133,8 @@ static int bind_proc_pid_auxv(Tracee *tr)
         talloc_free(tr->auxv_host_path);
     tr->auxv_host_path = talloc_strdup(tr, host_path);
 
-    binding = insort_binding3((Tracee *)tr, tr->life_context, host_path, guest_path);
+    binding = insort_binding4((Tracee *)tr, tr->life_context, host_path, guest_path,
+                              BINDING_MOUNT_INTERNAL);
     if (!binding)
         return -1;
 

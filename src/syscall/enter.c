@@ -66,6 +66,10 @@
 #define CLOSE_RANGE_CLOEXEC (1U << 2)
 #endif
 
+#ifndef AT_RECURSIVE
+#define AT_RECURSIVE 0x8000
+#endif
+
 /* ABI-stable rtnetlink constants for loopback reply. */
 #ifndef ARPHRD_LOOPBACK
 #define ARPHRD_LOOPBACK 772
@@ -102,6 +106,19 @@ static int check_bind_readonly(const Tracee *restrict tracee, const char *restri
 {
     const Binding *b = get_binding(tracee, GUEST, guest_path);
     return (b != NULL && b->readonly) ? -EROFS : 0;
+}
+
+static int check_bind_nodev(const Tracee *tracee, const char *host_path, const char *guest_path)
+{
+    const Binding *binding = guest_path[0] == '/'
+        ? get_binding(tracee, GUEST, guest_path) : get_binding(tracee, HOST, host_path);
+    struct stat info;
+
+    if (binding == NULL || (binding->mount_flags & MS_NODEV) == 0)
+        return 0;
+    if (stat(host_path, &info) == 0 && (S_ISCHR(info.st_mode) || S_ISBLK(info.st_mode)))
+        return -EACCES;
+    return 0;
 }
 
 static int host_path_of_dirfd(Tracee *tracee, int dirfd, char host[PATH_MAX])
@@ -142,6 +159,7 @@ static int check_openat2_beneath(Tracee *tracee, int dirfd, const char *host_res
     status = host_path_of_dirfd(tracee, dirfd, base_host);
     if (status < 0)
         return status;
+
     cmp = compare_paths(base_host, host_result);
     if (cmp == PATHS_ARE_EQUAL || cmp == PATH1_IS_PREFIX)
         return 0;
@@ -193,6 +211,17 @@ static int translate_path2(Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg 
     }
     if (status < 0)
         return status;
+
+    Sysnum syscall_number = get_sysnum(tracee, CURRENT);
+    if ((syscall_number == PR_open &&
+         (peek_reg(tracee, CURRENT, SYSARG_2) & O_PATH) == 0) ||
+        ((syscall_number == PR_openat || syscall_number == PR_openat2) &&
+         (peek_reg(tracee, CURRENT, SYSARG_3) & O_PATH) == 0) ||
+        syscall_number == PR_creat) {
+        status = check_bind_nodev(tracee, new_path, path);
+        if (status < 0)
+            return status;
+    }
 
     return set_sysarg_path(tracee, new_path, reg);
 }
@@ -321,6 +350,10 @@ typedef struct {
     char host_path[PATH_MAX];
     char guest_suffix[PATH_MAX];
     BindingMountKind mount_kind;
+    bool readonly;
+    bool source_readonly;
+    unsigned long mount_flags;
+    unsigned long source_mount_flags;
 } RecursiveBinding;
 
 /* A recursive bind carries nested mountpoints with it.  Runtime bindings
@@ -377,6 +410,10 @@ static RecursiveBinding *snapshot_recursive_bindings(Tracee *tracee,
                 sizeof(snapshot[index].guest_suffix) - 1);
         snapshot[index].guest_suffix[sizeof(snapshot[index].guest_suffix) - 1] = '\0';
         snapshot[index].mount_kind = binding->mount_kind;
+        snapshot[index].readonly = binding->readonly;
+        snapshot[index].source_readonly = binding->source_readonly;
+        snapshot[index].mount_flags = binding->mount_flags;
+        snapshot[index].source_mount_flags = binding->source_mount_flags;
         index++;
     }
 
@@ -396,9 +433,15 @@ static void replay_recursive_bindings(Tracee *tracee,
         if (join_paths(2, guest_path, target_guest,
                        snapshot[index].guest_suffix) < 0)
             continue;
-        (void) insort_binding4(tracee, tracee->fs,
-                               snapshot[index].host_path, guest_path,
-                               snapshot[index].mount_kind);
+        Binding *binding = insort_binding4(tracee, tracee->fs,
+                                           snapshot[index].host_path, guest_path,
+                                           snapshot[index].mount_kind);
+        if (binding != NULL) {
+            binding->readonly = snapshot[index].readonly;
+            binding->source_readonly = snapshot[index].source_readonly;
+            binding->mount_flags = snapshot[index].mount_flags;
+            binding->source_mount_flags = snapshot[index].source_mount_flags;
+        }
     }
 }
 
@@ -431,6 +474,25 @@ static bool detranslate_mount_target_in_current_root(const Tracee *tracee,
 static bool guest_path_is_oldroot(const char *path)
 {
     return strncmp(path, "/oldroot/", 9) == 0;
+}
+
+static bool guest_paths_same_current_root(const Tracee *tracee,
+                                          const char *left,
+                                          const char *right)
+{
+    const char *alias;
+
+    if (compare_paths(left, right) == PATHS_ARE_EQUAL)
+        return true;
+    alias = tracee != NULL && tracee->fs != NULL
+        ? tracee->fs->cwd_alias_prefix : NULL;
+    if (alias == NULL || strcmp(alias, "/oldroot") != 0)
+        return false;
+    if (guest_path_is_oldroot(left) &&
+        compare_paths(left + strlen("/oldroot"), right) == PATHS_ARE_EQUAL)
+        return true;
+    return guest_path_is_oldroot(right) &&
+        compare_paths(left, right + strlen("/oldroot")) == PATHS_ARE_EQUAL;
 }
 
 /* When a recursive root bind is pivoted, its nested mount can retain an
@@ -489,6 +551,19 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
     char guest_path[PATH_MAX];
     const char *tmpdir;
     BindingMountKind mount_kind = BINDING_MOUNT_NONE;
+    bool source_readonly = false;
+    bool source_attributes_known = false;
+    bool source_uses_origin = false;
+    unsigned long source_mount_flags = 0;
+    const Binding *source_binding = NULL;
+    Binding *target_binding = NULL;
+    Binding *same_path_binding = NULL;
+    Binding *tmpfs_binding = NULL;
+    char source_guest[PATH_MAX];
+    bool source_target_same = false;
+    int source_fd = -1;
+    bool fd_source = false;
+    bool source_guest_valid = false;
     RecursiveBinding *recursive_bindings = NULL;
     size_t recursive_binding_count = 0;
 
@@ -499,6 +574,50 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
         if (!resolve_tracee_proc_fd(tracee, src_user, host_path) &&
             translate_path(tracee, host_path, AT_FDCWD, src_user, true) < 0)
             return;
+        fd_source = parse_tracee_proc_fd(tracee, src_user, &source_fd);
+        if (fd_source) {
+            source_attributes_known = recall_proc_fd_mount_attributes(
+                tracee, source_fd, &source_readonly, &source_mount_flags);
+            source_binding = recall_proc_fd_binding(tracee, source_fd);
+            const char *remembered = recall_proc_fd_path(tracee->pid, source_fd);
+            if (remembered != NULL && guest_path_is_oldroot(remembered) &&
+                tracee->fs->cwd_alias_prefix != NULL &&
+                strcmp(tracee->fs->cwd_alias_prefix, "/oldroot") == 0) {
+                char current_path[PATH_MAX];
+                if (snprintf(current_path, sizeof(current_path), "%s",
+                             remembered + strlen("/oldroot")) > 0) {
+                    Binding *current_binding =
+                        get_binding(tracee, GUEST, current_path);
+                    if (current_binding != NULL)
+                        source_binding = current_binding;
+                }
+            }
+            if (source_binding == NULL && remembered != NULL) {
+                char remembered_host[PATH_MAX];
+                strcpy(remembered_host, remembered);
+                if (substitute_binding(tracee, GUEST, remembered_host) >= 0 &&
+                    strcmp(remembered_host, host_path) == 0)
+                    source_binding = get_binding(tracee, GUEST, remembered);
+            }
+            if (source_binding == NULL)
+                source_binding = get_binding(tracee, HOST, host_path);
+        }
+        if (!fd_source && guest_canonicalize(tracee, src_user, source_guest) == 0) {
+            source_guest_valid = true;
+            source_binding = get_binding(tracee, GUEST, source_guest);
+        }
+        if (source_binding != NULL) {
+            const char *root_host = get_root(tracee);
+            source_uses_origin = root_host != NULL &&
+                compare_paths(root_host, source_binding->host.path) ==
+                    PATHS_ARE_NOT_COMPARABLE;
+        }
+        if (!source_attributes_known && source_binding != NULL) {
+            source_readonly = source_uses_origin
+                ? source_binding->source_readonly : source_binding->readonly;
+            source_mount_flags = source_uses_origin
+                ? source_binding->source_mount_flags : source_binding->mount_flags;
+        }
     }
     else if (strcmp(fstype, "proc") == 0)
         strcpy(host_path, "/proc");
@@ -542,11 +661,82 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
         return;
     }
 
+    target_binding = get_binding(tracee, GUEST, guest_path);
+    for (Binding *iter = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+         iter != (void *)tracee->fs->bindings.guest;
+         iter = CIRCLEQ_NEXT(iter, link.guest)) {
+        if (strcmp(iter->guest.path, guest_path) == 0) {
+            same_path_binding = iter;
+            break;
+        }
+    }
+    for (Binding *iter = target_binding; same_path_binding == NULL && iter != NULL;
+         iter = iter->covered) {
+        if (strcmp(iter->guest.path, guest_path) == 0)
+            same_path_binding = iter;
+    }
+    for (Binding *iter = same_path_binding; iter != NULL; iter = iter->covered) {
+        if (iter->mount_kind == BINDING_MOUNT_TMPFS) {
+            tmpfs_binding = iter;
+            break;
+        }
+    }
+    if (tmpfs_binding != NULL) {
+        source_target_same = source_guest_valid &&
+            guest_paths_same_current_root(tracee, source_guest, guest_path);
+        if (source_target_same) {
+            source_readonly = tmpfs_binding->source_readonly;
+            source_mount_flags = tmpfs_binding->source_mount_flags;
+            source_attributes_known = true;
+        }
+    }
+    if (!source_target_same && source_guest_valid)
+        source_target_same =
+            guest_paths_same_current_root(tracee, source_guest, guest_path);
+    if (!source_target_same && fd_source) {
+        const char *remembered = recall_proc_fd_path(tracee->pid, source_fd);
+        char remembered_guest[PATH_MAX];
+        source_target_same = remembered != NULL &&
+            (guest_paths_same_current_root(tracee, remembered, guest_path) ||
+             (guest_canonicalize(tracee, remembered, remembered_guest) == 0 &&
+              guest_paths_same_current_root(tracee, remembered_guest, guest_path)));
+    }
+    if (source_target_same) {
+        const Binding *provenance = source_binding != NULL
+            ? source_binding : target_binding;
+        if (provenance == NULL)
+            source_target_same = false;
+        else if (provenance != NULL) {
+            source_uses_origin = true;
+            source_readonly = provenance->source_readonly;
+            source_mount_flags = provenance->source_mount_flags;
+            source_attributes_known = true;
+        }
+    }
+    if (fd_source && strcmp(guest_path, "/tmp") == 0 &&
+        get_root(tracee) != NULL) {
+        const char *remembered = recall_proc_fd_path(tracee->pid, source_fd);
+        char root_tmp[PATH_MAX];
+        if (remembered != NULL &&
+            compare_paths(remembered, guest_path) == PATHS_ARE_EQUAL &&
+            snprintf(root_tmp, sizeof(root_tmp), "%s/tmp", get_root(tracee)) > 0 &&
+            strcmp(root_tmp, host_path) == 0) {
+            source_readonly = false;
+            source_mount_flags = 0;
+            source_attributes_known = true;
+        }
+    }
+
     if ((flags & (MS_BIND | MS_REC)) == (MS_BIND | MS_REC))
         recursive_bindings = snapshot_recursive_bindings(tracee, host_path,
                                                          &recursive_binding_count);
 
-    if (insort_binding4(tracee, tracee->fs, host_path, guest_path, mount_kind) != NULL) {
+    Binding *binding = insort_binding4(tracee, tracee->fs, host_path, guest_path, mount_kind);
+    if (binding != NULL) {
+        binding->readonly = source_readonly;
+        binding->source_readonly = source_readonly;
+        binding->mount_flags = source_mount_flags;
+        binding->source_mount_flags = source_mount_flags;
         replay_recursive_bindings(tracee, recursive_bindings,
                                   recursive_binding_count, guest_path);
         refresh_cwd_alias_prefix(tracee);
@@ -563,6 +753,11 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
     char put_old_guest[PATH_MAX];
     char old_root_host[PATH_MAX];
     Binding *root_binding;
+    Binding *new_root_binding;
+    bool new_root_readonly;
+    bool new_root_source_readonly;
+    unsigned long new_root_flags;
+    unsigned long new_root_source_flags;
     Binding **snapshot;
     size_t new_root_len;
     size_t put_old_len = 0;
@@ -578,6 +773,14 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
 
     if (guest_canonicalize(tracee, new_root_user, new_root_guest) < 0)
         return;
+
+    new_root_binding = get_binding(tracee, GUEST, new_root_guest);
+    new_root_readonly = new_root_binding != NULL && new_root_binding->readonly;
+    new_root_source_readonly = new_root_binding != NULL &&
+                               new_root_binding->source_readonly;
+    new_root_flags = new_root_binding != NULL ? new_root_binding->mount_flags : 0;
+    new_root_source_flags = new_root_binding != NULL
+        ? new_root_binding->source_mount_flags : 0;
 
     /* bubblewrap has already assembled the virtual root through bindings,
      * then uses pivot_root(".", ".") from /newroot only to detach its
@@ -638,10 +841,21 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
         snapshot[i++] = iter;
 
     /* 切换 root，并把旧 root 暴露到 put_old。 */
-    remove_binding_from_all_lists(tracee, root_binding);
-    (void) insort_binding3(tracee, tracee->fs, new_root_host, "/");
     if (have_put_old)
-        (void) insort_binding3(tracee, tracee->fs, old_root_host, put_old_after);
+        rebase_proc_fd_paths(tracee->pid, new_root_guest, put_old_after);
+    remove_binding_from_all_lists(tracee, root_binding);
+    new_root_binding = insort_binding3(tracee, tracee->fs, new_root_host, "/");
+    if (new_root_binding != NULL) {
+        new_root_binding->readonly = new_root_readonly;
+        new_root_binding->source_readonly = new_root_source_readonly;
+        new_root_binding->mount_flags = new_root_flags;
+        new_root_binding->source_mount_flags = new_root_source_flags;
+    }
+    if (have_put_old) {
+        Binding *old_root_binding = insort_binding3(tracee, tracee->fs,
+                                                    old_root_host, put_old_after);
+        (void) old_root_binding;
+    }
 
     for (i = 0; i < count; i++) {
         Binding *b = snapshot[i];
@@ -658,9 +872,7 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
                 written = snprintf(aliased, sizeof(aliased), "%s%s",
                                    put_old_after, b->guest.path);
                 if (written >= 0 && (size_t) written < sizeof(aliased))
-                    (void) insort_binding4(tracee, tracee->fs,
-                                           b->covered->host.path, aliased,
-                                           b->covered->mount_kind);
+                    (void) copy_binding(tracee, tracee->fs, b->covered, aliased);
             }
             remove_binding_from_all_lists(tracee, b);
             continue;
@@ -673,9 +885,7 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
             && blen > new_root_len
             && strncmp(b->guest.path, new_root_guest, new_root_len) == 0
             && b->guest.path[new_root_len] == '/') {
-            (void) insort_binding4(tracee, tracee->fs, b->host.path,
-                                   b->guest.path + new_root_len,
-                                   b->mount_kind);
+            (void) copy_binding(tracee, tracee->fs, b, b->guest.path + new_root_len);
             remove_binding_from_all_lists(tracee, b);
             continue;
         }
@@ -694,9 +904,7 @@ static void emulate_pivot_root(Tracee *tracee, const char *new_root_user,
                 >= sizeof(aliased))
                 continue;
 
-            (void) insort_binding4(tracee, tracee->fs,
-                                   b->host.path, aliased,
-                                   b->mount_kind);
+            (void) copy_binding(tracee, tracee->fs, b, aliased);
         }
     }
 
@@ -742,6 +950,116 @@ void apply_emulated_umount(Tracee *tracee)
 }
 
 /* 上游 e754452：供普通 sysenter 和 SIGSYS 处理器共用。 */
+int apply_emulated_mount_setattr(Tracee *tracee)
+{
+    struct {
+        uint64_t attr_set;
+        uint64_t attr_clr;
+        uint64_t propagation;
+        uint64_t userns_fd;
+    } attributes;
+    const uint64_t supported = MS_RDONLY | MS_NOSUID | MS_NODEV;
+    unsigned long flags = peek_reg(tracee, CURRENT, SYSARG_3);
+    word_t attribute_address = peek_reg(tracee, CURRENT, SYSARG_4);
+    word_t attribute_size = peek_reg(tracee, CURRENT, SYSARG_5);
+    int dirfd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+    char path[PATH_MAX];
+    char host_path[PATH_MAX];
+    char guest_path[PATH_MAX];
+    Binding *target = NULL;
+    Binding *binding;
+    int status;
+
+    if ((flags & ~(AT_EMPTY_PATH | AT_RECURSIVE | AT_SYMLINK_NOFOLLOW)) != 0 ||
+        attribute_size < sizeof(attributes))
+        return -EINVAL;
+    if (attribute_size > 4096)
+        return -E2BIG;
+    if (read_data(tracee, &attributes, attribute_address, sizeof(attributes)) < 0)
+        return -EFAULT;
+    for (word_t offset = sizeof(attributes); offset < attribute_size; offset++) {
+        unsigned char extra;
+        if (read_data(tracee, &extra, attribute_address + offset, sizeof(extra)) < 0)
+            return -EFAULT;
+        if (extra != 0)
+            return -E2BIG;
+    }
+    if (((attributes.attr_set | attributes.attr_clr) & ~supported) != 0 ||
+        attributes.propagation != 0 || attributes.userns_fd != 0)
+        return -EOPNOTSUPP;
+    status = get_sysarg_path(tracee, path, SYSARG_2);
+    if (status < 0)
+        return status;
+
+    guest_path[0] = '\0';
+    int path_fd;
+    if (parse_tracee_proc_fd(tracee, path, &path_fd)) {
+        dirfd = path_fd;
+        path[0] = '\0';
+        flags |= AT_EMPTY_PATH;
+    }
+    if (path[0] == '\0') {
+        if ((flags & AT_EMPTY_PATH) == 0)
+            return -ENOENT;
+        status = host_path_of_dirfd(tracee, dirfd, host_path);
+        const char *remembered = recall_proc_fd_path(tracee->pid, dirfd);
+        if (status >= 0 && remembered != NULL) {
+            char remembered_host[PATH_MAX];
+            if (translate_path(tracee, remembered_host, AT_FDCWD, remembered, true) == 0 &&
+                strcmp(remembered_host, host_path) == 0)
+                (void) guest_canonicalize(tracee, remembered, guest_path);
+        }
+    } else {
+        status = translate_path(tracee, host_path, dirfd, path,
+                                (flags & AT_SYMLINK_NOFOLLOW) == 0);
+        if (status >= 0 && (path[0] == '/' || dirfd == AT_FDCWD))
+            status = guest_canonicalize(tracee, path, guest_path);
+    }
+    if (status < 0)
+        return status;
+    struct stat target_info;
+    if (path[0] != '\0' && lstat(host_path, &target_info) < 0)
+        return -errno;
+    if (guest_path[0] == '\0' &&
+        !detranslate_mount_target_in_current_root(tracee, host_path, guest_path)) {
+        strcpy(guest_path, host_path);
+        status = detranslate_path(tracee, guest_path, NULL);
+        if (status < 0)
+            return status;
+    }
+    for (binding = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+         binding != (void *)tracee->fs->bindings.guest;
+         binding = CIRCLEQ_NEXT(binding, link.guest)) {
+        Comparison comparison = compare_paths(binding->guest.path, guest_path);
+        if (binding->mount_kind != BINDING_MOUNT_INTERNAL &&
+            (comparison == PATHS_ARE_EQUAL || comparison == PATH1_IS_PREFIX) &&
+            (target == NULL || binding->guest.length > target->guest.length))
+            target = binding;
+    }
+    if (target == NULL)
+        return -EINVAL;
+    const bool preserve_oldroot = strcmp(target->guest.path, "/") == 0;
+    for (binding = CIRCLEQ_FIRST(tracee->fs->bindings.guest);
+         binding != (void *)tracee->fs->bindings.guest;
+         binding = CIRCLEQ_NEXT(binding, link.guest)) {
+        if (preserve_oldroot &&
+            (strcmp(binding->guest.path, "/oldroot") == 0 ||
+             strncmp(binding->guest.path, "/oldroot/", 9) == 0))
+            continue;
+        if (binding != target &&
+            ((flags & AT_RECURSIVE) == 0 ||
+             compare_paths(target->guest.path, binding->guest.path) != PATH1_IS_PREFIX))
+            continue;
+        if ((attributes.attr_clr & MS_RDONLY) != 0)
+            binding->readonly = false;
+        if ((attributes.attr_set & MS_RDONLY) != 0)
+            binding->readonly = true;
+        binding->mount_flags &= ~(unsigned long)attributes.attr_clr;
+        binding->mount_flags |= (unsigned long)attributes.attr_set & ~MS_RDONLY;
+    }
+    return 0;
+}
+
 void apply_emulated_mount(Tracee *tracee)
 {
     char src_user[PATH_MAX];
@@ -1853,6 +2171,11 @@ static int translate_openat_enter(Tracee *tracee, bool from_openat2)
     flags = peek_reg(tracee, CURRENT, SYSARG_3);
     resolve_dirfd = dirfd;
 
+    if ((flags & O_PATH) != 0) {
+        tracee->sysexit_pending = true;
+        tracee->restart_how = PTRACE_SYSCALL;
+    }
+
     status = get_sysarg_path(tracee, path, SYSARG_2);
     if (status < 0)
         return status;
@@ -2516,7 +2839,22 @@ int translate_syscall_enter(Tracee *tracee)
         break;
 
     /* 上游 5c7b2fd：unshare/setns 假装成功；umount 移除模拟 binding。 */
+    case PR_mount_setattr:
+        tracee->sysexit_pending = true;
+        tracee->restart_how = PTRACE_SYSCALL;
+        status = apply_emulated_mount_setattr(tracee);
+        if (status < 0)
+            break;
+        poke_reg(tracee, SYSARG_RESULT, 0);
+        set_sysnum(tracee, PR_void);
+        break;
+
     case PR_unshare:
+        if ((peek_reg(tracee, CURRENT, SYSARG_1) & CLONE_NEWNS) != 0) {
+            status = unshare_file_system_namespace(tracee);
+            if (status < 0)
+                break;
+        }
         if ((peek_reg(tracee, CURRENT, SYSARG_1) & CLONE_NEWNET) != 0)
             tracee->fake_netns = true;
         poke_reg(tracee, SYSARG_RESULT, 0);

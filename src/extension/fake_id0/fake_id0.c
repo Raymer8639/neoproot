@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/mount.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <sys/ptrace.h>
@@ -623,6 +624,10 @@ static ALWAYS_INLINE int handle_sysexit_start(Tracee *restrict tracee, Config *r
     word_t sysnum = get_sysnum(tracee, ORIGINAL);
     if (UNLIKELY((int)result < 0 || tracee->status < 0 || sysnum != PR_execve)) return 0;
     if (!tracee->skip_proot_loader) adjust_elf_auxv(tracee, config);
+    const char *executable = tracee->new_exe != NULL ? tracee->new_exe : tracee->exe;
+    const Binding *binding = get_binding(tracee, GUEST, executable);
+    if (binding != NULL && (binding->mount_flags & MS_NOSUID) != 0)
+        return 0;
     struct stat mode;
     if (UNLIKELY(stat(tracee->host_exe, &mode) < 0)) return 0;
     if ((mode.st_mode & S_ISUID) != 0) { config->euid = 0; config->suid = 0; }

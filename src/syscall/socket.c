@@ -75,8 +75,10 @@ int translate_socketcall_enter(Tracee *tracee, word_t *addr_ptr, int len)
 	if (strlen(host_path) >= sizeof_path) {
 		char *short_host;
 		Binding *b;
+		TALLOC_CTX *binding_context = tracee->fs->bindings.guest != NULL
+			? (TALLOC_CTX *)tracee->fs->bindings.guest : tracee->fs;
 
-		short_host = create_temp_name(tracee->ctx, "proot");
+		short_host = create_temp_name(binding_context, "proot");
 		if (!short_host || strlen(short_host) >= sizeof_path)
 			return -EINVAL;
 
@@ -96,11 +98,12 @@ int translate_socketcall_enter(Tracee *tracee, word_t *addr_ptr, int len)
 		if (detranslate_path(tracee, guest_path, NULL) < 0)
 			return -EINVAL;
 
-		b = insort_binding3(tracee, tracee->ctx, short_host, guest_path);
+		b = insort_binding4(tracee, binding_context, short_host, guest_path,
+				   BINDING_MOUNT_INTERNAL);
 		if (!b)
 			return -EINVAL;
 
-		talloc_reparent(tracee->ctx, b, short_host);
+		talloc_reparent(binding_context, b, short_host);
 		strcpy(host_path, short_host);
 	}
 

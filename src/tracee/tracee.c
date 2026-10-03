@@ -326,6 +326,58 @@ void free_terminated_tracees(void) {
 
 [[nodiscard]]
 HOT __attribute__((flatten))
+int unshare_file_system_namespace(Tracee *tracee) {
+    FileSystemNameSpace *source = tracee->fs;
+    FileSystemNameSpace *copy;
+    Binding *binding;
+
+    if (source == NULL || source->bindings.guest == NULL)
+        return 0;
+
+    copy = talloc_zero(tracee, FileSystemNameSpace);
+    if (UNLIKELY(!copy))
+        return -ENOMEM;
+    copy->cwd = talloc_strdup(copy, source->cwd);
+    if (UNLIKELY(!copy->cwd)) {
+        TALLOC_FREE(copy);
+        return -ENOMEM;
+    }
+    talloc_set_name_const(copy->cwd, "$cwd");
+    if (source->cwd_alias_prefix != NULL)
+        copy->cwd_alias_prefix = talloc_strdup(copy, source->cwd_alias_prefix);
+    if (source->proc_uid_map != NULL)
+        copy->proc_uid_map = talloc_reference(copy, source->proc_uid_map);
+    if (source->proc_gid_map != NULL)
+        copy->proc_gid_map = talloc_reference(copy, source->proc_gid_map);
+    if (source->proc_setgroups != NULL)
+        copy->proc_setgroups = talloc_reference(copy, source->proc_setgroups);
+
+    copy->bindings.guest = talloc_zero(copy, Bindings);
+    copy->bindings.host = talloc_zero(copy, Bindings);
+    if (UNLIKELY(!copy->bindings.guest || !copy->bindings.host)) {
+        TALLOC_FREE(copy);
+        return -ENOMEM;
+    }
+    CIRCLEQ_INIT(copy->bindings.guest);
+    CIRCLEQ_INIT(copy->bindings.host);
+
+    tracee->fs = copy;
+    for (binding = CIRCLEQ_FIRST(source->bindings.guest);
+         binding != (void *)source->bindings.guest;
+         binding = CIRCLEQ_NEXT(binding, link.guest)) {
+        if (copy_binding(tracee, copy, binding, binding->guest.path) == NULL) {
+            tracee->fs = source;
+            TALLOC_FREE(copy);
+            return -ENOMEM;
+        }
+    }
+
+    TALLOC_FREE(source);
+    return 0;
+}
+
+[[nodiscard]]
+HOT __attribute__((flatten))
 int new_child(Tracee *parent, word_t clone_flags) {
     Tracee *child;
     unsigned long pid;
@@ -395,7 +447,7 @@ int new_child(Tracee *parent, word_t clone_flags) {
     }
 
     TALLOC_FREE(child->fs);
-    if (clone_flags & CLONE_FS) {
+    if ((clone_flags & CLONE_FS) && !parent->clone_stripped_newns) {
         child->fs = talloc_reference(child, parent->fs);
     } else {
         child->fs = talloc_zero(child, FileSystemNameSpace);
@@ -437,10 +489,7 @@ int new_child(Tracee *parent, word_t clone_flags) {
             for (iter = CIRCLEQ_FIRST(parent->fs->bindings.guest);
                  iter != (void *) parent->fs->bindings.guest;
                  iter = CIRCLEQ_NEXT(iter, link.guest))
-                (void) insort_binding4(child, child->fs,
-                                       iter->host.path,
-                                       iter->guest.path,
-                                       iter->mount_kind);
+                (void) copy_binding(child, child->fs, iter, iter->guest.path);
         }
         else {
             /* Bindings are shared across file-system name-spaces since a

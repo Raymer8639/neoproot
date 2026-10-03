@@ -1,9 +1,11 @@
 #include <linux/limits.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/mount.h>
 
 #include "extension/fake_id0/exec.h"
 #include "extension/fake_id0/helper_functions.h"
+#include "path/binding.h"
 
 /**
  * 处理 execve 系统调用
@@ -49,6 +51,10 @@ int handle_exec_enter_end(Tracee *tracee, Reg filename_sysarg, Config *config)
     status = read_meta_file(meta_path, &mode, &uid, &gid, config);
     if (status < 0)
         return status;
+
+    const Binding *binding = get_binding(tracee, HOST, path);
+    if (binding != NULL && (binding->mount_flags & MS_NOSUID) != 0)
+        return 0;
 
     // 设置 suid 模拟
     if (mode & S_ISUID) {

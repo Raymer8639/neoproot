@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <sys/mount.h>
 
 #define LIKELY(x)   __builtin_expect(!!(x), 1)
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
@@ -156,7 +157,8 @@ static ALWAYS_INLINE void mountinfo_check_open_path(Tracee *restrict tracee, cha
         for (binding = CIRCLEQ_FIRST(target->fs->bindings.guest);
              binding != (void *) target->fs->bindings.guest;
              binding = CIRCLEQ_NEXT(binding, link.guest)) {
-            if (strcmp(binding->guest.path, "/") == 0 ||
+            if (binding->mount_kind == BINDING_MOUNT_INTERNAL ||
+                strcmp(binding->guest.path, "/") == 0 ||
                 strcmp(binding->guest.path, "/dev") == 0 ||
                 strcmp(binding->guest.path, "/proc") == 0 ||
                 strcmp(binding->guest.path, "/sys") == 0 ||
@@ -164,7 +166,10 @@ static ALWAYS_INLINE void mountinfo_check_open_path(Tracee *restrict tracee, cha
                 continue;
             fprintf(fake, "%u %u 0:1 / ", mount_id++, root_mount_id);
             write_mountinfo_path(fake, binding->guest.path);
-            fputs(" rw - none none rw\n", fake);
+            fprintf(fake, " %s%s%s - none none rw\n",
+                    binding->readonly ? "ro" : "rw",
+                    (binding->mount_flags & MS_NOSUID) != 0 ? ",nosuid" : "",
+                    (binding->mount_flags & MS_NODEV) != 0 ? ",nodev" : "");
         }
 
         /* A user-space tmpfs has a host backing directory.  Procfd exposes

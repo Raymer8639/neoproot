@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdint.h>
 #include <sys/utsname.h>
 #include <linux/net.h>
 #include <linux/ioctl.h>
@@ -25,6 +26,10 @@
 #include "tracee/statx.h"
 #include "path/path.h"
 #include "path/binding.h"
+
+#ifndef RESOLVE_IN_ROOT
+#define RESOLVE_IN_ROOT 0x10
+#endif
 #include "ptrace/ptrace.h"
 #include "ptrace/wait.h"
 #include "extension/extension.h"
@@ -37,16 +42,30 @@ static struct {
     pid_t pid;
     int fd;
     char path[PATH_MAX];
+	char host_path[PATH_MAX];
+	TALLOC_CTX *context;
+	const Binding *binding;
+	bool has_attributes;
+	bool readonly;
+	unsigned long mount_flags;
 } proc_fd_path_cache[PROC_FD_PATH_CACHE_SIZE];
 static size_t proc_fd_path_cache_next;
 
-static void remember_proc_fd_path(pid_t pid, int fd, const char *path)
+static void remember_proc_fd_path(pid_t pid, int fd, const char *path,
+                                  const char *host_path, const Binding *binding,
+                                  bool has_attributes, bool readonly,
+                                  unsigned long mount_flags)
 {
     size_t index;
     size_t slot = PROC_FD_PATH_CACHE_SIZE;
 
     if (fd < 0 || path == NULL || path[0] != '/')
         return;
+
+    char path_copy[PATH_MAX];
+    char host_copy[PATH_MAX];
+    snprintf(path_copy, sizeof(path_copy), "%s", path);
+    snprintf(host_copy, sizeof(host_copy), "%s", host_path != NULL ? host_path : "");
 
     for (index = 0; index < PROC_FD_PATH_CACHE_SIZE; index++) {
         if (proc_fd_path_cache[index].pid == pid &&
@@ -61,9 +80,18 @@ static void remember_proc_fd_path(pid_t pid, int fd, const char *path)
             (proc_fd_path_cache_next + 1) % PROC_FD_PATH_CACHE_SIZE;
     }
 
+    TALLOC_CTX *context = binding != NULL ? talloc_new(NULL) : NULL;
+    const Binding *reference = context != NULL ? talloc_reference(context, binding) : NULL;
+    TALLOC_FREE(proc_fd_path_cache[slot].context);
+    proc_fd_path_cache[slot].context = context;
+    proc_fd_path_cache[slot].binding = reference;
+    proc_fd_path_cache[slot].has_attributes = has_attributes;
+    proc_fd_path_cache[slot].readonly = readonly;
+    proc_fd_path_cache[slot].mount_flags = mount_flags;
+    strcpy(proc_fd_path_cache[slot].host_path, host_copy);
     proc_fd_path_cache[slot].pid = pid;
     proc_fd_path_cache[slot].fd = fd;
-    strncpy(proc_fd_path_cache[slot].path, path, PATH_MAX - 1);
+    strncpy(proc_fd_path_cache[slot].path, path_copy, PATH_MAX - 1);
     proc_fd_path_cache[slot].path[PATH_MAX - 1] = 0;
 }
 
@@ -77,6 +105,9 @@ void forget_proc_fd_path(pid_t pid, int fd)
             proc_fd_path_cache[index].pid = 0;
             proc_fd_path_cache[index].fd = -1;
             proc_fd_path_cache[index].path[0] = 0;
+            proc_fd_path_cache[index].has_attributes = false;
+            TALLOC_FREE(proc_fd_path_cache[index].context);
+            proc_fd_path_cache[index].binding = NULL;
         }
     }
     forget_translated_dirfd(pid, fd);
@@ -93,6 +124,9 @@ void forget_proc_fd_paths_range(pid_t pid, unsigned int first, unsigned int last
             proc_fd_path_cache[index].pid = 0;
             proc_fd_path_cache[index].fd = -1;
             proc_fd_path_cache[index].path[0] = 0;
+            proc_fd_path_cache[index].has_attributes = false;
+            TALLOC_FREE(proc_fd_path_cache[index].context);
+            proc_fd_path_cache[index].binding = NULL;
         }
     }
     forget_translated_dirfds_range(pid, first, last);
@@ -107,6 +141,9 @@ void clear_proc_fd_paths(pid_t pid)
             proc_fd_path_cache[index].pid = 0;
             proc_fd_path_cache[index].fd = -1;
             proc_fd_path_cache[index].path[0] = 0;
+            proc_fd_path_cache[index].has_attributes = false;
+            TALLOC_FREE(proc_fd_path_cache[index].context);
+            proc_fd_path_cache[index].binding = NULL;
         }
     }
     clear_translated_dirfds(pid);
@@ -120,7 +157,12 @@ void inherit_proc_fd_paths(pid_t parent_pid, pid_t child_pid)
     for (index = 0; index < PROC_FD_PATH_CACHE_SIZE; index++) {
         if (proc_fd_path_cache[index].pid == parent_pid)
             remember_proc_fd_path(child_pid, proc_fd_path_cache[index].fd,
-                                  proc_fd_path_cache[index].path);
+                                  proc_fd_path_cache[index].path,
+                                  proc_fd_path_cache[index].host_path,
+                                  proc_fd_path_cache[index].binding,
+                                  proc_fd_path_cache[index].has_attributes,
+                                  proc_fd_path_cache[index].readonly,
+                                  proc_fd_path_cache[index].mount_flags);
     }
     inherit_translated_dirfds(parent_pid, child_pid);
 }
@@ -129,11 +171,72 @@ static void copy_proc_fd_path(pid_t pid, int source_fd, int target_fd)
 {
     const char *path = recall_proc_fd_path(pid, source_fd);
 
-    if (path != NULL)
-        remember_proc_fd_path(pid, target_fd, path);
+    if (path != NULL) {
+        for (size_t index = 0; index < PROC_FD_PATH_CACHE_SIZE; index++) {
+            if (proc_fd_path_cache[index].pid == pid && proc_fd_path_cache[index].fd == source_fd) {
+                remember_proc_fd_path(pid, target_fd, path,
+                                      proc_fd_path_cache[index].host_path,
+                                      proc_fd_path_cache[index].binding,
+                                      proc_fd_path_cache[index].has_attributes,
+                                      proc_fd_path_cache[index].readonly,
+                                      proc_fd_path_cache[index].mount_flags);
+                break;
+            }
+        }
+    }
     else
         forget_proc_fd_path(pid, target_fd);
     copy_translated_dirfd(pid, source_fd, target_fd);
+}
+
+const Binding *recall_proc_fd_binding(const Tracee *tracee, int fd)
+{
+    char host_path[PATH_MAX];
+    if (readlink_proc_pid_fd(tracee->pid, fd, host_path) < 0)
+        return NULL;
+    for (size_t index = 0; index < PROC_FD_PATH_CACHE_SIZE; index++) {
+        if (proc_fd_path_cache[index].pid == tracee->pid &&
+            proc_fd_path_cache[index].fd == fd &&
+            strcmp(proc_fd_path_cache[index].host_path, host_path) == 0)
+            return proc_fd_path_cache[index].binding;
+    }
+    return NULL;
+}
+
+bool recall_proc_fd_mount_attributes(const Tracee *tracee, int fd,
+                                     bool *readonly,
+                                     unsigned long *mount_flags)
+{
+    for (size_t index = 0; index < PROC_FD_PATH_CACHE_SIZE; index++) {
+        if (proc_fd_path_cache[index].pid == tracee->pid &&
+            proc_fd_path_cache[index].fd == fd &&
+            proc_fd_path_cache[index].has_attributes) {
+            *readonly = proc_fd_path_cache[index].readonly;
+            *mount_flags = proc_fd_path_cache[index].mount_flags;
+            return true;
+        }
+    }
+    return false;
+}
+
+void rebase_proc_fd_paths(pid_t pid, const char *new_root, const char *put_old)
+{
+    size_t root_length = strlen(new_root);
+
+    for (size_t index = 0; index < PROC_FD_PATH_CACHE_SIZE; index++) {
+        char rebased[PATH_MAX];
+        const char *path = proc_fd_path_cache[index].path;
+        if (proc_fd_path_cache[index].pid != pid)
+            continue;
+        Comparison comparison = compare_paths(new_root, path);
+        if (comparison == PATHS_ARE_EQUAL || comparison == PATH1_IS_PREFIX) {
+            const char *suffix = path + (root_length == 1 ? 0 : root_length);
+            snprintf(rebased, sizeof(rebased), "%s", suffix[0] == '\0' ? "/" : suffix);
+        } else if (join_paths(2, rebased, put_old, path) < 0) {
+            continue;
+        }
+        strcpy(proc_fd_path_cache[index].path, rebased);
+    }
 }
 
 const char *recall_proc_fd_path(pid_t pid, int fd)
@@ -373,6 +476,7 @@ void translate_syscall_exit(Tracee *tracee)
     case PR_unshare:
     case PR_setns:
     case PR_mount:
+    case PR_mount_setattr:
     case PR_umount:
     case PR_umount2:
     case PR_pivot_root:
@@ -483,13 +587,47 @@ void translate_syscall_exit(Tracee *tracee)
              * to the existing /proc/self/fd handling. */
             word_t input = peek_reg(tracee, ORIGINAL, path_reg);
 
-            if (read_path(tracee, opened_path, input) < 0 || opened_path[0] != '/') {
+            int path_status = read_path(tracee, opened_path, input);
+            if (path_status >= 0 && opened_path[0] != '/' &&
+                (syscall_number == PR_openat || syscall_number == PR_openat2)) {
+                int directory_fd = (int)peek_reg(tracee, ORIGINAL, SYSARG_1);
+                const char *directory = recall_proc_fd_path(tracee->pid, directory_fd);
+                char resolved_path[PATH_MAX];
+                if (directory != NULL && join_paths(2, resolved_path, directory, opened_path) == 0)
+                    strcpy(opened_path, resolved_path);
+            }
+            if (path_status < 0 || opened_path[0] != '/') {
                 input = peek_reg(tracee, MODIFIED, path_reg);
                 if (read_path(tracee, opened_path, input) < 0)
                     goto end;
             }
-            if (opened_path[0] == '/')
-                remember_proc_fd_path(tracee->pid, (int)syscall_result, opened_path);
+            if (syscall_number == PR_openat2 && opened_path[0] == '/') {
+                uint64_t how[3];
+                int source_fd = (int)peek_reg(tracee, ORIGINAL, SYSARG_1);
+                const char *directory = recall_proc_fd_path(tracee->pid, source_fd);
+                word_t how_address = peek_reg(tracee, ORIGINAL, SYSARG_3);
+                word_t how_size = peek_reg(tracee, ORIGINAL, SYSARG_4);
+                if (directory != NULL &&
+                    (strcmp(directory, "/oldroot") == 0 ||
+                     strncmp(directory, "/oldroot/", 9) == 0) &&
+                    how_size >= sizeof(how) &&
+                    read_data(tracee, how, how_address, sizeof(how)) >= 0 &&
+                    (how[2] & RESOLVE_IN_ROOT) != 0) {
+                    char resolved_path[PATH_MAX];
+                    if (join_paths(2, resolved_path, directory, opened_path) == 0)
+                        strcpy(opened_path, resolved_path);
+                }
+            }
+            if (opened_path[0] == '/') {
+                char opened_host[PATH_MAX];
+                const Binding *binding = get_binding(tracee, GUEST, opened_path);
+                if (readlink_proc_pid_fd(tracee->pid, (int)syscall_result, opened_host) < 0)
+                    opened_host[0] = '\0';
+                remember_proc_fd_path(tracee->pid, (int)syscall_result, opened_path,
+                                      opened_host, binding, binding != NULL,
+                                      binding != NULL && binding->readonly,
+                                      binding != NULL ? binding->mount_flags : 0);
+            }
         }
         goto end;
 

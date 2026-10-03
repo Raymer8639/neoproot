@@ -7,6 +7,7 @@
 #include <linux/net.h>
 #include <assert.h>
 #include <time.h>
+#include <sched.h>
 
 #include "extension/extension.h"
 #include "cli/note.h"
@@ -220,6 +221,9 @@ static int handle_seccomp_event_common(Tracee *restrict tracee) {
             apply_emulated_mount(tracee);
             set_result_after_seccomp(tracee, 0);
             break;
+        case PR_mount_setattr:
+            set_result_after_seccomp(tracee, apply_emulated_mount_setattr(tracee));
+            break;
         case PR_pivot_root:
             apply_emulated_pivot_root(tracee);
             set_result_after_seccomp(tracee, 0);
@@ -230,6 +234,9 @@ static int handle_seccomp_event_common(Tracee *restrict tracee) {
             set_result_after_seccomp(tracee, 0);
             break;
         case PR_unshare:
+            if ((peek_reg(tracee, CURRENT, SYSARG_1) & CLONE_NEWNS) != 0)
+                (void) unshare_file_system_namespace(tracee);
+            /* FALLTHROUGH: unshare and setns both return a synthetic success. */
         case PR_setns:
             set_result_after_seccomp(tracee, 0);
             break;
