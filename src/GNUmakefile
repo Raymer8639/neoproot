@@ -8,8 +8,15 @@ SRC    := $(dir $(firstword $(MAKEFILE_LIST)))
 GIT      = git
 RM       = rm
 INSTALL  = install
-CC       ?= $(CROSS_COMPILE)clang
-CXX      ?= $(CROSS_COMPILE)clang++
+# GNU make predefines CC=cc and CXX=g++.  Treat those built-in defaults as
+# unset so the project uses its intended Clang toolchain, while preserving
+# explicit command-line or environment overrides.
+ifneq ($(filter default undefined,$(origin CC)),)
+CC       := $(CROSS_COMPILE)clang
+endif
+ifneq ($(filter default undefined,$(origin CXX)),)
+CXX      := $(CROSS_COMPILE)clang++
+endif
 LD       = $(CC)
 STRIP    ?= $(CROSS_COMPILE)strip
 OBJCOPY  ?= $(CROSS_COMPILE)objcopy
@@ -35,7 +42,7 @@ LDFLAGS += -ltalloc -lm -ldl -lc -lstdc++ -flto=thin -Wl,-z,noexecstack -Wl,--gc
 
 # --icf=all 仅 lld 支持：有 ld.lld 时显式启用 lld；否则自动移除该选项。
 #（Termux 的 clang 默认链接器即为 lld，行为不变）
-HAVE_LLD := $(shell command -v ld.lld 2>/dev/null)
+HAVE_LLD := $(shell command -v ld.lld >/dev/null 2>&1 && ld.lld --version >/dev/null 2>&1 && echo 1)
 
 # seccomp 过滤器检测（性能关键）：只停靠白名单 syscall，否则全量 ptrace
 # 停靠每个 syscall（慢 100-1000 倍）。上游 proot 由 configure 检测，
