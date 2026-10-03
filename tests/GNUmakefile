@@ -29,6 +29,8 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-bwrap-proc-dirfd.sh test-bwrap-procfd-mount-target.sh \
 	test-bwrap-resolve-in-root.sh test-bwrap-cwd-dirfd.sh \
 	test-bwrap-devnodes.sh \
+	test-mountinfo-internal-bindings.sh \
+	test-mount-setattr.sh \
 	test-tracer-guard.sh \
 	test-8d3c07f5.sh \
 	test-statx-empty-path-mount-id.sh \

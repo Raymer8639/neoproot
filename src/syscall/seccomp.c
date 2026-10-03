@@ -391,6 +391,7 @@ static FilteredSysnum proot_sysnums[] = {
     { PR_mknod,         0 },
     { PR_mknodat,       0 },
     { PR_mount,         FILTER_SYSEXIT },
+    { PR_mount_setattr, 0 },
     { PR_name_to_handle_at, 0 },
     { PR_newfstatat,    0 },
     { PR_oldlstat,      0 },

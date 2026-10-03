@@ -868,11 +868,10 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
                          * 入口快照恢复。 */
                         tracee->restore_sysarg1_after_sigsys = true;
                     }
-                    const bool skip_signal = tracee->skip_next_seccomp_signal ||
-                        (word_t)siginfo.si_syscall == SYSCALL_AVOIDER;
+                    const bool skip_signal = (word_t)siginfo.si_syscall == SYSCALL_AVOIDER;
+                    tracee->skip_next_seccomp_signal = false;
                     if (skip_signal) {
                         VERBOSE(tracee, 4, "suppressed SIGSYS after void syscall");
-                        tracee->skip_next_seccomp_signal = false;
                         tracee->restore_sysarg1_after_sigsys = false;
                         signal = 0;
                     } else {

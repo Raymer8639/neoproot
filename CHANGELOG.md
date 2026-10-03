@@ -3,6 +3,16 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.10.14] - 2026-10-03
+
+- Fix Codex 0.160 sandbox startup on Termux by keeping long Unix socket
+  aliases alive across fork and exec without exposing them as guest mounts.
+- Emulate the mount attributes and namespace behavior required by modern
+  bubblewrap, preserving readonly, nodev and nosuid semantics across binds,
+  clones and pivot-root.
+- Add regressions for internal bindings, long socket lifetimes, mount
+  attributes and binding-cache path boundaries.
+
 ## [v5.10.13] - 2026-09-30
 
 - Render NEOPROOT as a five-line ASCII banner in version/help output.

@@ -41,15 +41,21 @@ extern void translate_syscall_exit(Tracee *tracee);
 /* Read openat2 how, store resolve on the tracee, rewrite as openat. */
 extern int  lower_openat2_to_openat(Tracee *tracee);
 extern const char *recall_proc_fd_path(pid_t pid, int fd);
+extern const struct binding *recall_proc_fd_binding(const Tracee *tracee, int fd);
+extern bool recall_proc_fd_mount_attributes(const Tracee *tracee, int fd,
+                                            bool *readonly,
+                                            unsigned long *mount_flags);
 extern void forget_proc_fd_path(pid_t pid, int fd);
 extern void forget_proc_fd_paths_range(pid_t pid, unsigned int first, unsigned int last);
 extern void inherit_proc_fd_paths(pid_t parent_pid, pid_t child_pid);
 extern void clear_proc_fd_paths(pid_t pid);
+extern void rebase_proc_fd_paths(pid_t pid, const char *new_root, const char *put_old);
 
 extern void handle_netlink_reply_exit(Tracee *tracee, word_t syscall_number);
 extern bool host_blocks_af_netlink(const Tracee *tracee);
 
 extern void apply_emulated_mount(Tracee *tracee);
+extern int apply_emulated_mount_setattr(Tracee *tracee);
 extern void apply_emulated_pivot_root(Tracee *tracee);
 extern void apply_emulated_umount(Tracee *tracee);
 

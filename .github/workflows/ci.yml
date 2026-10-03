@@ -106,12 +106,20 @@ jobs:
           PROOT=../src/neoproot sh test-stat-shim-raw-stat.sh
           PROOT=../src/neoproot sh test-exec-env-stack.sh
           PROOT=../src/neoproot sh test-version-branding.sh
+          PROOT=../src/neoproot sh test-mount-setattr.sh
           PROOT=../src/neoproot sh test-bwrap-oldroot-bind.sh
           PROOT=../src/neoproot sh test-bwrap-proc-dirfd.sh
           PROOT=../src/neoproot sh test-bwrap-procfd-mount-target.sh
           PROOT=../src/neoproot sh test-bwrap-resolve-in-root.sh
           PROOT=../src/neoproot sh test-tracer-guard.sh
           PROOT=../src/neoproot sh test-8d3c07f5.sh
+
+      - name: Test internal binding mountinfo
+        run: |
+          sudo mkdir -p /data
+          sudo mount --bind "$RUNNER_TEMP" /data
+          trap 'sudo umount /data' EXIT
+          TMPDIR=/data PROOT=src/neoproot sh tests/test-mountinfo-internal-bindings.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

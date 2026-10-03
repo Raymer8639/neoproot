@@ -11,6 +11,7 @@
 typedef enum {
 	BINDING_MOUNT_NONE = 0,
 	BINDING_MOUNT_TMPFS = 1,
+	BINDING_MOUNT_INTERNAL = 2,
 } BindingMountKind;
 
 typedef struct binding {
@@ -18,8 +19,11 @@ typedef struct binding {
 	Path guest;
 
 	bool readonly;
+	bool source_readonly;
 	bool need_substitution;
 	bool must_exist;
+	unsigned long mount_flags;
+	unsigned long source_mount_flags;
 	BindingMountKind mount_kind;
 	/* Strong reference to the exact guest binding hidden by this replacement. */
 	struct binding *covered;
@@ -48,6 +52,9 @@ Binding *insort_binding4(const Tracee *tracee, const TALLOC_CTX *context,
 			 BindingMountKind mount_kind);
 
 Binding *new_binding(Tracee *tracee, const char *host, const char *guest, bool must_exist);
+
+Binding *copy_binding(const Tracee *tracee, const TALLOC_CTX *context,
+		      const Binding *binding, const char *guest_path);
 
 int initialize_bindings(Tracee *tracee);
 

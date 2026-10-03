@@ -5,6 +5,8 @@ PROOT=${PROOT:-../src/neoproot}
 CC=${CC:-cc}
 ROOT=$(mktemp -d)
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+mkdir -p "$ROOT/probe-dir"
+: > "$ROOT/probe-dir-sibling"
 
 cleanup() {
 	rm -rf "$ROOT"
@@ -12,13 +14,14 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if "$CC" -static -O2 -o "$ROOT/probe" "$SCRIPT_DIR/test-binding-cache.c" 2>/dev/null; then
-	BINDS=""
+	BINDS="-b $ROOT/probe-dir:/probe-dir"
 else
 	"$CC" -O2 -o "$ROOT/probe" "$SCRIPT_DIR/test-binding-cache.c"
+	BINDS="-b $ROOT/probe-dir:/probe-dir"
 	if [ -n "${PREFIX:-}" ]; then
-		BINDS="-b $PREFIX:$PREFIX -b /system -b /apex"
+		BINDS="$BINDS -b $PREFIX:$PREFIX -b /system -b /apex"
 	else
-		BINDS="-b /usr -b /lib -b /lib64"
+		BINDS="$BINDS -b /usr -b /lib -b /lib64"
 	fi
 fi
 
