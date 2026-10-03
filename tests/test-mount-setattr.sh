@@ -23,10 +23,20 @@ mkdir -p "$ROOT/workspace-source/protected" "$ROOT/rw-workspace"
 "$CC" -O2 -Wall -Wextra "$SCRIPT_DIR/test-mount-setattr.c" -o "$ROOT/probe"
 cp "$ROOT/probe" "$ROOT/source/suid-probe"
 chmod 6755 "$ROOT/source/suid-probe"
+BINDS=""
+add_runtime_bind() {
+    runtime_source=$(readlink -f "$1" 2>/dev/null || true)
+    [ -d "$runtime_source" ] || return 0
+    BINDS="${BINDS}${BINDS:+ }-b $runtime_source:$1"
+}
 if [ -n "${PREFIX:-}" ]; then
-    BINDS="-b $PREFIX:$PREFIX -b /system -b /apex"
+    add_runtime_bind "$PREFIX"
+    add_runtime_bind /system
+    add_runtime_bind /apex
 else
-    BINDS="-b /usr -b /lib -b /lib64"
+    add_runtime_bind /usr
+    add_runtime_bind /lib
+    add_runtime_bind /lib64
 fi
 PROOT_UNSET_DONE=1 PROOT_MEMFD_LOADER=1 "$PROOT" -r "$ROOT" -w / \
     -i 1234:1234 $BINDS -b /proc -b /dev /probe
