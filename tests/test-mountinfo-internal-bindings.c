@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <sched.h>
