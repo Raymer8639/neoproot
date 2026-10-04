@@ -132,3 +132,5 @@ loader_cmd = ' '.join(cxx.cmd_array()) + ' ' + ' '.join(loader_cpp_args) + ' -c 
 loader = custom_target('loader-wrapped', output: 'loader-wrapped.o', depend_files: files('src/loader/loader.cpp', 'src/loader/assembly.S', 'src/loader/assembly-arm64.h', 'src/loader/script.h', 'src/arch.h', 'src/compat.h'), command: [run, '-c', loader_cmd], build_by_default: true, console: true)
 link_args = ['-flto=thin', '-fuse-ld=lld', '-Wl,--icf=all', '-Wl,-z,noexecstack', '-Wl,--gc-sections', '-Wl,-z,relro', '-Wl,-z,now', '-Wl,--strip-all', '-lpthread', '-s']
 executable('neoproot', c_sources + cpp_sources + loader, dependencies: dep, c_args: c_args, cpp_args: cpp_args, link_args: link_args, install: true, install_dir: get_option('bindir'))
+um_supervisor = files('src/backend/um_supervisor.c')
+executable('neoproot-um', um_supervisor, dependencies: dep, c_args: c_args, link_args: link_args + ['-Wl,--defsym=main=neoproot_um_supervisor_main'], install: true, install_dir: get_option('bindir'))

@@ -153,8 +153,8 @@ else
   OBJECTS += loader/loader-wrapped.o
 endif
 
-.DEFAULT_GOAL = neoproot
-all: neoproot
+.DEFAULT_GOAL = all
+all: neoproot neoproot-um
 
 ######################################################################
 # Beautified output
@@ -229,6 +229,13 @@ else
 	# 注意：UPX 压缩后不能再 strip（二进制已无节表，GNU strip 会报 "has no sections" 导致 CI 失败）
 endif
 
+UM_OBJECTS = backend/um_supervisor.o
+UM_LINK = $($(quiet)LD) -o $@ $^ $(LDFLAGS) -Wl,--defsym=main=neoproot_um_supervisor_main
+
+neoproot-um: $(UM_OBJECTS)
+	$(UM_LINK)
+	$(STRIP) --strip-all $@
+
 %.o: $(SRC)%.c
 	@mkdir -p $(dir $@)
 	$(COMPILE)
@@ -286,9 +293,9 @@ loader/loader-wrapped.o: loader.exe cli/cli.o
 # Dependencies
 
 .DELETE_ON_ERROR:
-$(OBJECTS) $(LOADER_OBJECTS): $(firstword $(MAKEFILE_LIST))
+$(OBJECTS) $(UM_OBJECTS) $(LOADER_OBJECTS): $(firstword $(MAKEFILE_LIST))
 
-DEPS = $(OBJECTS:.o=.d) $(LOADER_OBJECTS:.o=.d)
+DEPS = $(OBJECTS:.o=.d) $(UM_OBJECTS:.o=.d) $(LOADER_OBJECTS:.o=.d)
 -include $(DEPS)
 
 ######################################################################
@@ -299,7 +306,7 @@ BINDIR ?= $(PREFIX)/bin
 
 .PHONY: clean distclean install uninstall
 clean distclean:
-	-$(RM) -f $(OBJECTS) $(LOADER_OBJECTS) neoproot loader/loader $(DEPS) licenses build.h
+	-$(RM) -f $(OBJECTS) $(UM_OBJECTS) $(LOADER_OBJECTS) neoproot neoproot-um loader/loader $(DEPS) licenses build.h
 
 install: neoproot
 	$($(quiet)INSTALL) -D $< $(DESTDIR)$(BINDIR)/$<
