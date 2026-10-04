@@ -86,9 +86,11 @@ neoproot --backend=um -r /path/to/rootfs -- /bin/sh
 ```
 
 Hostfs exposes the selected host directory directly to the guest; it is not a
-security isolation boundary. The first-stage backend does not currently
-support PRoot bind options, ext4 rootfs images, or guest network setup. The
-backend must therefore be treated as experimental and explicitly requested.
+security isolation boundary. Bind sources already inside that root can be
+mapped with `-b host:guest[:ro]`; sources outside it, controlled targets such
+as `/proc`, `/sys`, and `/dev`, and unsafe targets are rejected. Ext4 rootfs
+images and guest network setup are not yet supported. The backend must
+therefore be treated as experimental and explicitly requested.
 
 When `--backend` is omitted, the existing Neoproot behavior remains the
 default. `--backend=fast` also selects that existing path; `--backend=auto`

@@ -40,7 +40,7 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-event-regressions.sh \
 	test-canon-asan.sh \
 	test-i3-restart-asan.sh \
-	test-um-supervisor-cli.sh
+	test-um-supervisor-cli.sh test-um-supervisor-bind-cli.sh
 
 # 默认目标
 all: $(TEST_PROGS)

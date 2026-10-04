@@ -34,6 +34,16 @@ extern char **environ;
 #define UM_OUTPUT_LIMIT (16U * 1024U * 1024U)
 #define UM_SIGNAL_GRACE_SECONDS 2.0
 #define UM_DRAIN_SECONDS 2.0
+#define UM_MAX_BINDS 64
+#define UM_MAX_CREATED_PATHS (UM_MAX_BINDS * 4)
+
+typedef struct {
+    char *host;
+    char *guest;
+    char *source_guest;
+    bool readonly;
+    bool source_directory;
+} UmBind;
 
 typedef struct {
     const char *kernel;
@@ -46,6 +56,10 @@ typedef struct {
     char *resolved_kernel;
     char *resolved_stub;
     char *resolved_rootfs;
+    UmBind binds[UM_MAX_BINDS];
+    size_t bind_count;
+    char *created_paths[UM_MAX_CREATED_PATHS];
+    size_t created_path_count;
 } UmConfig;
 
 typedef struct {
@@ -142,6 +156,283 @@ static int um_validate_guest_path(const char *name, const char *value)
         return -1;
     }
     return 0;
+}
+
+static bool um_is_controlled_guest_path(const char *path)
+{
+    static const char *const prefixes[] = { "/proc", "/sys", "/dev", NULL };
+    size_t index;
+
+    if (strcmp(path, "/") == 0)
+        return true;
+    for (index = 0; prefixes[index] != NULL; index++) {
+        size_t length = strlen(prefixes[index]);
+
+        if (strcmp(path, prefixes[index]) == 0 ||
+            (strncmp(path, prefixes[index], length) == 0 &&
+             path[length] == '/'))
+            return true;
+    }
+    return false;
+}
+
+static void um_free_bind(UmBind *bind)
+{
+    free(bind->host);
+    free(bind->guest);
+    free(bind->source_guest);
+    memset(bind, 0, sizeof(*bind));
+}
+
+static void um_free_config(UmConfig *config)
+{
+    size_t index;
+
+    free(config->resolved_kernel);
+    free(config->resolved_stub);
+    free(config->resolved_rootfs);
+    for (index = 0; index < config->bind_count; index++)
+        um_free_bind(&config->binds[index]);
+    for (index = 0; index < config->created_path_count; index++)
+        free(config->created_paths[index]);
+    memset(config, 0, sizeof(*config));
+}
+
+static int um_parse_bind(UmConfig *config, const char *value)
+{
+    char *copy;
+    char *separator;
+    char *option;
+    UmBind *bind;
+
+    if (config->bind_count >= UM_MAX_BINDS || value == NULL || value[0] == '\0')
+        return -1;
+    copy = strdup(value);
+    if (copy == NULL)
+        return -1;
+    separator = strchr(copy, ':');
+    if (separator == NULL || separator == copy || separator[1] == '\0')
+        goto invalid;
+    *separator++ = '\0';
+    option = strchr(separator, ':');
+    if (option != NULL) {
+        *option++ = '\0';
+        if (strcmp(option, "ro") != 0 || strchr(option, ':') != NULL)
+            goto invalid;
+    }
+    if (um_validate_guest_path("bind target", separator) < 0 ||
+        um_is_controlled_guest_path(separator) ||
+        copy[0] != '/' || strchr(copy, ',') != NULL)
+        goto invalid;
+    bind = &config->binds[config->bind_count];
+    bind->host = strdup(copy);
+    bind->guest = strdup(separator);
+    if (bind->host == NULL || bind->guest == NULL)
+        goto invalid;
+    bind->readonly = option != NULL;
+    for (size_t existing = 0; existing < config->bind_count; existing++) {
+        if (strcmp(config->binds[existing].guest, bind->guest) == 0)
+            goto invalid;
+    }
+    config->bind_count++;
+    free(copy);
+    return 0;
+
+invalid:
+    if (config->bind_count < UM_MAX_BINDS)
+        um_free_bind(&config->binds[config->bind_count]);
+    free(copy);
+    return -1;
+}
+
+static int um_resolve_bind_sources(UmConfig *config)
+{
+    size_t index;
+    size_t root_length = strlen(config->resolved_rootfs);
+
+    for (index = 0; index < config->bind_count; index++) {
+        UmBind *bind = &config->binds[index];
+        char resolved[PATH_MAX];
+        struct stat status;
+
+        if (realpath(bind->host, resolved) == NULL ||
+            stat(resolved, &status) < 0) {
+            fprintf(stderr, "neoproot-um: cannot resolve bind source '%s': %s\n",
+                    bind->host, strerror(errno));
+            return -1;
+        }
+        if (strncmp(resolved, config->resolved_rootfs, root_length) != 0 ||
+            (resolved[root_length] != '\0' && resolved[root_length] != '/') ||
+            resolved[root_length] == '\0' || strchr(resolved, ',') != NULL) {
+            fprintf(stderr, "neoproot-um: bind source '%s' escapes rootfs\n",
+                    bind->host);
+            return -1;
+        }
+        {
+            const char *relative = resolved + root_length;
+
+            if (relative[0] == '\0')
+                return -1;
+            free(bind->source_guest);
+            bind->source_guest = strdup(relative);
+        }
+        free(bind->host);
+        bind->host = strdup(resolved);
+        bind->source_directory = S_ISDIR(status.st_mode);
+        if (!bind->source_directory && !S_ISREG(status.st_mode)) {
+            fprintf(stderr, "neoproot-um: bind source must be a file or directory: %s\n",
+                    resolved);
+            return -1;
+        }
+        if (bind->host == NULL || bind->source_guest == NULL)
+            return -1;
+    }
+    return 0;
+}
+
+static int um_bind_compare(const void *left, const void *right)
+{
+    const UmBind *a = left;
+    const UmBind *b = right;
+    size_t a_length = strlen(a->guest);
+    size_t b_length = strlen(b->guest);
+
+    if (a_length < b_length)
+        return -1;
+    if (a_length > b_length)
+        return 1;
+    return strcmp(a->guest, b->guest);
+}
+
+static int um_record_created_path(UmConfig *config, const char *path)
+{
+    if (config->created_path_count >= UM_MAX_CREATED_PATHS)
+        return -1;
+    config->created_paths[config->created_path_count] = strdup(path);
+    if (config->created_paths[config->created_path_count] == NULL)
+        return -1;
+    config->created_path_count++;
+    return 0;
+}
+
+static int um_ensure_bind_parent(UmConfig *config, const char *root,
+                                 const char *parent)
+{
+    char path[PATH_MAX];
+    size_t root_length = strlen(root);
+    size_t length;
+    size_t index;
+
+    if (strncmp(parent, root, root_length) != 0 ||
+        (parent[root_length] != '\0' && parent[root_length] != '/') ||
+        strlen(parent) >= sizeof(path))
+        return -1;
+    strcpy(path, parent);
+    length = strlen(path);
+    for (index = root_length + 1; index <= length; index++) {
+        struct stat status;
+        char saved;
+
+        if (index != length && path[index] != '/')
+            continue;
+        saved = path[index];
+        path[index] = '\0';
+        if (lstat(path, &status) < 0) {
+            if (errno != ENOENT || mkdir(path, 0700) < 0 ||
+                um_record_created_path(config, path) < 0)
+                return -1;
+            if (lstat(path, &status) < 0)
+                return -1;
+        }
+        path[index] = saved;
+        if (S_ISLNK(status.st_mode) || !S_ISDIR(status.st_mode))
+            return -1;
+    }
+    return 0;
+}
+
+static int um_prepare_bind_targets(UmConfig *config)
+{
+    size_t index;
+    size_t root_length = strlen(config->resolved_rootfs);
+
+    for (index = 0; index < config->bind_count; index++) {
+        const UmBind *bind = &config->binds[index];
+        char target[PATH_MAX];
+        char parent[PATH_MAX];
+        char parent_real[PATH_MAX];
+        struct stat status;
+        char *last_slash;
+        int length;
+
+        length = snprintf(target, sizeof(target), "%s%s",
+                          config->resolved_rootfs, bind->guest);
+        if (length < 0 || (size_t)length >= sizeof(target))
+            return -1;
+        snprintf(parent, sizeof(parent), "%s", target);
+        last_slash = strrchr(parent, '/');
+        if (last_slash == NULL || last_slash == parent)
+            strcpy(parent, config->resolved_rootfs);
+        else
+            *last_slash = '\0';
+        if (um_ensure_bind_parent(config, config->resolved_rootfs, parent) < 0 ||
+            realpath(parent, parent_real) == NULL ||
+            strncmp(parent_real, config->resolved_rootfs, root_length) != 0 ||
+            (parent_real[root_length] != '\0' &&
+             parent_real[root_length] != '/')) {
+            fprintf(stderr, "neoproot-um: bind target parent escapes rootfs: %s\n",
+                    bind->guest);
+            return -1;
+        }
+        if (lstat(target, &status) == 0) {
+            if (S_ISLNK(status.st_mode) ||
+                (bind->source_directory && !S_ISDIR(status.st_mode)) ||
+                (!bind->source_directory && !S_ISREG(status.st_mode))) {
+                fprintf(stderr, "neoproot-um: bind target type mismatch: %s\n",
+                        bind->guest);
+                return -1;
+            }
+            continue;
+        }
+        if (errno != ENOENT)
+            return -1;
+        if (bind->source_directory) {
+            if (mkdir(target, 0700) < 0) {
+                if (errno != EEXIST)
+                    return -1;
+            } else if (um_record_created_path(config, target) < 0) {
+                return -1;
+            }
+        } else {
+            int fd = open(target, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+
+            if (fd < 0 && errno != EEXIST)
+                return -1;
+            if (fd >= 0) {
+                close(fd);
+                if (um_record_created_path(config, target) < 0)
+                    return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void um_cleanup_created_paths(UmConfig *config)
+{
+    while (config->created_path_count > 0) {
+        const char *path = config->created_paths[--config->created_path_count];
+        struct stat status;
+
+        if (lstat(path, &status) == 0) {
+            if (S_ISDIR(status.st_mode))
+                (void)rmdir(path);
+            else
+                (void)unlink(path);
+        }
+        free(config->created_paths[config->created_path_count]);
+        config->created_paths[config->created_path_count] = NULL;
+    }
 }
 
 static int um_resolve_host_path(const char *name, const char *value,
@@ -252,6 +543,21 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
                 goto invalid;
             config->rootfs = argument + 9;
             rootfs_set = true;
+        } else if (strcmp(argument, "-b") == 0 ||
+                   strcmp(argument, "--bind") == 0) {
+            if (++index >= argc || um_parse_bind(config, argv[index]) < 0)
+                goto invalid;
+        } else if (strncmp(argument, "--bind=", 7) == 0 ||
+                   strncmp(argument, "--mount=", 8) == 0) {
+            const char *value = argument +
+                (argument[2] == 'b' ? 7 : 8);
+
+            if (um_parse_bind(config, value) < 0)
+                goto invalid;
+        } else if (strcmp(argument, "-m") == 0 ||
+                   strcmp(argument, "--mount") == 0) {
+            if (++index >= argc || um_parse_bind(config, argv[index]) < 0)
+                goto invalid;
         } else if (strcmp(argument, "--hostfs") == 0) {
             if (config->hostfs)
                 goto invalid;
@@ -310,6 +616,14 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
         um_resolve_host_path("rootfs", config->rootfs, true, false,
                              &config->resolved_rootfs) < 0)
         return -1;
+    if (config->bind_count > 0 && um_resolve_bind_sources(config) < 0)
+        return -1;
+    if (config->bind_count > 0) {
+        qsort(config->binds, config->bind_count, sizeof(config->binds[0]),
+              um_bind_compare);
+        if (um_prepare_bind_targets(config) < 0)
+            return -1;
+    }
     return 0;
 
 invalid:
@@ -419,12 +733,14 @@ static bool um_allow_environment_name(const char *name, size_t length)
 }
 
 static int um_write_wrapper(const char *wrapper_path, const char *cwd,
-                            const char *status_path, int guest_argc,
+                            const char *status_path, const UmConfig *config,
+                            int guest_argc,
                             char *const guest_argv[])
 {
     int fd;
     char **environment;
     int index;
+    size_t bind_index;
 
     fd = open(wrapper_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
               O_NOFOLLOW, 0700);
@@ -442,11 +758,10 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
                          "mount -t sysfs sysfs /sys 2>/dev/null || "
                          "test -d /sys/kernel || um_fail 125\n"
                          "mount -t devtmpfs devtmpfs /dev 2>/dev/null || "
-                         "test -c /dev/null || um_fail 125\n"
-                         "cd ") < 0 ||
-        um_write_shell_word(fd, cwd) < 0 ||
-        um_write_text(fd, " || exit 126\n"
-                         "unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW "
+                         "test -c /dev/null || um_fail 125\n") < 0)
+        goto failed;
+
+    if (um_write_text(fd, "unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW "
                          "NEOPROOT_MEMFD_LOADER NEOPROOT_UNSET_DONE "
                          "BASH_ENV ENV CDPATH IFS\n"
                          "HOME=/root\nexport HOME\n"
@@ -475,6 +790,27 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
             um_write_text(fd, "\n") < 0)
             goto failed;
     }
+
+    for (bind_index = 0; bind_index < config->bind_count; bind_index++) {
+        const UmBind *bind = &config->binds[bind_index];
+
+        if (um_write_text(fd, "mount --bind ") < 0 ||
+            um_write_shell_word(fd, bind->source_guest) < 0 ||
+            um_write_text(fd, " ") < 0 ||
+            um_write_shell_word(fd, bind->guest) < 0 ||
+            um_write_text(fd, " || um_fail 125\n") < 0)
+            goto failed;
+        if (bind->readonly &&
+            (um_write_text(fd, "mount -o remount,bind,ro ") < 0 ||
+             um_write_shell_word(fd, bind->guest) < 0 ||
+             um_write_text(fd, " || um_fail 125\n") < 0))
+            goto failed;
+    }
+
+    if (um_write_text(fd, "cd ") < 0 ||
+        um_write_shell_word(fd, cwd) < 0 ||
+        um_write_text(fd, " || exit 126\n") < 0)
+        goto failed;
 
     if (um_write_text(fd, "set --") < 0)
         goto failed;
@@ -647,6 +983,7 @@ static void um_print_usage(void)
     puts("  --hostfs            enable explicit hostfs mode");
     puts("  --cwd=PATH          guest working directory");
     puts("  --timeout=SECONDS   bounded runtime (default: 120)");
+    puts("  -b HOST:GUEST[:ro]  bind a rootfs path into the guest");
     puts("Environment defaults: NEOPROOT_UM_KERNEL, NEOPROOT_UM_STUB");
 }
 
@@ -1086,9 +1423,12 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
         um_print_usage();
         return EXIT_FAILURE;
     }
-    if (um_check_untraced() < 0 ||
-        um_parse_args(argc, argv, &config, &guest_index) < 0)
+    if (um_check_untraced() < 0)
         return EXIT_FAILURE;
+    if (um_parse_args(argc, argv, &config, &guest_index) < 0) {
+        um_free_config(&config);
+        return EXIT_FAILURE;
+    }
     if (um_make_session(config.resolved_rootfs, &session_path, &wrapper_path,
                         &init_path, &status_path) < 0)
         goto failed;
@@ -1096,7 +1436,7 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
     if (snprintf(status_guest_path, sizeof(status_guest_path), "/%s/status",
                  session_name) >= (int)sizeof(status_guest_path))
         goto failed;
-    if (um_write_wrapper(wrapper_path, config.cwd, status_guest_path,
+    if (um_write_wrapper(wrapper_path, config.cwd, status_guest_path, &config,
                          argc - guest_index,
                          &argv[guest_index]) < 0)
         goto failed;
@@ -1108,9 +1448,8 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
     free(wrapper_path);
     free(init_path);
     free(status_path);
-    free(config.resolved_kernel);
-    free(config.resolved_stub);
-    free(config.resolved_rootfs);
+    um_cleanup_created_paths(&config);
+    um_free_config(&config);
     return result;
 
 failed:
@@ -1124,8 +1463,7 @@ failed:
     free(wrapper_path);
     free(init_path);
     free(status_path);
-    free(config.resolved_kernel);
-    free(config.resolved_stub);
-    free(config.resolved_rootfs);
+    um_cleanup_created_paths(&config);
+    um_free_config(&config);
     return EXIT_FAILURE;
 }

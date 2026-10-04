@@ -120,6 +120,7 @@ jobs:
           PROOT=../src/neoproot sh test-8d3c07f5.sh
           mkdir -p /tmp/neoproot-um-cli-ci
           TMPDIR=/tmp/neoproot-um-cli-ci PROOT=../src/neoproot sh test-um-supervisor-cli.sh
+          TMPDIR=/tmp/neoproot-um-cli-ci PROOT=../src/neoproot sh test-um-supervisor-bind-cli.sh
 
       - name: Test internal binding mountinfo
         run: |
