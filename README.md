@@ -68,6 +68,32 @@ neoproot -0 -r /data/data/com.termux/files/home/rootfs \
 
 The command-line interface follows official PRoot conventions. You do not need to manually unset `LD_PRELOAD`, `LD_LIBRARY_PATH`, or `LD_BIND_NOW`; the launcher handles those variables before entering the guest.
 
+## First-stage UM backend
+
+The first-stage UML backend is selected explicitly with `--backend=um`. It
+starts a separate UML guest kernel, so it must be launched from an untraced
+Termux host process rather than from inside an existing PRoot or sandbox.
+
+The backend currently requires a host directory passed with `-r` or
+`--rootfs` and uses that directory as UML `hostfs` root. The UML kernel and
+`stub_exe` can be supplied with command-line options to `neoproot-um`, or
+through these environment variables:
+
+```sh
+export NEOPROOT_UM_KERNEL=/path/to/linux-bionic
+export NEOPROOT_UM_STUB=/path/to/stub_exe
+neoproot --backend=um -r /path/to/rootfs -- /bin/sh
+```
+
+Hostfs exposes the selected host directory directly to the guest; it is not a
+security isolation boundary. The first-stage backend does not currently
+support PRoot bind options, ext4 rootfs images, or guest network setup. The
+backend must therefore be treated as experimental and explicitly requested.
+
+When `--backend` is omitted, the existing Neoproot behavior remains the
+default. `--backend=fast` also selects that existing path; `--backend=auto`
+does not enable UML automatically in this first stage.
+
 ## Performance evidence
 
 Measured on a Termux aarch64 device, Arch Linux ARM container, identical output in every mode. Stat-heavy work is what a container spends its time on, and that is what neoproot removes:
