@@ -101,7 +101,8 @@ c_sources = files('src/cli/neoproot.c',
   'src/extension/sysvipc/sysvipc_sem.c',
   'src/extension/sysvipc/sysvipc_shm.c',
   'src/extension/link2symlink/link2symlink.c',
-  'src/extension/fix_symlink_size/fix_symlink_size.c')
+  'src/extension/fix_symlink_size/fix_symlink_size.c',
+  'src/backend/um_supervisor.c')
 cpp_sources = files('src/tracee/mem.cpp',
   'src/tracee/reg.cpp')
 objcopy = find_program('objcopy', required: true)
@@ -132,3 +133,5 @@ loader_cmd = ' '.join(cxx.cmd_array()) + ' ' + ' '.join(loader_cpp_args) + ' -c 
 loader = custom_target('loader-wrapped', output: 'loader-wrapped.o', depend_files: files('src/loader/loader.cpp', 'src/loader/assembly.S', 'src/loader/assembly-arm64.h', 'src/loader/script.h', 'src/arch.h', 'src/compat.h'), command: [run, '-c', loader_cmd], build_by_default: true, console: true)
 link_args = ['-flto=thin', '-fuse-ld=lld', '-Wl,--icf=all', '-Wl,-z,noexecstack', '-Wl,--gc-sections', '-Wl,-z,relro', '-Wl,-z,now', '-Wl,--strip-all', '-lpthread', '-s']
 executable('neoproot', c_sources + cpp_sources + loader, dependencies: dep, c_args: c_args, cpp_args: cpp_args, link_args: link_args, install: true, install_dir: get_option('bindir'))
+um_sources = files('src/backend/um_supervisor.c', 'src/backend/um_main.c')
+executable('neoproot-um', um_sources, dependencies: dep, c_args: c_args, link_args: link_args, install: true, install_dir: get_option('bindir'))
