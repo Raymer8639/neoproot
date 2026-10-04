@@ -24,12 +24,12 @@ expect_failure() {
     fi
 }
 
-expect_failure "missing bind separator" "$um_supervisor" --rootfs="$rootfs" --hostfs --bind=/tmp -- /bin/true
-expect_failure "relative guest target" "$um_supervisor" --rootfs="$rootfs" --hostfs --bind=/tmp:relative -- /bin/true
-expect_failure "controlled proc target" "$um_supervisor" --rootfs="$rootfs" --hostfs --bind=/tmp:/proc/x -- /bin/true
-expect_failure "unknown bind option" "$um_supervisor" --rootfs="$rootfs" --hostfs --bind=/tmp:/mnt:x -- /bin/true
-expect_failure "duplicate bind target" "$um_supervisor" --rootfs="$rootfs" --hostfs \
+expect_failure "missing bind separator" --rootfs="$rootfs" --hostfs --bind=/tmp -- /bin/true
+expect_failure "relative guest target" --rootfs="$rootfs" --hostfs --bind=/tmp:relative -- /bin/true
+expect_failure "controlled proc target" --rootfs="$rootfs" --hostfs --bind=/tmp:/proc/x -- /bin/true
+expect_failure "unknown bind option" --rootfs="$rootfs" --hostfs --bind=/tmp:/mnt:x -- /bin/true
+expect_failure "duplicate bind target" --rootfs="$rootfs" --hostfs \
     --bind=/tmp:/mnt --bind=/tmp:/mnt -- /bin/true
-expect_failure "rootfs escape source" "$um_supervisor" --rootfs="$rootfs" --hostfs --bind=/etc:/mnt -- /bin/true
+expect_failure "rootfs escape source" --rootfs="$rootfs" --hostfs --bind=/etc:/mnt -- /bin/true
 
 echo "UM supervisor bind CLI validation tests passed"
