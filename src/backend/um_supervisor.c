@@ -1426,6 +1426,7 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
     if (um_check_untraced() < 0)
         return EXIT_FAILURE;
     if (um_parse_args(argc, argv, &config, &guest_index) < 0) {
+        um_cleanup_created_paths(&config);
         um_free_config(&config);
         return EXIT_FAILURE;
     }
