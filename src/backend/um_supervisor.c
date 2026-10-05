@@ -1896,8 +1896,6 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
         result = 128 + um_requested_signal;
     else if (um_read_guest_status(status_path, &result) == 0)
         guest_status_valid = true;
-    else if (config->rootfs_kind == UM_ROOTFS_EXT4)
-        result = 125;
     else if (child_done && WIFEXITED(child_status))
         result = WEXITSTATUS(child_status);
     else if (child_done && WIFSIGNALED(child_status))
