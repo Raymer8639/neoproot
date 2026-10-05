@@ -115,6 +115,37 @@ Regular options
     not perform any ``chdir`` by themselves.  This option avoids the
     need for running a shell and then entering the directory manually.
 
+--backend=mode
+    Select the execution backend.  The first-stage UML backend is selected
+    with ``--backend=um``; ``fast`` selects the existing PRoot path and
+    ``auto`` currently has the same behavior as the default.  The option
+    must be placed before the guest command.
+
+    UML mode requires ``-r path`` or ``--rootfs=path`` and a command
+    separator before the guest command, for example::
+
+        neoproot --backend=um -r /path/to/rootfs -- /bin/sh
+
+    A directory rootfs selects UML ``hostfs`` mode. Bind sources already inside
+    that root can be mapped with ``-b host:guest[:ro]``; sources outside it and
+    targets under ``/proc``, ``/sys`` or ``/dev`` are rejected. An ext4 image
+    selects UML block-device mode and gets a fresh temporary COW file for each
+    run; ``--readonly`` opens the image directly without creating a COW file.
+    Hostfs directly exposes the selected host directory and is not a security
+    isolation boundary. Ext4 mode requires an image containing ``/um-init``
+    from the matching UM harness. The init script uses the session-v1 protocol
+    to mount the temporary hostfs session at ``/run/neoproot`` and return the
+    command status. Ext4 mode does not currently support ``-b``. Guest network
+    setup is not supported in UML mode.
+
+    The UML kernel and ``stub_exe`` may be provided to the standalone
+    ``neoproot-um`` backend with ``--kernel=path`` and ``--stub=path``, or
+    through the environment variables ``NEOPROOT_UM_KERNEL`` and
+    ``NEOPROOT_UM_STUB``.  The paths must point to usable executable files.
+
+    UML mode must be started from an untraced host process.  Do not start it
+    from inside an existing PRoot container or sandbox.
+
 -v value, --verbose=value
     Set the level of debug information to *value*.
 
@@ -666,4 +697,3 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.
     |  __ \  __ \_____  _____|   |_
     |   __/     /  _  \/  _  \    _|
     |__|  |__|__\_____/\_____/\____|
-

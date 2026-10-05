@@ -37,10 +37,10 @@ jobs:
         run: |
           if [ "$MODE" = "release" ]; then
             # 默认 ARMv8.2 满血优化（与作者默认一致），makefile 自动选用 lld
-            make -C src neoproot CC=clang CXX=clang++
+            make -C src all CC=clang CXX=clang++
           else
             # 通用构建（例如老设备可降级指令集），验证 MARCH 可覆盖性
-            make -C src -B neoproot CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
+            make -C src -B all CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
           fi
 
       - name: Meson native ARM64 smoke test
@@ -53,10 +53,12 @@ jobs:
           CC=clang CXX=clang++ meson setup meson-build /tmp/neoproot-meson-src --buildtype=release
           meson compile -C meson-build
           test -x meson-build/neoproot
+          test -x meson-build/neoproot-um
           meson-build/neoproot --version | tee /tmp/neoproot-meson-version
           grep -q "process_vm = yes" /tmp/neoproot-meson-version
           grep -q "seccomp_filter = yes" /tmp/neoproot-meson-version
           meson-build/neoproot --help >/dev/null
+          meson-build/neoproot-um --help >/dev/null
           ! meson-build/neoproot --definitely-invalid >/dev/null 2>&1
 
       - name: Check binary
@@ -64,6 +66,9 @@ jobs:
           file src/neoproot
           ls -lh src/neoproot
           test -x src/neoproot
+          file src/neoproot-um
+          ls -lh src/neoproot-um
+          test -x src/neoproot-um
 
       - name: Build stat-shim
         run: |
@@ -113,6 +118,14 @@ jobs:
           PROOT=../src/neoproot sh test-bwrap-resolve-in-root.sh
           PROOT=../src/neoproot sh test-tracer-guard.sh
           PROOT=../src/neoproot sh test-8d3c07f5.sh
+          mkdir -p /tmp/neoproot-um-cli-ci
+          TMPDIR=/tmp/neoproot-um-cli-ci PROOT=../src/neoproot sh test-um-supervisor-cli.sh
+          TMPDIR=/tmp/neoproot-um-cli-ci PROOT=../src/neoproot sh test-um-supervisor-bind-cli.sh
+          set +e
+          TMPDIR=/tmp/neoproot-um-cli-ci PROOT=../src/neoproot sh test-um-supervisor-ext4-cli.sh
+          um_status=$?
+          set -e
+          test "$um_status" -eq 0 || test "$um_status" -eq 125
 
       - name: Test internal binding mountinfo
         run: |
@@ -125,7 +138,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: neoproot-${{ matrix.mode }}-${{ github.sha }}
-          path: src/neoproot
+          path: |
+            src/neoproot
+            src/neoproot-um
           if-no-files-found: error
 
   release:
@@ -148,17 +163,23 @@ jobs:
         run: |
           mkdir -p dist
           for d in artifacts/neoproot-*; do
-            case "$d" in
-              *-release-*) cp "$d/neoproot" dist/neoproot ;;
-              *-portable-*) cp "$d/neoproot" dist/neoproot-portable ;;
-            esac
+          case "$d" in
+              *-release-*)
+                cp "$d/neoproot" dist/neoproot
+                cp "$d/neoproot-um" dist/neoproot-um
+                ;;
+              *-portable-*)
+                cp "$d/neoproot" dist/neoproot-portable
+                cp "$d/neoproot-um" dist/neoproot-um-portable
+                ;;
+          esac
           done
           cp artifacts/stat-shim-*/libstatfast.so dist/libstatfast.so
           cp scripts/install.sh dist/install.sh
           chmod +x dist/install.sh
           ls -lh dist
       - name: Generate checksums
-        run: (cd dist && sha256sum neoproot neoproot-portable libstatfast.so > SHA256SUMS)
+        run: (cd dist && sha256sum neoproot neoproot-portable neoproot-um neoproot-um-portable libstatfast.so > SHA256SUMS)
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

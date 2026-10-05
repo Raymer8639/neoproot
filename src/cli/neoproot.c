@@ -3,9 +3,105 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 
 // 声明cli.c中的核心函数
 extern int proot_main(int argc, char *const argv[]);
+extern int neoproot_um_supervisor_main(int argc, char *const argv[]);
+
+enum backend_mode {
+    BACKEND_DEFAULT,
+    BACKEND_FAST,
+    BACKEND_UM,
+    BACKEND_AUTO,
+};
+
+static bool option_takes_separate_value(const char *argument)
+{
+    static const char *const options[] = {
+        "-r", "--rootfs", "-b", "--bind", "-m", "--mount",
+        "-w", "--pwd", "--cwd", "-k", "--kernel-release",
+        "-i", "--change-id", "-v", "--verbose", "-R", "-S", NULL
+    };
+    size_t index;
+
+    for (index = 0; options[index] != NULL; index++)
+        if (strcmp(argument, options[index]) == 0)
+            return true;
+    return false;
+}
+
+static int prepare_backend_argv(int argc, char *const argv[],
+                                char ***result, int *result_argc,
+                                enum backend_mode *mode)
+{
+    char **filtered;
+    int output_argc = 1;
+    int index;
+    bool command_started = false;
+    bool backend_set = false;
+
+    *mode = BACKEND_DEFAULT;
+    filtered = calloc((size_t)argc + 2, sizeof(*filtered));
+    if (filtered == NULL)
+        return -1;
+    filtered[0] = argv[0];
+    for (index = 1; index < argc; index++) {
+        const char *value = NULL;
+
+        if (command_started) {
+            filtered[output_argc++] = argv[index];
+            continue;
+        }
+        if (strcmp(argv[index], "--") == 0) {
+            command_started = true;
+            filtered[output_argc++] = argv[index];
+            continue;
+        }
+        if (argv[index][0] != '-') {
+            command_started = true;
+            filtered[output_argc++] = argv[index];
+            continue;
+        }
+        if (strncmp(argv[index], "--backend=", 10) == 0) {
+            value = argv[index] + 10;
+        } else if (strcmp(argv[index], "--backend") == 0) {
+            if (++index >= argc) {
+                fprintf(stderr, "neoproot: --backend requires a value\n");
+                free(filtered);
+                return -1;
+            }
+            value = argv[index];
+        } else {
+            output_argc++;
+            filtered[output_argc - 1] = argv[index];
+            if (option_takes_separate_value(argv[index]) && index + 1 < argc)
+                filtered[output_argc++] = argv[++index];
+            continue;
+        }
+        if (backend_set) {
+            fprintf(stderr, "neoproot: duplicate --backend option\n");
+            free(filtered);
+            return -1;
+        }
+        backend_set = true;
+        if (strcmp(value, "fast") == 0)
+            *mode = BACKEND_FAST;
+        else if (strcmp(value, "um") == 0)
+            *mode = BACKEND_UM;
+        else if (strcmp(value, "auto") == 0)
+            *mode = BACKEND_AUTO;
+        else {
+            fprintf(stderr, "neoproot: unknown backend '%s'\n", value);
+            free(filtered);
+            return -1;
+        }
+    }
+    filtered[output_argc] = NULL;
+    *result = filtered;
+    *result_argc = output_argc;
+    return 0;
+}
 
 /* 优先使用 Android 的 /system/bin/sh；
  * 在嵌入式 Linux / 其他环境回退到 /bin/sh，避免 execve 直接失败 */
@@ -57,8 +153,22 @@ static int reject_traced_startup(void)
 
 int main(int argc, char *const argv[])
 {
+    char **effective_argv;
+    int effective_argc;
+    enum backend_mode backend;
+
     if (reject_traced_startup())
         return EXIT_FAILURE;
+    if (prepare_backend_argv(argc, argv, &effective_argv, &effective_argc,
+                             &backend) < 0)
+        return EXIT_FAILURE;
+    if (backend == BACKEND_UM) {
+        int status = neoproot_um_supervisor_main(effective_argc,
+                                                  effective_argv);
+
+        free(effective_argv);
+        return status;
+    }
 
     // 要传递给termux的命令
     char *shell_cmd = 
@@ -69,9 +179,10 @@ int main(int argc, char *const argv[])
         "export PROOT_UNSET_DONE=1; "
         "exec \"$0\" \"$@\"";
 
-    char **sh_argv = malloc((argc + 4) * sizeof(char *));
+    char **sh_argv = malloc(((size_t)effective_argc + 4) * sizeof(char *));
     if (!sh_argv) {
         perror("malloc failed");
+        free(effective_argv);
         return 1;
     }
 
@@ -79,17 +190,20 @@ int main(int argc, char *const argv[])
     sh_argv[idx++] = (char *)find_shell();
     sh_argv[idx++] = "-c";
     sh_argv[idx++] = shell_cmd;
-    sh_argv[idx++] = argv[0];
+    sh_argv[idx++] = effective_argv[0];
 
-    for (int i = 1; i < argc; i++) {
-        sh_argv[idx++] = argv[i];
+    for (int i = 1; i < effective_argc; i++) {
+        sh_argv[idx++] = effective_argv[i];
     }
     sh_argv[idx] = NULL;
 
     // 执行完shell环境初始化后，直接走 proot_main
     if (getenv("PROOT_UNSET_DONE")) {
         free(sh_argv);
-        return proot_main(argc, argv);
+        int status = proot_main(effective_argc, effective_argv);
+
+        free(effective_argv);
+        return status;
     }
 
     // 首选 shell 执行失败时（例如 proot 容器内 /system 目录不可 exec），
@@ -103,5 +217,6 @@ int main(int argc, char *const argv[])
 
     perror("execve shell failed");
     free(sh_argv);
+    free(effective_argv);
     return 1;
 }

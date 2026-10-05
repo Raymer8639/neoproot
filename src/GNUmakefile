@@ -139,7 +139,8 @@ OBJECTS += \
 	extension/sysvipc/sysvipc_sem.o \
 	extension/sysvipc/sysvipc_shm.o \
 	extension/link2symlink/link2symlink.o \
-	extension/fix_symlink_size/fix_symlink_size.o
+	extension/fix_symlink_size/fix_symlink_size.o \
+	backend/um_supervisor.o
 
 # 仅 arm64：彻底移除 32bit loader 探测
 define define_from_arch.h
@@ -153,8 +154,8 @@ else
   OBJECTS += loader/loader-wrapped.o
 endif
 
-.DEFAULT_GOAL = neoproot
-all: neoproot
+.DEFAULT_GOAL = all
+all: neoproot neoproot-um
 
 ######################################################################
 # Beautified output
@@ -229,6 +230,13 @@ else
 	# 注意：UPX 压缩后不能再 strip（二进制已无节表，GNU strip 会报 "has no sections" 导致 CI 失败）
 endif
 
+UM_OBJECTS = backend/um_supervisor.o backend/um_main.o
+UM_LINK = $($(quiet)LD) -o $@ $^ $(LDFLAGS)
+
+neoproot-um: $(UM_OBJECTS)
+	$(UM_LINK)
+	$(STRIP) --strip-all $@
+
 %.o: $(SRC)%.c
 	@mkdir -p $(dir $@)
 	$(COMPILE)
@@ -286,9 +294,9 @@ loader/loader-wrapped.o: loader.exe cli/cli.o
 # Dependencies
 
 .DELETE_ON_ERROR:
-$(OBJECTS) $(LOADER_OBJECTS): $(firstword $(MAKEFILE_LIST))
+$(OBJECTS) $(UM_OBJECTS) $(LOADER_OBJECTS): $(firstword $(MAKEFILE_LIST))
 
-DEPS = $(OBJECTS:.o=.d) $(LOADER_OBJECTS:.o=.d)
+DEPS = $(OBJECTS:.o=.d) $(UM_OBJECTS:.o=.d) $(LOADER_OBJECTS:.o=.d)
 -include $(DEPS)
 
 ######################################################################
@@ -299,16 +307,17 @@ BINDIR ?= $(PREFIX)/bin
 
 .PHONY: clean distclean install uninstall
 clean distclean:
-	-$(RM) -f $(OBJECTS) $(LOADER_OBJECTS) neoproot loader/loader $(DEPS) licenses build.h
+	-$(RM) -f $(OBJECTS) $(UM_OBJECTS) $(LOADER_OBJECTS) neoproot neoproot-um loader/loader $(DEPS) licenses build.h
 
-install: neoproot
-	$($(quiet)INSTALL) -D $< $(DESTDIR)$(BINDIR)/$<
+install: neoproot neoproot-um
+	$($(quiet)INSTALL) -D neoproot $(DESTDIR)$(BINDIR)/neoproot
+	$($(quiet)INSTALL) -D neoproot-um $(DESTDIR)$(BINDIR)/neoproot-um
 ifdef PROOT_UNBUNDLE_LOADER
 	$(INSTALL) -D loader/loader $(PROOT_UNBUNDLE_LOADER)/loader
 endif
 
 uninstall:
-	-$(RM) -f $(DESTDIR)$(BINDIR)/neoproot
+	-$(RM) -f $(DESTDIR)$(BINDIR)/neoproot $(DESTDIR)$(BINDIR)/neoproot-um
 ifdef PROOT_UNBUNDLE_LOADER
 	-$(RM) -f $(PROOT_UNBUNDLE_LOADER)/loader
 endif

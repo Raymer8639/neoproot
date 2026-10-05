@@ -39,7 +39,9 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-bootstrap-nonblocking.sh \
 	test-event-regressions.sh \
 	test-canon-asan.sh \
-	test-i3-restart-asan.sh
+	test-i3-restart-asan.sh \
+	test-um-supervisor-cli.sh test-um-supervisor-bind-cli.sh \
+	test-um-supervisor-ext4-cli.sh
 
 # 默认目标
 all: $(TEST_PROGS)

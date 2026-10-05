@@ -68,6 +68,40 @@ neoproot -0 -r /data/data/com.termux/files/home/rootfs \
 
 The command-line interface follows official PRoot conventions. You do not need to manually unset `LD_PRELOAD`, `LD_LIBRARY_PATH`, or `LD_BIND_NOW`; the launcher handles those variables before entering the guest.
 
+## First-stage UM backend
+
+The first-stage UML backend is selected explicitly with `--backend=um`. It
+starts a separate UML guest kernel, so it must be launched from an untraced
+Termux host process rather than from inside an existing PRoot or sandbox.
+
+The backend accepts either a host directory or an ext4 image passed with `-r`
+or `--rootfs`. A directory is used as the UML `hostfs` root. An ext4 image is
+mounted as the UML guest root with a per-run temporary COW file; `--readonly`
+uses the image directly without a COW file. The UML kernel and
+`stub_exe` can be supplied with command-line options to `neoproot-um`, or
+through these environment variables:
+
+```sh
+export NEOPROOT_UM_KERNEL=/path/to/linux-bionic
+export NEOPROOT_UM_STUB=/path/to/stub_exe
+neoproot --backend=um -r /path/to/rootfs -- /bin/sh
+```
+
+Hostfs exposes the selected host directory directly to the guest; it is not a
+security isolation boundary. Bind sources already inside that root can be
+mapped with `-b host:guest[:ro]`; sources outside it, controlled targets such
+as `/proc`, `/sys`, and `/dev`, and unsafe targets are rejected. Ext4 mode
+requires `/um-init` from the matching UM harness. The supervisor passes the
+`session-v1` protocol parameters after mounting the guest's proc filesystem;
+the init script mounts the temporary hostfs session at `/run/neoproot` and
+returns the command status through that mount. Ext4 mode does not currently
+support `-b`. Guest network setup is not supported. The backend must therefore
+be treated as experimental and explicitly requested.
+
+When `--backend` is omitted, the existing Neoproot behavior remains the
+default. `--backend=fast` also selects that existing path; `--backend=auto`
+does not enable UML automatically in this first stage.
+
 ## Performance evidence
 
 Measured on a Termux aarch64 device, Arch Linux ARM container, identical output in every mode. Stat-heavy work is what a container spends its time on, and that is what neoproot removes:
