@@ -43,7 +43,7 @@ status_value_file='$status_value_file'
 kernel_pid_file='$kernel_pid_file'
 sleeper_pid_file='$sleeper_pid_file'
 printf '%s\\n' "\$\$" >"\$kernel_pid_file"
-:" >"\$args_file"
+: >"\$args_file"
 hostfs=
 session=
 for argument do
