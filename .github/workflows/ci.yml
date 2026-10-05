@@ -60,6 +60,8 @@ jobs:
           meson-build/neoproot --help >/dev/null
           meson-build/neoproot-um --help >/dev/null
           ! meson-build/neoproot --definitely-invalid >/dev/null 2>&1
+          UM_SUPERVISOR=meson-build/neoproot-um NEOPROOT=meson-build/neoproot \
+            TMPDIR=/tmp/neoproot-um-cli-ci sh tests/test-um-supervisor-ext4-cli.sh
 
       - name: Check binary
         run: |
@@ -121,6 +123,11 @@ jobs:
           mkdir -p /tmp/neoproot-um-cli-ci
           TMPDIR=/tmp/neoproot-um-cli-ci PROOT=../src/neoproot sh test-um-supervisor-cli.sh
           TMPDIR=/tmp/neoproot-um-cli-ci PROOT=../src/neoproot sh test-um-supervisor-bind-cli.sh
+          set +e
+          TMPDIR=/tmp/neoproot-um-cli-ci PROOT=../src/neoproot sh test-um-supervisor-ext4-cli.sh
+          um_status=$?
+          set -e
+          test "$um_status" -eq 0 || test "$um_status" -eq 125
 
       - name: Test internal binding mountinfo
         run: |

@@ -15,6 +15,9 @@ trap 'rm -rf "$temporary_directory"' EXIT HUP INT TERM
 
 rootfs="$temporary_directory/rootfs"
 mkdir "$rootfs"
+image="$temporary_directory/rootfs.ext4"
+dd if=/dev/zero of="$image" bs=1 count=2048 2>/dev/null
+printf '\123\357' | dd of="$image" bs=1 seek=1080 conv=notrunc 2>/dev/null
 
 expect_failure() {
 	name=$1
@@ -37,5 +40,13 @@ expect_failure "timeout=nan" \
 	--rootfs="$rootfs" --hostfs --timeout=nan -- /bin/true
 expect_failure "unknown argument" \
 	--rootfs="$rootfs" --hostfs --unknown-option -- /bin/true
+expect_failure "readonly hostfs directory" \
+	--rootfs="$rootfs" --hostfs --readonly -- /bin/true
+expect_failure "hostfs flag with ext4 image" \
+	--rootfs="$image" --hostfs -- /bin/true
+expect_failure "bind with ext4 image" \
+	--rootfs="$image" --bind="$rootfs:/mnt" -- /bin/true
+expect_failure "invalid ext4 image" \
+	--rootfs="$temporary_directory/invalid-image" -- /bin/true
 
 echo "UM supervisor CLI validation tests passed"

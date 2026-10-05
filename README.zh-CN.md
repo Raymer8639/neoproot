@@ -65,6 +65,25 @@ neoproot -0 -r /data/data/com.termux/files/home/rootfs \
     /bin/bash --login
 ```
 
+## UML 后端
+
+使用 `--backend=um` 可启动独立的 UML 内核。该模式必须从未被跟踪的
+Termux 宿主进程启动，不能在已有 PRoot 或 sandbox 内嵌套运行。
+
+`--rootfs` 可以是目录或 ext4 镜像：目录使用 hostfs，镜像使用每次运行
+独立的 COW；`--readonly` 使用只读 UBD，不创建 COW。ext4 镜像必须包含与
+当前 UM harness 匹配的 `/um-init`，并支持会话参数、`/run/neoproot` 和
+退出码 status 协议。`-b` 当前只支持目录 hostfs 模式。
+
+```sh
+export NEOPROOT_UM_KERNEL=/path/to/linux-bionic
+export NEOPROOT_UM_STUB=/path/to/stub_exe
+neoproot --backend=um --rootfs=/path/to/rootfs -- /bin/sh
+neoproot --backend=um --rootfs=/path/to/rootfs.ext4 --readonly -- /bin/true
+```
+
+UML 后端仍处于实验阶段；hostfs 直接暴露宿主目录，不是安全隔离边界。
+
 命令行接口遵循官方 PRoot 习惯。无需手动取消设置 `LD_PRELOAD`、`LD_LIBRARY_PATH` 或 `LD_BIND_NOW`；启动器会在进入 guest 前自动处理这些变量。
 
 ## 性能依据

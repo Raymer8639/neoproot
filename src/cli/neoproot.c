@@ -97,12 +97,6 @@ static int prepare_backend_argv(int argc, char *const argv[],
             return -1;
         }
     }
-    if (*mode == BACKEND_UM) {
-        memmove(filtered + 2, filtered + 1,
-                (size_t)(output_argc - 1) * sizeof(*filtered));
-        filtered[1] = "--hostfs";
-        output_argc++;
-    }
     filtered[output_argc] = NULL;
     *result = filtered;
     *result_argc = output_argc;

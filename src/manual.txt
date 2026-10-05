@@ -126,13 +126,17 @@ Regular options
 
         neoproot --backend=um -r /path/to/rootfs -- /bin/sh
 
-    The rootfs path must be a host directory.  It is used as UML ``hostfs``
-    root. Bind sources already inside that root can be mapped with
-    ``-b host:guest[:ro]``; sources outside it and targets under ``/proc``,
-    ``/sys`` or ``/dev`` are rejected. Ext4 rootfs images are not supported
-    yet. Hostfs directly exposes the selected host directory and is not a
-    security isolation boundary. Guest network setup is not supported in UML
-    mode.
+    A directory rootfs selects UML ``hostfs`` mode. Bind sources already inside
+    that root can be mapped with ``-b host:guest[:ro]``; sources outside it and
+    targets under ``/proc``, ``/sys`` or ``/dev`` are rejected. An ext4 image
+    selects UML block-device mode and gets a fresh temporary COW file for each
+    run; ``--readonly`` opens the image directly without creating a COW file.
+    Hostfs directly exposes the selected host directory and is not a security
+    isolation boundary. Ext4 mode requires an image containing ``/um-init``
+    from the matching UM harness. The init script uses the session-v1 protocol
+    to mount the temporary hostfs session at ``/run/neoproot`` and return the
+    command status. Ext4 mode does not currently support ``-b``. Guest network
+    setup is not supported in UML mode.
 
     The UML kernel and ``stub_exe`` may be provided to the standalone
     ``neoproot-um`` backend with ``--kernel=path`` and ``--stub=path``, or

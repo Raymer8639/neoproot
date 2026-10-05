@@ -74,8 +74,10 @@ The first-stage UML backend is selected explicitly with `--backend=um`. It
 starts a separate UML guest kernel, so it must be launched from an untraced
 Termux host process rather than from inside an existing PRoot or sandbox.
 
-The backend currently requires a host directory passed with `-r` or
-`--rootfs` and uses that directory as UML `hostfs` root. The UML kernel and
+The backend accepts either a host directory or an ext4 image passed with `-r`
+or `--rootfs`. A directory is used as the UML `hostfs` root. An ext4 image is
+mounted as the UML guest root with a per-run temporary COW file; `--readonly`
+uses the image directly without a COW file. The UML kernel and
 `stub_exe` can be supplied with command-line options to `neoproot-um`, or
 through these environment variables:
 
@@ -88,9 +90,13 @@ neoproot --backend=um -r /path/to/rootfs -- /bin/sh
 Hostfs exposes the selected host directory directly to the guest; it is not a
 security isolation boundary. Bind sources already inside that root can be
 mapped with `-b host:guest[:ro]`; sources outside it, controlled targets such
-as `/proc`, `/sys`, and `/dev`, and unsafe targets are rejected. Ext4 rootfs
-images and guest network setup are not yet supported. The backend must
-therefore be treated as experimental and explicitly requested.
+as `/proc`, `/sys`, and `/dev`, and unsafe targets are rejected. Ext4 mode
+requires `/um-init` from the matching UM harness. The supervisor passes the
+`session-v1` protocol parameters after mounting the guest's proc filesystem;
+the init script mounts the temporary hostfs session at `/run/neoproot` and
+returns the command status through that mount. Ext4 mode does not currently
+support `-b`. Guest network setup is not supported. The backend must therefore
+be treated as experimental and explicitly requested.
 
 When `--backend` is omitted, the existing Neoproot behavior remains the
 default. `--backend=fast` also selects that existing path; `--backend=auto`

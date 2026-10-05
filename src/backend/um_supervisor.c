@@ -15,7 +15,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -36,6 +39,12 @@ extern char **environ;
 #define UM_DRAIN_SECONDS 2.0
 #define UM_MAX_BINDS 64
 #define UM_MAX_CREATED_PATHS (UM_MAX_BINDS * 4)
+#define UM_CLOSE_RANGE_CLOEXEC (1U << 2)
+
+typedef enum {
+    UM_ROOTFS_HOSTFS,
+    UM_ROOTFS_EXT4
+} UmRootfsKind;
 
 typedef struct {
     char *host;
@@ -52,10 +61,14 @@ typedef struct {
     const char *cwd;
     double timeout;
     bool hostfs;
+    bool readonly;
     bool saw_delimiter;
+    UmRootfsKind rootfs_kind;
     char *resolved_kernel;
     char *resolved_stub;
     char *resolved_rootfs;
+    int rootfs_fd;
+    char *resolved_hostfs;
     UmBind binds[UM_MAX_BINDS];
     size_t bind_count;
     char *created_paths[UM_MAX_CREATED_PATHS];
@@ -145,6 +158,18 @@ static bool um_path_has_parent_component(const char *path)
     return false;
 }
 
+static bool um_path_has_kernel_separator(const char *path)
+{
+    const unsigned char *cursor = (const unsigned char *)path;
+
+    while (*cursor != '\0') {
+        if (*cursor <= ' ' || *cursor == ',')
+            return true;
+        cursor++;
+    }
+    return false;
+}
+
 static int um_validate_guest_path(const char *name, const char *value)
 {
     if (value == NULL || value[0] != '/') {
@@ -191,6 +216,9 @@ static void um_free_config(UmConfig *config)
     free(config->resolved_kernel);
     free(config->resolved_stub);
     free(config->resolved_rootfs);
+    if (config->rootfs_fd >= 0)
+        close(config->rootfs_fd);
+    free(config->resolved_hostfs);
     for (index = 0; index < config->bind_count; index++)
         um_free_bind(&config->binds[index]);
     for (index = 0; index < config->created_path_count; index++)
@@ -454,6 +482,11 @@ static int um_resolve_host_path(const char *name, const char *value,
                 name, resolved, strerror(errno));
         return -1;
     }
+    if (um_path_has_kernel_separator(resolved)) {
+        fprintf(stderr, "neoproot-um: %s contains an unsupported character\n",
+                name);
+        return -1;
+    }
     if ((directory && !S_ISDIR(status.st_mode)) ||
         (!directory && !S_ISREG(status.st_mode))) {
         fprintf(stderr, "neoproot-um: %s has the wrong file type\n", name);
@@ -475,6 +508,159 @@ static int um_resolve_host_path(const char *name, const char *value,
     }
     *result = copy;
     return 0;
+}
+
+static int um_resolve_ext4_image(const char *value, char **result,
+                                 int *image_fd)
+{
+    unsigned char magic[2];
+    struct stat link_status;
+    struct stat status;
+    char resolved[PATH_MAX];
+    int fd = -1;
+    ssize_t length;
+
+    if (um_validate_guest_path("rootfs", value) < 0 ||
+        strchr(value, ',') != NULL || strchr(value, ':') != NULL ||
+        um_path_has_kernel_separator(value))
+        return -1;
+    if (lstat(value, &link_status) < 0 || S_ISLNK(link_status.st_mode)) {
+        fprintf(stderr, "neoproot-um: rootfs image must not be a symlink\n");
+        return -1;
+    }
+    if (realpath(value, resolved) == NULL ||
+        lstat(resolved, &status) < 0 || !S_ISREG(status.st_mode)) {
+        fprintf(stderr, "neoproot-um: rootfs image must be a regular file\n");
+        return -1;
+    }
+    fd = open(resolved, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        fprintf(stderr, "neoproot-um: cannot open rootfs image '%s': %s\n",
+                resolved, strerror(errno));
+        return -1;
+    }
+    if (fd < 3) {
+        int duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+
+        if (duplicate < 0) {
+            close(fd);
+            return -1;
+        }
+        close(fd);
+        fd = duplicate;
+    }
+    if (fstat(fd, &status) < 0 || status.st_size < 1024 + 0x3a) {
+        fprintf(stderr, "neoproot-um: rootfs image is too small\n");
+        close(fd);
+        return -1;
+    }
+    length = pread(fd, magic, sizeof(magic), 1024 + 0x38);
+    if (length != (ssize_t)sizeof(magic) || magic[0] != 0x53 ||
+        magic[1] != 0xef) {
+        fprintf(stderr, "neoproot-um: rootfs image is not ext4\n");
+        close(fd);
+        return -1;
+    }
+    *result = strdup(resolved);
+    if (*result == NULL) {
+        perror("neoproot-um: strdup");
+        close(fd);
+        return -1;
+    }
+    *image_fd = fd;
+    return 0;
+}
+
+static void um_remove_runtime_marker(const char *runtime_path);
+
+static int um_write_runtime_marker(const char *runtime_path)
+{
+    char owner_path[PATH_MAX];
+    char owner_data[64];
+    int owner_fd;
+
+    if (runtime_path == NULL ||
+        snprintf(owner_path, sizeof(owner_path), "%s/.owner", runtime_path) >=
+            (int)sizeof(owner_path) ||
+        snprintf(owner_data, sizeof(owner_data), "neoproot-um-owner:%ld\n",
+                 (long)getpid()) >= (int)sizeof(owner_data))
+        return -1;
+    owner_fd = open(owner_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
+                    O_NOFOLLOW, 0600);
+    if (owner_fd < 0)
+        return -1;
+    if (um_write_text(owner_fd, owner_data) < 0 || fsync(owner_fd) < 0) {
+        close(owner_fd);
+        unlink(owner_path);
+        return -1;
+    }
+    close(owner_fd);
+    return 0;
+}
+
+static int um_make_runtime_root(char **result)
+{
+    const char *tmpdir = getenv("TMPDIR");
+    char template[PATH_MAX];
+    struct stat status;
+    char *copy;
+
+    if (tmpdir == NULL || tmpdir[0] != '/' ||
+        um_path_has_kernel_separator(tmpdir) || strlen(tmpdir) >= PATH_MAX - 32)
+        tmpdir = "/tmp";
+    if (stat(tmpdir, &status) < 0 || !S_ISDIR(status.st_mode))
+        tmpdir = "/tmp";
+    if (snprintf(template, sizeof(template), "%s/neoproot-um-XXXXXX",
+                 tmpdir) >= (int)sizeof(template))
+        return -1;
+    if (mkdtemp(template) == NULL) {
+        fprintf(stderr, "neoproot-um: cannot create runtime directory: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    if (chmod(template, 0700) < 0) {
+        rmdir(template);
+        return -1;
+    }
+    if (um_write_runtime_marker(template) < 0) {
+        rmdir(template);
+        return -1;
+    }
+    copy = strdup(template);
+    if (copy == NULL) {
+        um_remove_runtime_marker(template);
+        rmdir(template);
+        return -1;
+    }
+    *result = copy;
+    return 0;
+}
+
+static void um_remove_runtime_marker(const char *runtime_path)
+{
+    char owner_path[PATH_MAX];
+
+    if (runtime_path == NULL ||
+        snprintf(owner_path, sizeof(owner_path), "%s/.owner", runtime_path) >=
+            (int)sizeof(owner_path))
+        return;
+    (void)unlink(owner_path);
+}
+
+static int um_cleanup_runtime_root(const char *runtime_path)
+{
+    int result;
+
+    if (runtime_path == NULL)
+        return -1;
+    um_remove_runtime_marker(runtime_path);
+    result = rmdir(runtime_path);
+    if (result < 0) {
+        (void)um_write_runtime_marker(runtime_path);
+        fprintf(stderr, "neoproot-um: runtime directory retained: %s\n",
+                runtime_path);
+    }
+    return result;
 }
 
 static int um_parse_timeout(const char *value, double *timeout)
@@ -511,6 +697,7 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
     bool timeout_set = false;
 
     memset(config, 0, sizeof(*config));
+    config->rootfs_fd = -1;
     config->cwd = "/";
     config->timeout = 120.0;
 
@@ -562,6 +749,10 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
             if (config->hostfs)
                 goto invalid;
             config->hostfs = true;
+        } else if (strcmp(argument, "--readonly") == 0) {
+            if (config->readonly)
+                goto invalid;
+            config->readonly = true;
         } else if (strcmp(argument, "-w") == 0 ||
                    strcmp(argument, "--pwd") == 0) {
             if (++index >= argc || cwd_set)
@@ -589,12 +780,8 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
     }
     *guest_index = index;
 
-    if (!config->hostfs) {
-        fprintf(stderr, "neoproot-um: only explicit --hostfs mode is supported\n");
-        return -1;
-    }
     if (!rootfs_set) {
-        fprintf(stderr, "neoproot-um: --rootfs=DIR is required\n");
+        fprintf(stderr, "neoproot-um: --rootfs is required\n");
         return -1;
     }
     if (!kernel_set)
@@ -607,22 +794,68 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
                 "neoproot-um: set --kernel/--stub or NEOPROOT_UM_KERNEL/NEOPROOT_UM_STUB\n");
         return -1;
     }
-    if (um_validate_guest_path("cwd", config->cwd) < 0)
+    if (um_validate_guest_path("cwd", config->cwd) < 0 ||
+        um_path_has_kernel_separator(config->cwd))
         return -1;
     if (um_resolve_host_path("kernel", config->kernel, false, true,
                              &config->resolved_kernel) < 0 ||
         um_resolve_host_path("stub", config->stub, false, true,
-                             &config->resolved_stub) < 0 ||
-        um_resolve_host_path("rootfs", config->rootfs, true, false,
-                             &config->resolved_rootfs) < 0)
+                             &config->resolved_stub) < 0)
         return -1;
-    if (config->bind_count > 0 && um_resolve_bind_sources(config) < 0)
-        return -1;
-    if (config->bind_count > 0) {
-        qsort(config->binds, config->bind_count, sizeof(config->binds[0]),
-              um_bind_compare);
-        if (um_prepare_bind_targets(config) < 0)
+    {
+        struct stat root_status;
+
+        if (stat(config->rootfs, &root_status) < 0) {
+            fprintf(stderr, "neoproot-um: cannot stat rootfs '%s': %s\n",
+                    config->rootfs, strerror(errno));
             return -1;
+        }
+        if (S_ISDIR(root_status.st_mode)) {
+            if (config->readonly) {
+                fprintf(stderr, "neoproot-um: --readonly requires an ext4 image\n");
+                return -1;
+            }
+            config->rootfs_kind = UM_ROOTFS_HOSTFS;
+            if (um_resolve_host_path("rootfs", config->rootfs, true, false,
+                                     &config->resolved_rootfs) < 0)
+                return -1;
+            config->resolved_hostfs = strdup(config->resolved_rootfs);
+            if (config->resolved_hostfs == NULL) {
+                perror("neoproot-um: strdup");
+                return -1;
+            }
+        } else {
+            if (config->hostfs) {
+                fprintf(stderr, "neoproot-um: --hostfs requires a rootfs directory\n");
+                return -1;
+            }
+            if (config->bind_count != 0) {
+                fprintf(stderr, "neoproot-um: --bind is only supported with hostfs rootfs\n");
+                return -1;
+            }
+            config->rootfs_kind = UM_ROOTFS_EXT4;
+            if (um_resolve_ext4_image(config->rootfs,
+                                      &config->resolved_rootfs,
+                                      &config->rootfs_fd) < 0)
+                return -1;
+        }
+        if (config->rootfs_kind == UM_ROOTFS_HOSTFS &&
+            config->resolved_hostfs == NULL)
+            return -1;
+    }
+    if (config->rootfs_kind == UM_ROOTFS_HOSTFS) {
+        if (config->bind_count > 0 && um_resolve_bind_sources(config) < 0)
+            return -1;
+        if (config->bind_count > 0) {
+            qsort(config->binds, config->bind_count, sizeof(config->binds[0]),
+                  um_bind_compare);
+            if (um_prepare_bind_targets(config) < 0)
+                return -1;
+        }
+    }
+    if (config->rootfs_kind == UM_ROOTFS_EXT4 && config->hostfs) {
+        fprintf(stderr, "neoproot-um: invalid hostfs mode for ext4 image\n");
+        return -1;
     }
     return 0;
 
@@ -734,6 +967,7 @@ static bool um_allow_environment_name(const char *name, size_t length)
 
 static int um_write_wrapper(const char *wrapper_path, const char *cwd,
                             const char *status_path, const UmConfig *config,
+                            bool ext4_rootfs,
                             int guest_argc,
                             char *const guest_argv[])
 {
@@ -749,16 +983,19 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
                 wrapper_path, strerror(errno));
         return -1;
     }
-        if (um_write_text(fd, "#!/bin/sh\n"
-                         "um_fail() { printf '%s\\n' \"$1\" > ") < 0 ||
-        um_write_shell_word(fd, status_path) < 0 ||
-        um_write_text(fd, "; sync; poweroff -f; while :; do sleep 3600; done; }\n"
-                         "mount -t proc proc /proc 2>/dev/null || "
-                         "test -r /proc/self/status || um_fail 125\n"
-                         "mount -t sysfs sysfs /sys 2>/dev/null || "
-                         "test -d /sys/kernel || um_fail 125\n"
-                         "mount -t devtmpfs devtmpfs /dev 2>/dev/null || "
-                         "test -c /dev/null || um_fail 125\n") < 0)
+    if (ext4_rootfs) {
+        if (um_write_text(fd, "#!/bin/sh\n") < 0)
+            goto failed;
+    } else if (um_write_text(fd, "#!/bin/sh\n"
+                              "um_fail() { printf '%s\\n' \"$1\" > ") < 0 ||
+               um_write_shell_word(fd, status_path) < 0 ||
+               um_write_text(fd, "; sync; poweroff -f; while :; do sleep 3600; done; }\n"
+                              "mount -t proc proc /proc 2>/dev/null || "
+                              "test -r /proc/self/status || um_fail 125\n"
+                              "mount -t sysfs sysfs /sys 2>/dev/null || "
+                              "test -d /sys/kernel || um_fail 125\n"
+                              "mount -t devtmpfs devtmpfs /dev 2>/dev/null || "
+                              "test -c /dev/null || um_fail 125\n") < 0)
         goto failed;
 
     if (um_write_text(fd, "unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW "
@@ -819,10 +1056,14 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
             um_write_shell_word(fd, guest_argv[index]) < 0)
             goto failed;
     }
-    if (um_write_text(fd, "\n\"$@\"\nrc=$?\nprintf '%s\\n' \"$rc\" > ") < 0 ||
-        um_write_shell_word(fd, status_path) < 0 ||
-        um_write_text(fd, "\nsync\npoweroff -f\nwhile :; do sleep 3600; done\n") < 0 ||
-        fsync(fd) < 0)
+    if (ext4_rootfs) {
+        if (um_write_text(fd, "\n\"$@\"\nexit $?\n") < 0)
+            goto failed;
+    } else if (um_write_text(fd, "\n\"$@\"\nrc=$?\nprintf '%s\\n' \"$rc\" > ") < 0 ||
+               um_write_shell_word(fd, status_path) < 0 ||
+               um_write_text(fd, "\nsync\npoweroff -f\nwhile :; do sleep 3600; done\n") < 0)
+        goto failed;
+    if (fsync(fd) < 0)
         goto failed;
     if (close(fd) < 0) {
         unlink(wrapper_path);
@@ -916,6 +1157,34 @@ static int um_flush_buffer(UmBuffer *buffer, int fd)
     return 0;
 }
 
+static int um_flush_buffer_until(UmBuffer *buffer, int fd, double deadline)
+{
+    while (buffer->start < buffer->end) {
+        struct pollfd descriptor = {
+            .fd = fd,
+            .events = POLLOUT,
+            .revents = 0
+        };
+        double remaining = deadline - um_now();
+        int timeout;
+        int poll_result;
+
+        if (remaining <= 0.0)
+            return -1;
+        timeout = remaining >= 1.0 ? 1000 : (int)(remaining * 1000.0) + 1;
+        if (um_flush_buffer(buffer, fd) < 0)
+            return -1;
+        if (buffer->start == buffer->end)
+            return 0;
+        do {
+            poll_result = poll(&descriptor, 1, timeout);
+        } while (poll_result < 0 && errno == EINTR);
+        if (poll_result <= 0)
+            return -1;
+    }
+    return 0;
+}
+
 static int um_set_nonblocking(int fd, int *old_flags)
 {
     int flags = fcntl(fd, F_GETFL);
@@ -928,12 +1197,129 @@ static int um_set_nonblocking(int fd, int *old_flags)
     return 0;
 }
 
-static void um_kill_group(pid_t pid, int signal_number)
+static void um_kill_group(pid_t pid, int signal_number, bool group_ready)
 {
     if (pid > 0) {
         (void)kill(pid, signal_number);
-        (void)kill(-pid, signal_number);
+        if (group_ready)
+            (void)kill(-pid, signal_number);
     }
+}
+
+static int um_mark_fd_range_cloexec(int first, int last)
+{
+    int fd;
+
+    if (first > last)
+        return 0;
+#ifdef __NR_close_range
+    if (syscall(__NR_close_range, (unsigned int)first,
+                (unsigned int)last, UM_CLOSE_RANGE_CLOEXEC) == 0)
+        return 0;
+#endif
+    for (fd = first; fd <= last; fd++) {
+        int flags = fcntl(fd, F_GETFD);
+
+        if (flags < 0) {
+            if (errno == EBADF)
+                continue;
+            return -1;
+        }
+        if (fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+static int um_mark_inherited_fds_cloexec(int keep_fd)
+{
+    struct rlimit limits;
+    long open_max;
+    int maximum;
+
+    if (getrlimit(RLIMIT_NOFILE, &limits) == 0 &&
+        limits.rlim_cur <= (rlim_t)INT_MAX) {
+        maximum = (int)limits.rlim_cur - 1;
+    } else {
+        open_max = sysconf(_SC_OPEN_MAX);
+        maximum = open_max > 0 && open_max <= INT_MAX
+            ? (int)open_max - 1 : 65535;
+    }
+    if (maximum < 3)
+        return 0;
+    if (keep_fd >= 3 && keep_fd <= maximum) {
+        if (um_mark_fd_range_cloexec(3, keep_fd - 1) < 0 ||
+            um_mark_fd_range_cloexec(keep_fd + 1, maximum) < 0)
+            return -1;
+    } else {
+        if (um_mark_fd_range_cloexec(3, maximum) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+static bool um_wait_for_group_exit(pid_t pgid, double deadline)
+{
+    struct timespec delay = { .tv_sec = 0, .tv_nsec = 10000000L };
+
+    if (pgid <= 0)
+        return true;
+    while (um_now() < deadline) {
+        if (kill(-pgid, 0) < 0 && errno == ESRCH)
+            return true;
+        nanosleep(&delay, NULL);
+    }
+    return kill(-pgid, 0) < 0 && errno == ESRCH;
+}
+
+static void um_watchdog_main(int control_fd, pid_t uml_pid)
+{
+    struct timespec delay = { .tv_sec = 0, .tv_nsec = 10000000L };
+    struct rlimit limits;
+    long maximum;
+    int fd;
+
+    if (setsid() < 0)
+        _exit(127);
+    if (getrlimit(RLIMIT_NOFILE, &limits) == 0 && limits.rlim_cur < 65536)
+        maximum = (long)limits.rlim_cur;
+    else
+        maximum = 65536;
+    for (fd = 0; fd < maximum; fd++)
+        if (fd != control_fd)
+            close(fd);
+
+    for (;;) {
+        struct pollfd descriptor = {
+            .fd = control_fd,
+            .events = POLLIN | POLLHUP,
+            .revents = 0
+        };
+        int poll_result;
+        char command;
+
+        do {
+            poll_result = poll(&descriptor, 1, -1);
+        } while (poll_result < 0 && errno == EINTR);
+        if (poll_result < 0)
+            break;
+        if (read(control_fd, &command, 1) == 1 && command == 'S') {
+            close(control_fd);
+            _exit(0);
+        }
+        break;
+    }
+
+    (void)kill(uml_pid, SIGKILL);
+    for (int attempt = 0; attempt < 300; attempt++) {
+        if (getpgid(uml_pid) == uml_pid)
+            (void)kill(-uml_pid, SIGKILL);
+        if (kill(-uml_pid, 0) < 0 && errno == ESRCH)
+            break;
+        nanosleep(&delay, NULL);
+    }
+    close(control_fd);
+    _exit(0);
 }
 
 static int um_install_signal_handlers(struct sigaction old_actions[5])
@@ -975,12 +1361,13 @@ static void um_restore_signal_handlers(const struct sigaction old_actions[5])
 
 static void um_print_usage(void)
 {
-    puts("Usage: neoproot-um --rootfs=DIR --hostfs [options] -- command [args...]");
+    puts("Usage: neoproot-um --rootfs=DIR|IMAGE [options] -- command [args...]");
     puts("Options:");
     puts("  --kernel=PATH       UML kernel executable");
     puts("  --stub=PATH         UML stub_exe executable");
-    puts("  --rootfs=DIR        hostfs root directory");
-    puts("  --hostfs            enable explicit hostfs mode");
+    puts("  --rootfs=PATH       hostfs directory or ext4 image");
+    puts("  --hostfs            require directory hostfs mode");
+    puts("  --readonly          open an ext4 image without a COW file");
     puts("  --cwd=PATH          guest working directory");
     puts("  --timeout=SECONDS   bounded runtime (default: 120)");
     puts("  -b HOST:GUEST[:ro]  bind a rootfs path into the guest");
@@ -1026,13 +1413,21 @@ static int um_read_guest_status(const char *status_path, int *status)
 }
 
 static int um_run_kernel(const UmConfig *config, const char *init_path,
-                         const char *session_path, const char *status_path)
+                         const char *session_path, const char *status_path,
+                         bool *group_gone)
 {
     char init_argument[PATH_MAX + 6];
     char root_argument[PATH_MAX + 10];
+    char cow_argument[PATH_MAX * 2 + 8];
+    char image_argument[PATH_MAX + 32];
+    char hostfs_argument[PATH_MAX + 8];
+    char session_argument[PATH_MAX + 24];
+    char cwd_argument[PATH_MAX + 16];
+    char protocol_argument[] = "neoproot_protocol=session-v1";
+    char readonly_argument[PATH_MAX + 8];
     char stub_argument[PATH_MAX + 6];
     char slave_name[PATH_MAX];
-    char *kernel_argv[12];
+    char *kernel_argv[20];
     struct sigaction old_actions[5];
     UmBuffer input = { 0 };
     UmBuffer output = { 0 };
@@ -1041,12 +1436,20 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
     int stdin_flags = -1;
     int stdout_flags = -1;
     pid_t child_pid = -1;
+    pid_t watchdog_pid = -1;
+    pid_t supervisor_pid = getpid();
+    int group_pipe[2] = { -1, -1 };
+    int watchdog_pipe[2] = { -1, -1 };
+    char group_marker;
     int child_status = 0;
     bool child_done = false;
     bool master_eof = false;
     bool stdin_eof = false;
     bool output_failed = false;
     bool group_cleaned = false;
+    bool group_ready = false;
+    bool group_handshake_closed = false;
+    bool group_handshake_untrusted = false;
     bool termination_sent = false;
     bool timed_out = false;
     int forwarded_signal = 0;
@@ -1057,29 +1460,84 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
     int result = EXIT_FAILURE;
     int index = 0;
 
-    if (snprintf(init_argument, sizeof(init_argument), "init=%s", init_path)
-            >= (int)sizeof(init_argument) ||
-        snprintf(root_argument, sizeof(root_argument), "rootflags=%s",
-                 config->resolved_rootfs) >= (int)sizeof(root_argument) ||
-        snprintf(stub_argument, sizeof(stub_argument), "stub_exe=%s",
-                 config->resolved_stub) >= (int)sizeof(stub_argument)) {
+    *group_gone = true;
+
+    if (snprintf(stub_argument, sizeof(stub_argument), "stub_exe=%s",
+                 config->resolved_stub) >= (int)sizeof(stub_argument) ||
+        snprintf(hostfs_argument, sizeof(hostfs_argument), "hostfs=%s",
+                 config->resolved_hostfs) >= (int)sizeof(hostfs_argument) ||
+        snprintf(cwd_argument, sizeof(cwd_argument), "neoproot_cwd=%s",
+                 config->cwd) >= (int)sizeof(cwd_argument)) {
+        fprintf(stderr, "neoproot-um: UML argument is too long\n");
+        return EXIT_FAILURE;
+    }
+
+    if (config->rootfs_kind == UM_ROOTFS_HOSTFS) {
+        if (snprintf(init_argument, sizeof(init_argument), "init=%s", init_path)
+                >= (int)sizeof(init_argument) ||
+            snprintf(root_argument, sizeof(root_argument), "rootflags=%s",
+                     config->resolved_rootfs) >= (int)sizeof(root_argument)) {
+            fprintf(stderr, "neoproot-um: UML argument is too long\n");
+            return EXIT_FAILURE;
+        }
+    } else if (snprintf(init_argument, sizeof(init_argument), "init=/um-init")
+                   >= (int)sizeof(init_argument) ||
+               snprintf(session_argument, sizeof(session_argument),
+                        "neoproot_session=/%s",
+                        strrchr(session_path, '/') + 1) >=
+                   (int)sizeof(session_argument) ||
+               snprintf(image_argument, sizeof(image_argument),
+                        "/proc/self/fd/%d", config->rootfs_fd) >=
+                   (int)sizeof(image_argument) ||
+               (!config->readonly &&
+                snprintf(cow_argument, sizeof(cow_argument),
+                         "ubd0=%s/root.cow,%s", session_path,
+                         image_argument) >= (int)sizeof(cow_argument))) {
         fprintf(stderr, "neoproot-um: UML argument is too long\n");
         return EXIT_FAILURE;
     }
 
     kernel_argv[index++] = config->resolved_kernel;
     kernel_argv[index++] = "mem=512M";
-    kernel_argv[index++] = "rw";
+    kernel_argv[index++] = config->readonly ? "ro" : "rw";
     kernel_argv[index++] = init_argument;
     kernel_argv[index++] = "con=null";
     kernel_argv[index++] = "con0=fd:0,fd:1";
     kernel_argv[index++] = stub_argument;
-    kernel_argv[index++] = "rootfstype=hostfs";
-    kernel_argv[index++] = root_argument;
+    if (config->rootfs_kind == UM_ROOTFS_HOSTFS) {
+        kernel_argv[index++] = "rootfstype=hostfs";
+        kernel_argv[index++] = root_argument;
+    } else {
+        if (config->readonly) {
+            if (snprintf(readonly_argument, sizeof(readonly_argument),
+                         "ubd0r=%s", image_argument) >=
+                    (int)sizeof(readonly_argument))
+                return EXIT_FAILURE;
+            kernel_argv[index++] = readonly_argument;
+        } else {
+            kernel_argv[index++] = cow_argument;
+        }
+        kernel_argv[index++] = "root=/dev/ubda";
+        kernel_argv[index++] = "rootfstype=ext4";
+        kernel_argv[index++] = hostfs_argument;
+        kernel_argv[index++] = protocol_argument;
+        kernel_argv[index++] = session_argument;
+        kernel_argv[index++] = cwd_argument;
+        if (config->readonly)
+            kernel_argv[index++] = "rootflags=noload";
+    }
     kernel_argv[index++] = "panic=1";
     kernel_argv[index] = NULL;
-    (void)session_path;
-
+    if (pipe2(group_pipe, O_CLOEXEC) < 0) {
+        fprintf(stderr, "neoproot-um: pipe: %s\n", strerror(errno));
+        return EXIT_FAILURE;
+    }
+    if (pipe2(watchdog_pipe, O_CLOEXEC) < 0) {
+        fprintf(stderr, "neoproot-um: watchdog pipe: %s\n", strerror(errno));
+        close(group_pipe[0]);
+        close(group_pipe[1]);
+        return EXIT_FAILURE;
+    }
     master_fd = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
     if (master_fd < 0 || grantpt(master_fd) < 0 || unlockpt(master_fd) < 0 ||
         ptsname_r(master_fd, slave_name, sizeof(slave_name)) != 0) {
@@ -1087,18 +1545,32 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
                 strerror(errno));
         if (master_fd >= 0)
             close(master_fd);
+        close(group_pipe[0]);
+        close(group_pipe[1]);
+        close(watchdog_pipe[0]);
+        close(watchdog_pipe[1]);
         return EXIT_FAILURE;
     }
     if (um_set_nonblocking(master_fd, &master_flags) < 0) {
         fprintf(stderr, "neoproot-um: cannot configure PTY: %s\n",
                 strerror(errno));
         close(master_fd);
+        close(group_pipe[0]);
+        close(group_pipe[1]);
+        close(watchdog_pipe[0]);
+        close(watchdog_pipe[1]);
         return EXIT_FAILURE;
     }
-    if (um_set_nonblocking(STDIN_FILENO, &stdin_flags) < 0)
-        stdin_flags = -1;
-    if (um_set_nonblocking(STDOUT_FILENO, &stdout_flags) < 0)
-        stdout_flags = -1;
+    if (um_set_nonblocking(STDIN_FILENO, &stdin_flags) < 0) {
+        fprintf(stderr, "neoproot-um: cannot configure stdin: %s\n",
+                strerror(errno));
+        goto cleanup;
+    }
+    if (um_set_nonblocking(STDOUT_FILENO, &stdout_flags) < 0) {
+        fprintf(stderr, "neoproot-um: cannot configure stdout: %s\n",
+                strerror(errno));
+        goto cleanup;
+    }
 
     if (um_install_signal_handlers(old_actions) < 0) {
         fprintf(stderr, "neoproot-um: cannot install signal handlers: %s\n",
@@ -1119,12 +1591,21 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
         const char *host_tmpdir = getenv("TMPDIR");
         const char *host_home = getenv("HOME");
 
+        close(watchdog_pipe[0]);
+        close(watchdog_pipe[1]);
+        close(group_pipe[0]);
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0 ||
+            getppid() != supervisor_pid)
+            _exit(127);
         close(master_fd);
         if (setsid() < 0) {
             dprintf(STDERR_FILENO, "neoproot-um: setsid: %s\n", strerror(errno));
             _exit(127);
         }
-        child_slave = open(slave_name, O_RDWR);
+        if (um_write_all(group_pipe[1], "G", 1) < 0)
+            _exit(127);
+        close(group_pipe[1]);
+        child_slave = open(slave_name, O_RDWR | O_CLOEXEC);
         if (child_slave < 0) {
             dprintf(STDERR_FILENO, "neoproot-um: open PTY slave: %s\n", strerror(errno));
             _exit(127);
@@ -1139,8 +1620,19 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
             dprintf(STDERR_FILENO, "neoproot-um: dup2 PTY: %s\n", strerror(errno));
             _exit(127);
         }
+        for (int standard_fd = STDIN_FILENO;
+             standard_fd <= STDERR_FILENO; standard_fd++) {
+            int flags = fcntl(standard_fd, F_GETFD);
+
+            if (flags < 0 ||
+                fcntl(standard_fd, F_SETFD, flags & ~FD_CLOEXEC) < 0)
+                _exit(127);
+        }
         if (child_slave > STDERR_FILENO)
             close(child_slave);
+        if (config->rootfs_fd >= 3 &&
+            fcntl(config->rootfs_fd, F_SETFD, 0) < 0)
+            _exit(127);
         {
             if (host_tmpdir == NULL || host_tmpdir[0] != '/' ||
                 strlen(host_tmpdir) >= PATH_MAX - 8)
@@ -1163,6 +1655,10 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
             environment[2] = tmpdir_environment;
             environment[3] = NULL;
 
+            if (um_mark_inherited_fds_cloexec(
+                    config->rootfs_kind == UM_ROOTFS_EXT4
+                        ? config->rootfs_fd : -1) < 0)
+                _exit(127);
             execve(config->resolved_kernel, kernel_argv,
                    environment);
         }
@@ -1171,11 +1667,58 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
         _exit(127);
     }
 
+    watchdog_pid = fork();
+    if (watchdog_pid < 0) {
+        fprintf(stderr, "neoproot-um: watchdog fork: %s\n", strerror(errno));
+        goto cleanup;
+    }
+    if (watchdog_pid == 0) {
+        close(watchdog_pipe[1]);
+        close(group_pipe[0]);
+        close(group_pipe[1]);
+        close(master_fd);
+        um_watchdog_main(watchdog_pipe[0], child_pid);
+    }
+    close(watchdog_pipe[0]);
+    watchdog_pipe[0] = -1;
+
+    *group_gone = false;
+    close(group_pipe[1]);
+    {
+        int flags = fcntl(group_pipe[0], F_GETFL);
+
+        if (flags < 0 || fcntl(group_pipe[0], F_SETFL, flags | O_NONBLOCK) < 0) {
+            group_handshake_untrusted = true;
+            close(group_pipe[0]);
+            group_pipe[0] = -1;
+        }
+    }
+    if (group_pipe[0] >= 0) {
+        ssize_t handshake_read = read(group_pipe[0], &group_marker, 1);
+
+        if (handshake_read == 1) {
+            group_ready = true;
+            close(group_pipe[0]);
+            group_pipe[0] = -1;
+        } else if (handshake_read == 0) {
+            group_handshake_closed = true;
+            close(group_pipe[0]);
+            group_pipe[0] = -1;
+        } else if (handshake_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            group_handshake_untrusted = true;
+            close(group_pipe[0]);
+            group_pipe[0] = -1;
+        }
+    }
+    group_pipe[1] = -1;
+
     deadline = um_now() + config->timeout;
-    while (!child_done || !master_eof || output.start != output.end) {
-        struct pollfd descriptors[3];
+    while (!child_done || !master_eof || output.start != output.end ||
+           group_pipe[0] >= 0) {
+        struct pollfd descriptors[4];
         nfds_t descriptor_count = 0;
         int master_index;
+        int group_index = -1;
         int stdin_index = -1;
         int stdout_index = -1;
         int poll_timeout;
@@ -1189,7 +1732,7 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
             child_done = true;
             drain_deadline = um_now() + UM_DRAIN_SECONDS;
             if (!group_cleaned) {
-                um_kill_group(child_pid, SIGKILL);
+                um_kill_group(child_pid, SIGKILL, group_ready);
                 group_cleaned = true;
             }
         } else if (wait_result < 0 && errno != EINTR) {
@@ -1201,24 +1744,32 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
             forwarded_signal = um_requested_signal;
             termination_sent = true;
             termination_deadline = now + UM_SIGNAL_GRACE_SECONDS;
-            um_kill_group(child_pid, forwarded_signal);
+            um_kill_group(child_pid, forwarded_signal, group_ready);
         }
         if (!child_done && forwarded_signal == 0 && now >= deadline) {
             timed_out = true;
             termination_sent = true;
             forwarded_signal = SIGKILL;
             termination_deadline = now;
-            um_kill_group(child_pid, SIGKILL);
+            um_kill_group(child_pid, SIGKILL, group_ready);
         }
         if (!child_done && termination_sent && now >= termination_deadline) {
-            um_kill_group(child_pid, SIGKILL);
+            um_kill_group(child_pid, SIGKILL, group_ready);
             termination_deadline = now + UM_SIGNAL_GRACE_SECONDS;
         }
         if (child_done && drain_deadline != 0.0 && now >= drain_deadline)
             break;
-        if (child_done && master_eof && output.start == output.end)
+        if (child_done && master_eof && output.start == output.end &&
+            group_pipe[0] < 0)
             break;
 
+        if (group_pipe[0] >= 0) {
+            group_index = (int)descriptor_count;
+            descriptors[descriptor_count++] = (struct pollfd){
+                .fd = group_pipe[0], .events = POLLIN | POLLHUP,
+                .revents = 0
+            };
+        }
         master_index = (int)descriptor_count;
         descriptors[descriptor_count++] = (struct pollfd){
             .fd = master_fd,
@@ -1257,6 +1808,22 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
             errno != EINTR)
             break;
 
+        if (group_index >= 0 && descriptors[group_index].revents != 0) {
+            ssize_t handshake_read = read(group_pipe[0], &group_marker, 1);
+
+            if (handshake_read == 1)
+                group_ready = true;
+            if (handshake_read == 1 || handshake_read == 0 ||
+                (handshake_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                if (handshake_read == 0)
+                    group_handshake_closed = true;
+                else if (handshake_read < 0)
+                    group_handshake_untrusted = true;
+                close(group_pipe[0]);
+                group_pipe[0] = -1;
+            }
+        }
+
         if (stdin_index >= 0 &&
             (descriptors[stdin_index].revents & (POLLIN | POLLHUP))) {
             unsigned char data[16384];
@@ -1281,7 +1848,7 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
                     if (um_buffer_append(&output, data, (size_t)length,
                                          UM_OUTPUT_LIMIT) < 0) {
                         output_failed = true;
-                        um_kill_group(child_pid, SIGKILL);
+                        um_kill_group(child_pid, SIGKILL, group_ready);
                         break;
                     }
                     continue;
@@ -1301,16 +1868,24 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
     }
 
     if (!child_done) {
-        um_kill_group(child_pid, SIGKILL);
+        um_kill_group(child_pid, SIGKILL, group_ready);
         if (um_wait_for_process(child_pid, &child_status) == 0)
             child_done = true;
     }
     if (!group_cleaned)
-        um_kill_group(child_pid, SIGKILL);
-    while (output.start != output.end && !output_failed) {
-        if (um_flush_buffer(&output, STDOUT_FILENO) < 0)
-            output_failed = true;
-    }
+        um_kill_group(child_pid, SIGKILL, group_ready);
+    if (group_ready)
+        *group_gone = um_wait_for_group_exit(child_pid, um_now() +
+                                             UM_SIGNAL_GRACE_SECONDS);
+    else if (group_handshake_closed && !group_handshake_untrusted && child_done)
+        *group_gone = true;
+    else
+        *group_gone = false;
+    if (!*group_gone)
+        fprintf(stderr, "neoproot-um: UML process group did not exit\n");
+    if (!output_failed && um_flush_buffer_until(&output, STDOUT_FILENO,
+                                                um_now() + UM_DRAIN_SECONDS) < 0)
+        output_failed = true;
     um_restore_signal_handlers(old_actions);
 
     if (output_failed)
@@ -1321,6 +1896,8 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
         result = 128 + um_requested_signal;
     else if (um_read_guest_status(status_path, &result) == 0)
         guest_status_valid = true;
+    else if (config->rootfs_kind == UM_ROOTFS_EXT4)
+        result = 125;
     else if (child_done && WIFEXITED(child_status))
         result = WEXITSTATUS(child_status);
     else if (child_done && WIFSIGNALED(child_status))
@@ -1330,10 +1907,35 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
 
 cleanup:
     if (child_pid > 0) {
-        um_kill_group(child_pid, SIGKILL);
+        um_kill_group(child_pid, SIGKILL, group_ready);
         if (!child_done)
             (void)um_wait_for_process(child_pid, &child_status);
+        if (group_ready)
+            *group_gone = um_wait_for_group_exit(child_pid, um_now() +
+                                                 UM_SIGNAL_GRACE_SECONDS);
+        else if (!(group_handshake_closed && !group_handshake_untrusted &&
+                   child_done))
+            *group_gone = false;
     }
+    if (watchdog_pipe[1] >= 0) {
+        if (watchdog_pid > 0 && *group_gone)
+            (void)um_write_all(watchdog_pipe[1], "S", 1);
+        close(watchdog_pipe[1]);
+    }
+    if (watchdog_pipe[0] >= 0)
+        close(watchdog_pipe[0]);
+    if (watchdog_pid > 0) {
+        int watchdog_status;
+
+        if (um_wait_for_process(watchdog_pid, &watchdog_status) < 0) {
+            (void)kill(watchdog_pid, SIGKILL);
+            (void)um_wait_for_process(watchdog_pid, &watchdog_status);
+        }
+    }
+    if (group_pipe[0] >= 0)
+        close(group_pipe[0]);
+    if (group_pipe[1] >= 0)
+        close(group_pipe[1]);
     if (stdin_flags >= 0)
         (void)fcntl(STDIN_FILENO, F_SETFL, stdin_flags);
     if (stdout_flags >= 0)
@@ -1347,7 +1949,7 @@ cleanup:
     return result;
 }
 
-static int um_make_session(const char *rootfs, char **session_path,
+static int um_make_session(const UmConfig *config, char **session_path,
                            char **wrapper_path, char **init_path,
                            char **status_path)
 {
@@ -1363,7 +1965,9 @@ static int um_make_session(const char *rootfs, char **session_path,
 
     wrapper[0] = '\0';
 
-    length = snprintf(session, sizeof(session), "%s%s", rootfs,
+    length = snprintf(session, sizeof(session), "%s%s",
+                      config->rootfs_kind == UM_ROOTFS_EXT4
+                          ? config->resolved_hostfs : config->resolved_rootfs,
                       UM_SESSION_TEMPLATE);
     if (length < 0 || (size_t)length >= sizeof(session))
         return -1;
@@ -1414,6 +2018,7 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
     const char *session_name;
     int guest_index;
     int result;
+    bool group_gone = true;
 
     if (argc == 2 && strcmp(argv[1], "--help") == 0) {
         um_print_usage();
@@ -1430,7 +2035,10 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
         um_free_config(&config);
         return EXIT_FAILURE;
     }
-    if (um_make_session(config.resolved_rootfs, &session_path, &wrapper_path,
+    if (config.rootfs_kind == UM_ROOTFS_EXT4 &&
+        um_make_runtime_root(&config.resolved_hostfs) < 0)
+        goto failed;
+    if (um_make_session(&config, &session_path, &wrapper_path,
                         &init_path, &status_path) < 0)
         goto failed;
     session_name = strrchr(session_path, '/') + 1;
@@ -1438,13 +2046,44 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
                  session_name) >= (int)sizeof(status_guest_path))
         goto failed;
     if (um_write_wrapper(wrapper_path, config.cwd, status_guest_path, &config,
+                         config.rootfs_kind == UM_ROOTFS_EXT4,
                          argc - guest_index,
                          &argv[guest_index]) < 0)
         goto failed;
-    result = um_run_kernel(&config, init_path, session_path, status_path);
+    result = um_run_kernel(&config, init_path, session_path, status_path,
+                           &group_gone);
+    if (!group_gone) {
+        fprintf(stderr,
+                "neoproot-um: leaving runtime directory because UML is still running: %s\n",
+                config.resolved_hostfs);
+        free(session_path);
+        free(wrapper_path);
+        free(init_path);
+        free(status_path);
+        um_cleanup_created_paths(&config);
+        um_free_config(&config);
+        return EXIT_FAILURE;
+    }
+    if (config.rootfs_kind == UM_ROOTFS_EXT4) {
+        char cow_path[PATH_MAX];
+
+        if (snprintf(cow_path, sizeof(cow_path), "%s/root.cow", session_path) <
+            (int)sizeof(cow_path))
+            (void)unlink(cow_path);
+    }
     unlink(wrapper_path);
     unlink(status_path);
-    rmdir(session_path);
+    if (config.rootfs_kind == UM_ROOTFS_EXT4) {
+        if (rmdir(session_path) == 0) {
+            (void)um_cleanup_runtime_root(config.resolved_hostfs);
+        } else {
+            fprintf(stderr,
+                    "neoproot-um: session directory retained: %s\n",
+                    session_path);
+        }
+    } else {
+        (void)rmdir(session_path);
+    }
     free(session_path);
     free(wrapper_path);
     free(init_path);
@@ -1460,6 +2099,9 @@ failed:
         unlink(status_path);
     if (session_path != NULL)
         rmdir(session_path);
+    if (config.rootfs_kind == UM_ROOTFS_EXT4 && config.resolved_hostfs != NULL) {
+        (void)um_cleanup_runtime_root(config.resolved_hostfs);
+    }
     free(session_path);
     free(wrapper_path);
     free(init_path);
