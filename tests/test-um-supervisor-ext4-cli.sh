@@ -112,6 +112,7 @@ assert_status() {
 	set -e
 	if [ "$actual" -ne "$expected" ]; then
 		echo "FAIL: $name returned $actual, expected $expected" >&2
+		cat "$temporary_directory/stdout" >&2
 		cat "$temporary_directory/stderr" >&2
 		exit 1
 	fi
@@ -133,6 +134,7 @@ assert_fallback_status() {
 	set -e
 	if [ "$actual" -ne "$expected" ]; then
 		echo "FAIL: $name returned $actual, expected $expected" >&2
+		cat "$temporary_directory/stdout" >&2
 		cat "$temporary_directory/stderr" >&2
 		exit 1
 	fi
