@@ -60,6 +60,7 @@ jobs:
           meson-build/neoproot --help >/dev/null
           meson-build/neoproot-um --help >/dev/null
           ! meson-build/neoproot --definitely-invalid >/dev/null 2>&1
+          mkdir -p /tmp/neoproot-um-cli-ci
           UM_SUPERVISOR=meson-build/neoproot-um NEOPROOT=meson-build/neoproot \
             TMPDIR=/tmp/neoproot-um-cli-ci sh tests/test-um-supervisor-ext4-cli.sh
 
