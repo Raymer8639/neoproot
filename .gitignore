@@ -8,6 +8,7 @@
 /src/proot
 /src/uproot
 /src/neoproot
+/src/neoproot-um
 /src/loader.exe
 /tests/test_argv
 /tests/test_echo

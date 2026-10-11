@@ -48,5 +48,12 @@ expect_failure "bind with ext4 image" \
 	--rootfs="$image" --bind="$rootfs:/mnt" -- /bin/true
 expect_failure "invalid ext4 image" \
 	--rootfs="$temporary_directory/invalid-image" -- /bin/true
+expect_failure "--net with an unbindable umnet path" \
+	env NEOPROOT_UM_NET="$temporary_directory/missing-umnet" \
+	"$um_supervisor" --rootfs="$rootfs" --hostfs --net -- /bin/true
+expect_failure "duplicate --net" \
+	--rootfs="$rootfs" --hostfs --net --net -- /bin/true
+expect_failure "unknown argument after --net" \
+	--rootfs="$rootfs" --hostfs --net --unknown-option -- /bin/true
 
 echo "UM supervisor CLI validation tests passed"
