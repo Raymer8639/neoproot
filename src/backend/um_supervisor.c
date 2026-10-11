@@ -38,6 +38,9 @@ extern char **environ;
 #define UM_SIGNAL_GRACE_SECONDS 2.0
 #define UM_DRAIN_SECONDS 2.0
 #define UM_MAX_BINDS 64
+
+/* umnet's own arguments before the `--` that introduces the kernel vector */
+#define UM_NETWORK_OPTIONS 12
 #define UM_MAX_CREATED_PATHS (UM_MAX_BINDS * 4)
 #define UM_CLOSE_RANGE_CLOEXEC (1U << 2)
 
@@ -90,11 +93,45 @@ typedef struct {
 } UmBuffer;
 
 static volatile sig_atomic_t um_requested_signal;
+static volatile sig_atomic_t um_window_changed;
 
 static void um_signal_handler(int signal_number)
 {
+    if (signal_number == SIGWINCH) {
+        um_window_changed = 1;
+        return;
+    }
     um_requested_signal = signal_number;
 }
+
+/*
+ * Mirror the caller's terminal size onto the guest PTY.
+ *
+ * Without this the guest keeps the 80x24 default for its whole life, which
+ * breaks anything that draws to the terminal -- an editor or a pager lays out
+ * for the wrong width and the user sees garbage.  Both directions can fail
+ * harmlessly: if our stdin is not a terminal, or the size is unavailable, there
+ * is nothing to copy and the PTY keeps whatever it had.
+ */
+static void um_apply_window_size(int master_fd)
+{
+    struct winsize size;
+
+    if (ioctl(STDIN_FILENO, TIOCGWINSZ, &size) < 0)
+        return;
+    if (size.ws_row == 0 || size.ws_col == 0)
+        return;
+    if (ioctl(master_fd, TIOCSWINSZ, &size) < 0)
+        return;
+}
+
+/*
+ * Nothing to arrange for the resize notification itself: the kernel delivers
+ * SIGWINCH to the foreground process group when the terminal changes size, and
+ * um_install_signal_handlers() already installs our handler for it.  An
+ * F_SETOWN/O_ASYNC dance here would only be a way to lose the flag again,
+ * since um_set_nonblocking() owns stdin's flags later in startup.
+ */
 
 static double um_now(void)
 {
@@ -1415,10 +1452,12 @@ static void um_watchdog_main(int control_fd, pid_t uml_pid)
     _exit(0);
 }
 
-static int um_install_signal_handlers(struct sigaction old_actions[5])
+#define UM_HANDLED_SIGNALS 6
+
+static int um_install_signal_handlers(struct sigaction old_actions[UM_HANDLED_SIGNALS])
 {
-    static const int signals[5] = {
-        SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGPIPE
+    static const int signals[UM_HANDLED_SIGNALS] = {
+        SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGPIPE, SIGWINCH
     };
     struct sigaction action;
     int index;
@@ -1426,7 +1465,7 @@ static int um_install_signal_handlers(struct sigaction old_actions[5])
     memset(&action, 0, sizeof(action));
     sigemptyset(&action.sa_mask);
     action.sa_handler = um_signal_handler;
-    for (index = 0; index < 5; index++) {
+    for (index = 0; index < UM_HANDLED_SIGNALS; index++) {
         if (signals[index] == SIGPIPE) {
             action.sa_handler = SIG_IGN;
         } else {
@@ -1441,14 +1480,16 @@ static int um_install_signal_handlers(struct sigaction old_actions[5])
     return 0;
 }
 
-static void um_restore_signal_handlers(const struct sigaction old_actions[5])
+static void um_restore_signal_handlers(const struct sigaction old_actions[UM_HANDLED_SIGNALS])
 {
-    static const int signals[5] = {
-        SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGPIPE
+    static const int signals[UM_HANDLED_SIGNALS] = {
+        SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGPIPE, SIGWINCH
     };
     int index;
 
-    for (index = 0; index < 5; index++)
+    /* Must cover every signal um_install_signal_handlers() touched, or the
+     * last one keeps our handler after this supervisor returns. */
+    for (index = 0; index < UM_HANDLED_SIGNALS; index++)
         (void)sigaction(signals[index], &old_actions[index], NULL);
 }
 
@@ -1521,7 +1562,7 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
     char stub_argument[PATH_MAX + 6];
     char slave_name[PATH_MAX];
     char *kernel_argv[24];
-    struct sigaction old_actions[5];
+    struct sigaction old_actions[UM_HANDLED_SIGNALS];
     UmBuffer input = { 0 };
     UmBuffer output = { 0 };
     int master_fd = -1;
@@ -1644,6 +1685,10 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
         close(watchdog_pipe[1]);
         return EXIT_FAILURE;
     }
+    /* Give the guest the caller's terminal geometry before it starts, and
+     * arrange to be told when that geometry changes. */
+    um_apply_window_size(master_fd);
+
     if (um_set_nonblocking(master_fd, &master_flags) < 0) {
         fprintf(stderr, "neoproot-um: cannot configure PTY: %s\n",
                 strerror(errno));
@@ -1671,6 +1716,7 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
         goto cleanup;
     }
     um_requested_signal = 0;
+    um_window_changed = 0;
     child_pid = fork();
     if (child_pid < 0) {
         fprintf(stderr, "neoproot-um: fork: %s\n", strerror(errno));
@@ -1698,13 +1744,28 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
         if (um_write_all(group_pipe[1], "G", 1) < 0)
             _exit(127);
         close(group_pipe[1]);
-        child_slave = open(slave_name, O_RDWR | O_CLOEXEC);
+        /*
+         * Leave the controlling terminal to UML.
+         *
+         * UML relays host window-size changes to the guest through a helper
+         * process that attaches to the console fd itself (winch_thread():
+         * setsid() + ioctl(fd, TIOCSCTTY, 0), see chan_user.c).  A PTY can be
+         * the controlling terminal of exactly one session, so if we claim it
+         * here that helper dies with
+         *
+         *     winch_thread : TIOCSCTTY failed on fd 1 err = 1
+         *
+         * and the guest keeps its startup geometry for the whole run, even
+         * though we keep copying the host size onto the PTY.
+         *
+         * A session leader's first tty open() claims the tty implicitly, so
+         * O_NOCTTY -- not dropping the explicit TIOCSCTTY alone -- is what
+         * leaves it free.  The device still has to exist and be usable here,
+         * but this process needs no controlling terminal of its own.
+         */
+        child_slave = open(slave_name, O_RDWR | O_NOCTTY | O_CLOEXEC);
         if (child_slave < 0) {
             dprintf(STDERR_FILENO, "neoproot-um: open PTY slave: %s\n", strerror(errno));
-            _exit(127);
-        }
-        if (ioctl(child_slave, TIOCSCTTY, 0) < 0) {
-            dprintf(STDERR_FILENO, "neoproot-um: TIOCSCTTY: %s\n", strerror(errno));
             _exit(127);
         }
         if (dup2(child_slave, STDIN_FILENO) < 0 ||
@@ -1760,7 +1821,16 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
              * unchanged.
              */
             if (config->network) {
-                char *network_argv[24];
+                /*
+                 * umnet's own options, then `--`, then the complete kernel
+                 * vector.  The vector must be copied in full: dropping its tail
+                 * loses rootfs parameters rather than failing, and in ext4 mode
+                 * that silently discards the caller's command (um-init keys the
+                 * session off the neoproot_* parameters that sit at the end).
+                 * The bound is derived from the two arrays, not guessed.
+                 */
+                char *network_argv[UM_NETWORK_OPTIONS + (int)(sizeof(kernel_argv) /
+                                                             sizeof(kernel_argv[0]))];
                 int network_index = 0;
 
                 network_argv[network_index++] = (char *)"umnet";
@@ -1775,9 +1845,7 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
                 network_argv[network_index++] = (char *)"--dns";
                 network_argv[network_index++] = (char *)config->net_dns;
                 network_argv[network_index++] = (char *)"--";
-                for (int kernel_index = 0;
-                     kernel_index <= index && network_index < 22;
-                     kernel_index++)
+                for (int kernel_index = 0; kernel_index < index; kernel_index++)
                     network_argv[network_index++] = kernel_argv[kernel_index];
                 network_argv[network_index] = NULL;
                 execve(config->resolved_umnet, network_argv, environment);
@@ -1866,6 +1934,14 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
         }
 
         now = um_now();
+        /*
+         * A resize is not a reason to stop.  Copy the new geometry onto the
+         * guest PTY and let it notice through its own SIGWINCH.
+         */
+        if (um_window_changed) {
+            um_window_changed = 0;
+            um_apply_window_size(master_fd);
+        }
         if (um_requested_signal != 0 && forwarded_signal == 0) {
             forwarded_signal = um_requested_signal;
             termination_sent = true;
