@@ -793,7 +793,13 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
     config->timeout = 120.0;
     snprintf(config->net_addr, sizeof(config->net_addr), "%s", "10.0.2.15");
     snprintf(config->net_gateway, sizeof(config->net_gateway), "%s", "10.0.2.2");
-    snprintf(config->net_dns, sizeof(config->net_dns), "%s", "1.1.1.1");
+    /*
+     * net_dns is deliberately left empty: no nameserver is announced unless
+     * the caller asks for one, and umnet then works it out from the host's
+     * resolv.conf.  A literal here is a guess about the network rather than
+     * about the build -- 1.1.1.1 was that guess, and on a network that blocks
+     * it the guest loses DNS while everything else still looks healthy.
+     */
     config->net_mask = "24";
 
     for (index = 1; index < argc; index++) {
@@ -1842,8 +1848,15 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
                 network_argv[network_index++] = (char *)config->net_mask;
                 network_argv[network_index++] = (char *)"--gw";
                 network_argv[network_index++] = (char *)config->net_gateway;
-                network_argv[network_index++] = (char *)"--dns";
-                network_argv[network_index++] = (char *)config->net_dns;
+                /*
+                 * Only when the caller named one.  Passing an empty --dns would
+                 * make umnet announce nothing at all, and passing a default
+                 * would put the guess back.
+                 */
+                if (config->net_dns[0] != '\0') {
+                    network_argv[network_index++] = (char *)"--dns";
+                    network_argv[network_index++] = (char *)config->net_dns;
+                }
                 network_argv[network_index++] = (char *)"--";
                 for (int kernel_index = 0; kernel_index < index; kernel_index++)
                     network_argv[network_index++] = kernel_argv[kernel_index];

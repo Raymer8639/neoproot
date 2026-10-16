@@ -88,8 +88,14 @@ run_with_net() {
 	fi
 }
 
-# The 11 tokens umnet expects before `--` have to be there, in order, or umnet
+# The options umnet expects before `--` have to be there, in order, or umnet
 # will not parse the vector at all.
+#
+# No `--dns` here on purpose.  The supervisor used to pass a literal 1.1.1.1,
+# which is a claim about the network rather than about the build: on a network
+# that blocks that resolver the guest loses DNS while every other check still
+# passes, and nothing in the output says where the address came from.  umnet
+# now picks the host's own resolver unless the caller names one.
 require_options() {
 	expected="--passt
 $temporary_directory/passt
@@ -99,11 +105,28 @@ $temporary_directory/passt
 24
 --gw
 10.0.2.2
+--"
+	actual=$(head -n 9 "$argv_file")
+	[ "$actual" = "$expected" ] || fail "umnet options are malformed"
+	[ "$(sed -n '10p' "$argv_file")" = "$temporary_directory/kernel" ] ||
+		fail "umnet argv does not start with the kernel path"
+}
+
+# --net-dns= has to reach umnet, and be the only thing that puts `--dns` there.
+require_dns_option() {
+	expected="--passt
+$temporary_directory/passt
+--addr
+10.0.2.15
+--mask
+24
+--gw
+10.0.2.2
 --dns
-1.1.1.1
+$1
 --"
 	actual=$(head -n 11 "$argv_file")
-	[ "$actual" = "$expected" ] || fail "umnet options are malformed"
+	[ "$actual" = "$expected" ] || fail "umnet options are malformed with --net-dns"
 	[ "$(sed -n '12p' "$argv_file")" = "$temporary_directory/kernel" ] ||
 		fail "umnet argv does not start with the kernel path"
 }
@@ -127,10 +150,10 @@ require_count() {
 	[ "$count" -eq "$1" ] || fail "umnet argv has $count entries, expected $1"
 }
 
-# hostfs: 11 options + 10 kernel arguments.
+# hostfs: 9 options + 10 kernel arguments.
 run_with_net --rootfs="$rootfs" --hostfs --net
 require_options
-require_count 21
+require_count 19
 require_argument "init="
 require_argument "con=null"
 require_argument "con0=fd:0,fd:1"
@@ -139,10 +162,10 @@ require_argument "rootflags=$rootfs"
 require_tail "panic=1"
 
 # ext4 read-write: the longest vector, and the mode where dropping the session
-# parameters silently discards the guest command.  11 options + 15 arguments.
+# parameters silently discards the guest command.  9 options + 15 arguments.
 run_with_net --rootfs="$image" --net
 require_options
-require_count 26
+require_count 24
 require_argument "init=/um-init"
 require_argument "ubd0="
 require_argument "root=/dev/ubda"
@@ -153,10 +176,16 @@ require_argument "neoproot_session="
 require_argument "neoproot_cwd=/"
 require_tail "panic=1"
 
+# --net-dns= is the only thing that may add `--dns`: 11 options + 10 arguments.
+run_with_net --rootfs="$rootfs" --hostfs --net --net-dns=9.9.9.9
+require_dns_option 9.9.9.9
+require_count 21
+require_tail "panic=1"
+
 # ext4 read-only carries one extra argument (rootflags=noload).
 run_with_net --rootfs="$image" --readonly --net
 require_options
-require_count 27
+require_count 25
 require_argument "ubd0r="
 require_argument "neoproot_protocol=session-v1"
 require_argument "neoproot_session="
