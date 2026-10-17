@@ -52,12 +52,13 @@ host equivalents of programs that are missing from the guest rootfs
 and to speed up build-time by using cross-compilation tools or
 CPU-independent programs, like interpreters.
 
-It is worth noting that the guest kernel is never involved, regardless
-of whether QEMU user-mode is used or not.  Technically, when guest
-programs perform access to system resources, PRoot translates their
-requests before sending them to the host kernel.  This means that
-guest programs can use host resources (devices, network, ...) just as
-if they were "normal" host programs.
+It is worth noting that, in the default PRoot backend, the guest kernel
+is never involved, regardless of whether QEMU user-mode is used or not.
+Technically, when guest programs perform access to system resources,
+PRoot translates their requests before sending them to the host kernel.
+This means that guest programs can use host resources (devices,
+network, ...) just as if they were "normal" host programs.  The optional
+UML backend (see ``--backend``) runs a real guest kernel instead.
 
 
 Options
@@ -116,10 +117,12 @@ Regular options
     need for running a shell and then entering the directory manually.
 
 --backend=mode
-    Select the execution backend.  ``um`` selects the first-stage UML
-    backend; ``fast`` selects the existing PRoot path; ``auto`` selects UML
-    only when the caller configured its prerequisites -- a kernel and a stub
-    (from ``--kernel``/``--stub``, or non-empty ``NEOPROOT_UM_KERNEL`` and
+    Select the execution backend.  ``fast`` selects the PRoot tracer, the
+    default when the option is omitted; ``um`` selects the optional second
+    execution backend, a separate UML guest kernel started by
+    ``neoproot-um``; ``auto`` selects UML only when the caller configured
+    its prerequisites -- a kernel and a stub (from
+    ``--kernel``/``--stub``, or non-empty ``NEOPROOT_UM_KERNEL`` and
     ``NEOPROOT_UM_STUB``) and a rootfs -- and otherwise the PRoot path,
     reporting the choice on stderr.  The option must be placed before the
     guest command.
@@ -136,43 +139,67 @@ Regular options
 
         neoproot -r /path/to/rootfs -- /bin/sh
 
-    A directory rootfs selects UML ``hostfs`` mode. Bind sources already inside
-    that root can be mapped with ``-b host:guest[:ro]``; sources outside it and
-    targets under ``/proc``, ``/sys`` or ``/dev`` are rejected. An ext4 image
-    selects UML block-device mode and gets a fresh temporary COW file for each
-    run, deleted when the run ends; ``--readonly`` opens the image directly
-    without creating a COW file. ``--cow-file=path`` (an absolute path) keeps
-    the COW file at *path* instead: it is created when missing, kept after the
-    run, and reused by the next run, so the guest sees the writes of the run
+    A directory rootfs selects UML ``hostfs`` mode. Bind sources already
+    inside that root can be mapped with ``-b host:guest[:ro]``; sources
+    outside it and targets under ``/proc``, ``/sys`` or ``/dev`` are
+    rejected. An ext4 image selects UML block-device mode and gets a fresh
+    temporary COW file for each run, deleted when the run ends; the base image
+    is never written. ``--readonly`` opens the image directly without
+    creating a COW file. ``--cow-file=path`` (an absolute path) keeps the COW
+    file at *path* instead: it is created when missing, kept after the run,
+    and reused by the next run, so the guest sees the writes of the run
     before. A COW file is tied to the image it was created for; a mismatch is
     refused with a message naming the file, and ``--cow-file`` cannot be
     combined with ``--readonly``. Hostfs directly exposes the selected host
     directory and is not a security isolation boundary. Ext4 mode requires an
-    image containing ``/um-init`` from the matching UM harness. The init script
-    uses the session-v1 protocol to mount the temporary hostfs session at
-    ``/run/neoproot`` and return the command status.
+    image containing ``/um-init`` from the matching UM harness. The init
+    script uses the session-v1 protocol to mount the temporary hostfs session
+    at ``/run/neoproot`` and return the command status.
 
     In ext4 mode ``-b host:guest[:ro]`` accepts host paths as sources, since
     the guest root is an image and has no "inside" to restrict a source to.
-    The guest init mounts each source through hostfs (read-only for ``:ro``)
-    and has to declare that it implements binds: it writes
-    ``/run/neoproot/init-features`` with ``neoproot-init-protocol=2`` and
-    ``feature=binds`` before running the command. The supervisor describes the
-    requested binds in ``/run/neoproot/binds``, one record per line with
-    tab-separated fields ``source target dir|file ro|rw name``. When binds are
-    requested and the declaration is missing, the run fails rather than running
-    the command without them; a guest-side mount failure is reported through
-    ``/run/neoproot/protocol-error`` and printed by the supervisor.
+    The guest init mounts each source through hostfs (read-only for ``:ro``).
+    A directory target must exist, or be creatable, inside the guest; with
+    ``--readonly`` the image cannot be modified, so a target must already
+    exist there.  The guest init has to declare that it implements binds: it
+    writes ``/run/neoproot/init-features`` with ``neoproot-init-protocol=2``
+    and ``feature=binds`` before running the command.  The supervisor
+    describes the requested binds in ``/run/neoproot/binds``, one record per
+    line with tab-separated fields ``source target dir|file ro|rw name``.
+    When binds are requested and the declaration is missing, the run fails
+    rather than running the command without them; a guest-side mount failure
+    is reported through ``/run/neoproot/protocol-error`` and printed by the
+    supervisor.  This is a hard requirement: an init without the declaration
+    is refused, not treated as a best-effort fallback.
     ``tests/um-init-ext4.sh`` is a reference init for an ext4 image.
 
-    ``--net`` gives the guest a real network through ``umnet`` and ``passt``
-    (DHCP, DNS, ICMP and TCP), while the guest's exit status still comes back
-    through the session protocol.  The helpers are found on ``$PATH`` or named
-    by ``NEOPROOT_UM_NET`` and ``NEOPROOT_UM_PASST``.  ``--net-addr=`` and
-    ``--net-gateway=`` set the guest address and gateway (default
-    ``10.0.2.15/24`` and ``10.0.2.2``).  A nameserver is announced only when
-    ``--net-dns=<address>`` is given; otherwise ``umnet`` reads the host's
-    resolver, and ``--net-dns=none`` announces none.
+    ``--net`` gives the guest a real IPv4 network through ``umnet`` and
+    ``passt`` (DHCP, DNS, ICMP and TCP), while the guest's exit status still
+    comes back through the session protocol.  The helpers are found on
+    ``$PATH`` or named by ``NEOPROOT_UM_NET`` and ``NEOPROOT_UM_PASST``.
+    ``--net-addr=`` and ``--net-gateway=`` set the guest address and gateway
+    (default ``10.0.2.15/24`` and ``10.0.2.2``).  A nameserver is announced
+    only when ``--net-dns=<address>`` is given; otherwise ``umnet`` reads
+    the host's resolver, and ``--net-dns=none`` announces none.  IPv6 is not
+    available on this path, and neoproot exposes no ``--net-ipv6`` option.
+
+    The guest console is the caller's terminal, and terminal resizes
+    (SIGWINCH) are forwarded to the guest.  ``--timeout=seconds`` bounds a
+    run (default 120).  The guest's exit status is returned unchanged; a
+    timed-out run returns 124, a forwarded signal returns 128 plus the signal
+    number (143 for SIGTERM), a guest session or init failure returns 125, and
+    failure to enter the requested working directory returns 126.  The
+    supervisor catches SIGINT, SIGTERM, SIGHUP and SIGQUIT, signals the UML
+    process group with them, cleans that group up, and removes the
+    ``~/.uml/<umid>`` directory of a killed or panicking kernel once that
+    kernel is gone.
+
+    The guest kernel is uniprocessor, and the guest runs aarch64 userland
+    only: the kernel is built with ``CONFIG_COMPAT`` off, so 32-bit ARM
+    binaries do not run.  Kernel and stub must be built with
+    ``build-bionic.sh`` from the linux-um-arm64 tree and matched with the
+    ``um-init``, ``umnet`` and ``passt`` they are used with.  Ext4 roots
+    have been exercised at 64 MB and 256 MB.
 
     The UML kernel and ``stub_exe`` may be provided to the standalone
     ``neoproot-um`` backend with ``--kernel=path`` and ``--stub=path``, or
