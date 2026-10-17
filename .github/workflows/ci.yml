@@ -121,6 +121,10 @@ jobs:
           # How the `--` separator is routed to each backend, and what `auto`
           # decides when the UML prerequisites are or are not configured.
           sh test-backend-cli.sh
+          # Capability-aware auto: the policy (pure, always runs) and the
+          # dispatch (a mock kernel records whether UML was reached).
+          ./test-auto-backend
+          sh test-auto-commands.sh || test $? -eq 125
           mkdir -p /tmp/neoproot-um-cli-ci
           TMPDIR=/tmp/neoproot-um-cli-ci PROOT=../src/neoproot sh test-um-supervisor-cli.sh
           TMPDIR=/tmp/neoproot-um-cli-ci PROOT=../src/neoproot sh test-um-supervisor-bind-cli.sh
@@ -131,10 +135,14 @@ jobs:
           cow_status=$?
           TMPDIR=/tmp/neoproot-um-cli-ci PROOT=../src/neoproot sh test-um-supervisor-ext4-binds-cli.sh
           binds_status=$?
+          # --net argv, including --net-ipv6: a mock umnet records its vector.
+          TMPDIR=/tmp/neoproot-um-cli-ci sh test-um-supervisor-net-argv.sh
+          net_status=$?
           set -e
           test "$um_status" -eq 0 || test "$um_status" -eq 125
           test "$cow_status" -eq 0 || test "$cow_status" -eq 125
           test "$binds_status" -eq 0 || test "$binds_status" -eq 125
+          test "$net_status" -eq 0 || test "$net_status" -eq 125
 
       - name: Test internal binding mountinfo
         run: |

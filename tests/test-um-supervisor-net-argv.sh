@@ -11,6 +11,10 @@
 # came back as 0, and the CLI tests did not notice because they only exercise
 # option validation.
 #
+# The same file covers --net-ipv6: IPv6 is a second helper inside umnet, so it
+# is one switch and up to three values on umnet's own command line, and the
+# kernel vector behind the separator must be unchanged.
+#
 # A mock umnet records its argv, so the contract is checked without a kernel, a
 # rootfs image or passt.
 
@@ -150,6 +154,61 @@ require_count() {
 	[ "$count" -eq "$1" ] || fail "umnet argv has $count entries, expected $1"
 }
 
+# --net-ipv6 is one option to umnet, and only what the caller named follows it:
+# the address and gateway stay umnet's defaults instead of being restated here,
+# and so does the resolver.
+require_ipv6_flag_only() {
+	expected="--passt
+$temporary_directory/passt
+--addr
+10.0.2.15
+--mask
+24
+--gw
+10.0.2.2
+--ipv6
+--"
+	actual=$(head -n 10 "$argv_file")
+	[ "$actual" = "$expected" ] || fail "umnet options are malformed with --net-ipv6"
+	[ "$(sed -n '11p' "$argv_file")" = "$temporary_directory/kernel" ] ||
+		fail "umnet argv does not start with the kernel path after --net-ipv6"
+}
+
+require_ipv6_options() {
+	expected="--passt
+$temporary_directory/passt
+--addr
+10.0.2.15
+--mask
+24
+--gw
+10.0.2.2
+--ipv6
+--ipv6-addr
+fd00::2/64
+--ipv6-gw
+fe80::1
+--ipv6-dns
+2001:db8::53
+--"
+	actual=$(head -n 16 "$argv_file")
+	[ "$actual" = "$expected" ] || fail "umnet IPv6 options are malformed"
+	[ "$(sed -n '17p' "$argv_file")" = "$temporary_directory/kernel" ] ||
+		fail "umnet argv does not start with the kernel path after IPv6 options"
+}
+
+# The options only make sense with a network; saying so is the whole check.
+require_ipv6_needs_net() {
+	if TMPDIR="$temporary_directory" "$um_supervisor" \
+		--kernel="$temporary_directory/kernel" \
+		--stub="$temporary_directory/kernel" \
+		--rootfs="$rootfs" "$@" -- /bin/true >"$temporary_directory/out" 2>&1; then
+		fail "the supervisor accepted $* without --net"
+	fi
+	grep -q -F -- "--net-ipv6 options require --net" "$temporary_directory/out" ||
+		fail "the supervisor did not explain that $* requires --net"
+}
+
 # hostfs: 9 options + 10 kernel arguments.
 run_with_net --rootfs="$rootfs" --hostfs --net
 require_options
@@ -192,6 +251,47 @@ require_argument "neoproot_session="
 require_argument "rootflags=noload"
 require_tail "panic=1"
 
+# --net-ipv6 alone: one extra option, and the kernel vector is untouched.
+run_with_net --rootfs="$rootfs" --hostfs --net --net-ipv6
+require_ipv6_flag_only
+require_count 20
+require_argument "rootfstype=hostfs"
+require_tail "panic=1"
+
+# The three values are passed only when named, in umnet's own order.
+run_with_net --rootfs="$rootfs" --hostfs --net --net-ipv6 \
+	--net-ipv6-addr=fd00::2/64 --net-ipv6-gw=fe80::1 \
+	--net-ipv6-dns=2001:db8::53
+require_ipv6_options
+require_count 26
+require_tail "panic=1"
+
+# A named value implies the switch: "--net-ipv6-addr=" on its own still turns
+# IPv6 on, which is what umnet does with the same argument.
+run_with_net --rootfs="$rootfs" --hostfs --net --net-ipv6-addr=fd00::9/64
+require_argument "--ipv6"
+require_argument "--ipv6-addr"
+require_count 22
+require_tail "panic=1"
+
+# --net-ipv6-dns=none is a value like any other: umnet decides what it means.
+run_with_net --rootfs="$rootfs" --hostfs --net --net-ipv6-dns=none
+require_argument "--ipv6-dns"
+require_argument "none"
+
+# ext4 with IPv6: the session parameters still arrive.
+run_with_net --rootfs="$image" --net --net-ipv6
+require_argument "neoproot_session="
+require_argument "--ipv6"
+require_count 25
+require_tail "panic=1"
+
+# IPv6 without a network is a mistake, not a silent no-op.
+require_ipv6_needs_net --net-ipv6
+require_ipv6_needs_net --net-ipv6-addr=fd00::2/64
+require_ipv6_needs_net --net-ipv6-gw=fe80::1
+require_ipv6_needs_net --net-ipv6-dns=none
+
 # --net must not change the non-network path: without it the kernel is exec'd
 # directly and umnet is never started.
 rm -f "$argv_file"
@@ -201,4 +301,4 @@ TMPDIR="$temporary_directory" "$um_supervisor" \
 	--rootfs="$image" --timeout=5 -- /bin/true >/dev/null 2>&1 || true
 [ ! -f "$argv_file" ] || fail "umnet ran without --net"
 
-echo "UM supervisor --net argv tests passed"
+echo "UM supervisor --net and --net-ipv6 argv tests passed"

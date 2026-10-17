@@ -37,6 +37,8 @@ c_args = common + arm + ['-std=c23', '-Wall', '-Wextra', '-O3', '-flto=thin', '-
 cpp_args = common + arm + ['-std=c++23', '-Wall', '-Wextra', '-O3', '-flto=thin', '-ffunction-sections', '-fdata-sections', '-munaligned-access', '-ffast-math', '-D__ARM_NEON', '-D__ARM_FEATURE_DOTPROD']
 dep = dependency('talloc', required: true)
 c_sources = files('src/cli/neoproot.c',
+  'src/cli/auto_backend.c',
+  'src/cli/backend.c',
   'src/cli/cli.c',
   'src/cli/proot.c',
   'src/cli/note.c',

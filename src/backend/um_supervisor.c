@@ -69,7 +69,7 @@ extern char **environ;
 #define UM_COW_OFFSET_SIZE 12U
 
 /* umnet's own arguments before the `--` that introduces the kernel vector */
-#define UM_NETWORK_OPTIONS 12
+#define UM_NETWORK_OPTIONS 18
 #define UM_MAX_CREATED_PATHS (UM_MAX_BINDS * 4)
 #define UM_CLOSE_RANGE_CLOEXEC (1U << 2)
 
@@ -114,6 +114,16 @@ typedef struct {
     char net_gateway[32];
     char net_dns[32];
     const char *net_mask;
+    /*
+     * IPv6 is a second, independent helper in umnet.  Empty fields mean "not
+     * named", and umnet then uses its own defaults (fd00::2/64, fe80::1) and
+     * reads the host's resolv.conf -- the same "no guess from here" rule the
+     * IPv4 nameserver follows.
+     */
+    bool net_ipv6;
+    char net_ipv6_addr[64];
+    char net_ipv6_gw[64];
+    char net_ipv6_dns[64];
     char *resolved_umnet;
     char *resolved_passt;
     UmBind binds[UM_MAX_BINDS];
@@ -1139,6 +1149,28 @@ static int um_parse_timeout(const char *value, double *timeout)
     return 0;
 }
 
+/*
+ * Copy one network value into its fixed buffer.
+ *
+ * Empty values, values that do not fit, and values carrying whitespace or a
+ * comma are refused here rather than handed to umnet: a malformed argument
+ * would be rejected by umnet with a message naming its own parser instead of
+ * the option the caller actually wrote.
+ */
+static int um_set_net_value(char *destination, size_t size, const char *value)
+{
+    size_t index;
+
+    if (value[0] == '\0')
+        return -1;
+    for (index = 0; value[index] != '\0'; index++)
+        if (isspace((unsigned char)value[index]) || value[index] == ',')
+            return -1;
+    if (snprintf(destination, size, "%s", value) >= (int)size)
+        return -1;
+    return 0;
+}
+
 static int um_parse_args(int argc, char *const argv[], UmConfig *config,
                          int *guest_index)
 {
@@ -1149,6 +1181,8 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
     bool cow_file_set = false;
     bool cwd_set = false;
     bool timeout_set = false;
+    bool ipv6_flag_set = false;
+    bool ipv6_requested = false;
 
     memset(config, 0, sizeof(*config));
     config->rootfs_fd = -1;
@@ -1238,6 +1272,33 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
                 snprintf(config->net_dns, sizeof(config->net_dns), "%s",
                          argument + 10) >= (int)sizeof(config->net_dns))
                 goto invalid;
+        } else if (strcmp(argument, "--net-ipv6") == 0) {
+            if (ipv6_flag_set)
+                goto invalid;
+            ipv6_flag_set = true;
+            ipv6_requested = true;
+            config->net_ipv6 = true;
+        } else if (strncmp(argument, "--net-ipv6-addr=", 16) == 0) {
+            if (um_set_net_value(config->net_ipv6_addr,
+                                 sizeof(config->net_ipv6_addr),
+                                 argument + 16) < 0)
+                goto invalid;
+            ipv6_requested = true;
+            config->net_ipv6 = true;
+        } else if (strncmp(argument, "--net-ipv6-gw=", 14) == 0) {
+            if (um_set_net_value(config->net_ipv6_gw,
+                                 sizeof(config->net_ipv6_gw),
+                                 argument + 14) < 0)
+                goto invalid;
+            ipv6_requested = true;
+            config->net_ipv6 = true;
+        } else if (strncmp(argument, "--net-ipv6-dns=", 15) == 0) {
+            if (um_set_net_value(config->net_ipv6_dns,
+                                 sizeof(config->net_ipv6_dns),
+                                 argument + 15) < 0)
+                goto invalid;
+            ipv6_requested = true;
+            config->net_ipv6 = true;
         } else if (strcmp(argument, "--hostfs") == 0) {
             if (config->hostfs)
                 goto invalid;
@@ -1277,6 +1338,17 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
         fprintf(stderr, "neoproot-um: --rootfs is required\n");
         return -1;
     }
+    /*
+     * IPv6 is a mode of the network, not a network of its own: there is no
+     * helper to start without --net, and accepting the option silently would
+     * promise a guest a stack it never gets.
+     */
+    if (ipv6_requested && !config->network) {
+        fprintf(stderr,
+                "neoproot-um: --net-ipv6 options require --net\n");
+        return -1;
+    }
+
     if (!kernel_set)
         config->kernel = getenv("NEOPROOT_UM_KERNEL");
     if (!stub_set)
@@ -1993,6 +2065,10 @@ static void um_print_usage(void)
     puts("  --net-addr=ADDR     guest IPv4 address (default: 10.0.2.15)");
     puts("  --net-gateway=ADDR  guest default gateway (default: 10.0.2.2)");
     puts("  --net-dns=ADDR      nameserver announced to the guest ('none' omits it)");
+    puts("  --net-ipv6          also give the guest IPv6 (a second passt, via umnet)");
+    puts("  --net-ipv6-addr=A[/P]  guest IPv6 address (default: fd00::2/64)");
+    puts("  --net-ipv6-gw=ADDR  guest IPv6 gateway (default: fe80::1)");
+    puts("  --net-ipv6-dns=ADDR IPv6 nameserver ('none' omits it, default: host resolver)");
     puts("Environment defaults: NEOPROOT_UM_KERNEL, NEOPROOT_UM_STUB,");
     puts("  NEOPROOT_UM_NET, NEOPROOT_UM_PASST");
 }
@@ -2422,6 +2498,31 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
                 if (config->net_dns[0] != '\0') {
                     network_argv[network_index++] = (char *)"--dns";
                     network_argv[network_index++] = (char *)config->net_dns;
+                }
+                /*
+                 * IPv6 is one switch to umnet plus up to three values.  Only
+                 * the switch is passed when the caller named no values: the
+                 * address and gateway then stay umnet's own defaults, and the
+                 * resolver is still read from the host rather than invented
+                 * here -- the same rule as the IPv4 nameserver above.
+                 */
+                if (config->net_ipv6) {
+                    network_argv[network_index++] = (char *)"--ipv6";
+                    if (config->net_ipv6_addr[0] != '\0') {
+                        network_argv[network_index++] = (char *)"--ipv6-addr";
+                        network_argv[network_index++] =
+                            (char *)config->net_ipv6_addr;
+                    }
+                    if (config->net_ipv6_gw[0] != '\0') {
+                        network_argv[network_index++] = (char *)"--ipv6-gw";
+                        network_argv[network_index++] =
+                            (char *)config->net_ipv6_gw;
+                    }
+                    if (config->net_ipv6_dns[0] != '\0') {
+                        network_argv[network_index++] = (char *)"--ipv6-dns";
+                        network_argv[network_index++] =
+                            (char *)config->net_ipv6_dns;
+                    }
                 }
                 network_argv[network_index++] = (char *)"--";
                 for (int kernel_index = 0; kernel_index < index; kernel_index++)

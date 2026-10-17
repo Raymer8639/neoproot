@@ -120,12 +120,54 @@ Regular options
     Select the execution backend.  ``fast`` selects the PRoot tracer, the
     default when the option is omitted; ``um`` selects the optional second
     execution backend, a separate UML guest kernel started by
-    ``neoproot-um``; ``auto`` selects UML only when the caller configured
-    its prerequisites -- a kernel and a stub (from
+    ``neoproot-um``; ``auto`` decides between them and reports the choice on
+    stderr.  The option must be placed before the guest command.
+
+    ``auto`` decides in two steps.  First the prerequisites: UML is only
+    possible when a kernel and a stub are configured (from
     ``--kernel``/``--stub``, or non-empty ``NEOPROOT_UM_KERNEL`` and
-    ``NEOPROOT_UM_STUB``) and a rootfs -- and otherwise the PRoot path,
-    reporting the choice on stderr.  The option must be placed before the
-    guest command.
+    ``NEOPROOT_UM_STUB``) and a rootfs is given.  Nothing is probed, and a
+    command that needs a kernel cannot override this: without the
+    prerequisites ``auto`` stays on the PRoot path.
+
+    Second, within that limit, the guest command decides.  PRoot is the
+    default because it is the fast path, and UML is selected only for a
+    command that needs a real kernel -- a container runtime's control plane,
+    a mount, a namespace, a block device, a firewall or a packet filter.
+    The default set of names is::
+
+        docker dockerd podman podman-remote nerdctl containerd ctr runc
+        crun systemd-nspawn machinectl mount umount losetup swapon swapoff
+        unshare nsenter ip iptables nft bpftool
+
+    The command is the basename at the position where the guest command
+    begins, so ``/usr/bin/docker`` and ``docker`` are the same name.  Simple
+    wrappers are looked through -- ``env``, ``sudo``, ``command``, ``exec``,
+    ``nohup``, ``time`` and ``stdbuf`` -- including their ``VAR=value``
+    arguments and the options that take a separate value, so
+    ``env FOO=1 docker`` is judged as ``docker``.  The boundary is
+    deliberate: ``sh -c 'docker run'`` is ``sh`` and stays on the default
+    backend, because the argument vector is read and guest shell code is not
+    parsed; a value packed into a combined short option of a wrapper
+    (``sudo -Eu root docker``) is skipped as one argument, so that wrapper is
+    not looked through.
+
+    The default set can be replaced with ``--auto-um-commands=LIST``
+    (comma-separated basenames) or the equivalent
+    ``NEOPROOT_UM_AUTO_COMMANDS`` environment variable; the option wins when
+    both are given.  An empty value means the default set, and ``none`` means
+    that no command ever selects UML::
+
+        neoproot --backend=auto --auto-um-commands=none -r /rootfs -- docker
+        NEOPROOT_UM_AUTO_COMMANDS=mycmd neoproot --backend=auto -r /rootfs -- mycmd
+
+    ``auto`` reports both outcomes, so a downgrade is never silent:
+    "--backend=auto selected the um backend (command 'docker' needs a real
+    kernel)", "--backend=auto selected the default backend", and
+    "--backend=auto would use the um backend for 'docker', but no
+    kernel/stub/rootfs is configured; using the default backend".  The list
+    and the command have no effect on ``--backend=fast``, ``--backend=um``
+    or the default path.
 
     UML mode requires ``-r path`` or ``--rootfs=path`` and a command
     separator before the guest command, for example::
@@ -180,8 +222,20 @@ Regular options
     ``--net-addr=`` and ``--net-gateway=`` set the guest address and gateway
     (default ``10.0.2.15/24`` and ``10.0.2.2``).  A nameserver is announced
     only when ``--net-dns=<address>`` is given; otherwise ``umnet`` reads
-    the host's resolver, and ``--net-dns=none`` announces none.  IPv6 is not
-    available on this path, and neoproot exposes no ``--net-ipv6`` option.
+    the host's resolver, and ``--net-dns=none`` announces none.
+
+    ``--net-ipv6`` also gives the guest IPv6, through the second, IPv6-only
+    ``passt`` helper that ``umnet`` starts.  ``--net-ipv6-addr=A[/P]`` and
+    ``--net-ipv6-gw=G`` set the guest address and gateway (default
+    ``fd00::2/64`` and ``fe80::1``); without them ``umnet``'s own defaults
+    are used, so no value is invented here.  ``--net-ipv6-dns=A`` announces
+    an IPv6 nameserver, ``--net-ipv6-dns=none`` announces none, and by
+    default ``umnet`` reads the host's resolver.  The IPv6 options are a
+    mode of ``--net``, not a network of their own: without it the run fails
+    with "--net-ipv6 options require --net" instead of starting a guest
+    that was promised a stack it does not get.  The second helper keeps an
+    IPv4 path alive when a ``passt`` without prepatched IPv6 support loses
+    its IPv6 half on Android.
 
     The guest console is the caller's terminal, and terminal resizes
     (SIGWINCH) are forwarded to the guest.  ``--timeout=seconds`` bounds a

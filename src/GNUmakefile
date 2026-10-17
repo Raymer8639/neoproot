@@ -73,6 +73,8 @@ syscall/%.o: CXXFLAGS := -std=c++23 -Wall -Wextra -O3 -flto=thin -ffunction-sect
 
 OBJECTS += \
     cli/neoproot.o		\
+	cli/auto_backend.o	\
+	cli/backend.o		\
 	cli/cli.o		\
 	cli/proot.o		\
 	cli/note.o		\
