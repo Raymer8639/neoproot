@@ -31,9 +31,59 @@ static bool option_takes_separate_value(const char *argument)
     return false;
 }
 
+/*
+ * Whether the UML backend's prerequisites have actually been configured.
+ *
+ * Both a kernel and a stub, given either as options or through the environment
+ * the supervisor also reads, plus a rootfs for them to boot.  Nothing is
+ * probed: the point is to distinguish "the caller set this up" from "something
+ * with that name happens to exist".
+ */
+static bool um_backend_is_configured(int argc, char *const argv[])
+{
+    bool kernel = false, stub = false, rootfs = false;
+    const char *value;
+    int index;
+
+    /*
+     * A variable that is set to the empty string is not configuration.  Testing
+     * only for non-NULL made `NEOPROOT_UM_KERNEL= neoproot --backend=auto` pick
+     * the UML backend and then fail with "set --kernel/--stub", which is the
+     * auto selection getting it wrong rather than the backend.
+     */
+    const char *environment_kernel = getenv("NEOPROOT_UM_KERNEL");
+    const char *environment_stub = getenv("NEOPROOT_UM_STUB");
+
+    if (environment_kernel != NULL && environment_kernel[0] != '\0')
+        kernel = true;
+    if (environment_stub != NULL && environment_stub[0] != '\0')
+        stub = true;
+
+    for (index = 1; index < argc; index++) {
+        value = argv[index];
+        if (value == NULL || value[0] != '-')
+            continue;
+        if (strncmp(value, "--kernel=", 9) == 0)
+            kernel = true;
+        else if (strcmp(value, "--kernel") == 0)
+            kernel = true;
+        else if (strncmp(value, "--stub=", 7) == 0)
+            stub = true;
+        else if (strcmp(value, "--stub") == 0)
+            stub = true;
+        else if (strncmp(value, "--rootfs=", 9) == 0)
+            rootfs = true;
+        else if (strcmp(value, "--rootfs") == 0)
+            rootfs = true;
+        else if (strcmp(value, "-r") == 0)
+            rootfs = true;
+    }
+    return kernel && stub && rootfs;
+}
+
 static int prepare_backend_argv(int argc, char *const argv[],
                                 char ***result, int *result_argc,
-                                enum backend_mode *mode)
+                                enum backend_mode *mode, int *command_index)
 {
     char **filtered;
     int output_argc = 1;
@@ -42,6 +92,7 @@ static int prepare_backend_argv(int argc, char *const argv[],
     bool backend_set = false;
 
     *mode = BACKEND_DEFAULT;
+    *command_index = 0;
     filtered = calloc((size_t)argc + 2, sizeof(*filtered));
     if (filtered == NULL)
         return -1;
@@ -53,13 +104,21 @@ static int prepare_backend_argv(int argc, char *const argv[],
             filtered[output_argc++] = argv[index];
             continue;
         }
+        /*
+         * The separator belongs to neoproot's own CLI and is not part of the
+         * vector any backend should receive.  It used to be copied through
+         * unconditionally, which meant `neoproot -r /rootfs -- /bin/sh` died
+         * with "unknown option '--'" on every backend except UM -- the one
+         * backend whose syntax does want it.  The UM dispatcher puts it back.
+         */
         if (strcmp(argv[index], "--") == 0) {
             command_started = true;
-            filtered[output_argc++] = argv[index];
+            *command_index = output_argc;
             continue;
         }
         if (argv[index][0] != '-') {
             command_started = true;
+            *command_index = output_argc;
             filtered[output_argc++] = argv[index];
             continue;
         }
@@ -156,16 +215,51 @@ int main(int argc, char *const argv[])
     char **effective_argv;
     int effective_argc;
     enum backend_mode backend;
+    int command_index;
 
     if (reject_traced_startup())
         return EXIT_FAILURE;
     if (prepare_backend_argv(argc, argv, &effective_argv, &effective_argc,
-                             &backend) < 0)
+                             &backend, &command_index) < 0)
         return EXIT_FAILURE;
-    if (backend == BACKEND_UM) {
-        int status = neoproot_um_supervisor_main(effective_argc,
-                                                  effective_argv);
 
+    if (backend == BACKEND_AUTO) {
+        /*
+         * Pick between the two paths rather than refusing to choose.  The
+         * condition is deliberately narrow: the UML backend is only taken when
+         * the caller has set up for it -- a kernel and a stub are configured,
+         * and there is a rootfs to put behind them.  "auto" must not turn an
+         * experimental backend on for somebody who never asked for it by
+         * relying on what happens to be on PATH.
+         */
+        if (um_backend_is_configured(effective_argc, effective_argv))
+            backend = BACKEND_UM;
+        else
+            backend = BACKEND_DEFAULT;
+
+        fprintf(stderr, "neoproot: --backend=auto selected the %s backend\n",
+                backend == BACKEND_UM ? "um" : "default");
+    }
+
+    if (backend == BACKEND_UM) {
+        int status;
+
+        /*
+         * The UM supervisor's syntax has the delimiter before the guest
+         * command; neoproot's CLI consumed it as a separator and did not
+         * forward it, so put it back for this backend only.  The vector was
+         * allocated with room for it.
+         */
+        if (command_index > 0) {
+            memmove(&effective_argv[command_index + 1],
+                    &effective_argv[command_index],
+                    (size_t)(effective_argc - command_index + 1) *
+                        sizeof(char *));
+            effective_argv[command_index] = (char *)"--";
+            effective_argc++;
+        }
+
+        status = neoproot_um_supervisor_main(effective_argc, effective_argv);
         free(effective_argv);
         return status;
     }

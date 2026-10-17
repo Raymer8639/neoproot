@@ -2195,8 +2195,15 @@ static int um_make_session(const UmConfig *config, char **session_path,
     if (length < 0 || (size_t)length >= sizeof(session))
         return -1;
     if (mkdtemp(session) == NULL) {
-        fprintf(stderr, "neoproot-um: cannot create session directory: %s\n",
-                strerror(errno));
+        /*
+         * Name the path.  "Permission denied" on its own leaves the reader to
+         * guess which of the several directories involved is the one that
+         * refused -- and this one is derived from the rootfs argument, so it is
+         * a path the caller can actually do something about.
+         */
+        fprintf(stderr,
+                "neoproot-um: cannot create session directory '%s': %s\n",
+                session, strerror(errno));
         return -1;
     }
     session_name = strrchr(session, '/') + 1;
