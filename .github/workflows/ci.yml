@@ -118,6 +118,9 @@ jobs:
           PROOT=../src/neoproot sh test-bwrap-resolve-in-root.sh
           PROOT=../src/neoproot sh test-tracer-guard.sh
           PROOT=../src/neoproot sh test-8d3c07f5.sh
+          # How the `--` separator is routed to each backend, and what `auto`
+          # decides when the UML prerequisites are or are not configured.
+          sh test-backend-cli.sh
           mkdir -p /tmp/neoproot-um-cli-ci
           TMPDIR=/tmp/neoproot-um-cli-ci PROOT=../src/neoproot sh test-um-supervisor-cli.sh
           TMPDIR=/tmp/neoproot-um-cli-ci PROOT=../src/neoproot sh test-um-supervisor-bind-cli.sh
