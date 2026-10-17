@@ -240,7 +240,7 @@ done
 
 ext4_image=$workdir/stability-root.ext4
 ext4_init_source=${EXT4_INIT:-"$script_directory/um-init-ext4.sh"}
-ext4_case_count=11
+ext4_case_count=12
 
 # The guest command has to live inside the image, and the marker differs per
 # case, so the image is rebuilt for each one.  It is 64 MB against a local
@@ -419,6 +419,14 @@ else
 fi
 exit 0'
 
+# A guest that exits non-zero still reports its own code with binds mounted.
+binds_exit_command='#!/bin/sh
+hello=$(cat /mnt/hostdir/hello.txt 2>/dev/null)
+echo "BIND_HELLO=$hello"
+echo "MARKER=binds-exit-7"
+[ "$hello" = "host-hello" ] || exit 1
+exit 7'
+
 check_binds_host() {
 	binds_ok=1
 	if [ "$(cat "$bind_root/dir/from-guest.txt" 2>/dev/null)" != \
@@ -514,6 +522,14 @@ if command -v mke2fs >/dev/null 2>&1 && [ -x "$bbstatic" ] &&
 		-b "$bind_root/file.txt:/mnt/hostfile" \
 		-b "$bind_root/ro:/mnt/ro:ro" \
 		-b "$bind_root/rofile.txt:/mnt/rofile:ro"
+
+	# Exit codes travel through the bind path unchanged.
+	prepare_bind_sources
+	build_ext4_image "$binds_exit_command" || exit 1
+	image_sha_before=$(image_sha)
+	post_check=check_image_unchanged
+	run_case ext4-binds-exit-7 7 binds-exit-7 --rootfs="$ext4_image" \
+		-b "$bind_root/dir:/mnt/hostdir"
 
 	prepare_bind_sources
 	bind_cow_file=$workdir/stability-binds.cow
