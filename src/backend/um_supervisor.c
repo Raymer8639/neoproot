@@ -1,6 +1,7 @@
 #include "backend/um_supervisor.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <float.h>
@@ -24,6 +25,9 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+
+/* Defined next to the other shutdown helpers, far below its first caller. */
+static void um_remove_umid_directory(pid_t kernel_pid);
 
 extern char **environ;
 
@@ -793,7 +797,13 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
     config->timeout = 120.0;
     snprintf(config->net_addr, sizeof(config->net_addr), "%s", "10.0.2.15");
     snprintf(config->net_gateway, sizeof(config->net_gateway), "%s", "10.0.2.2");
-    snprintf(config->net_dns, sizeof(config->net_dns), "%s", "1.1.1.1");
+    /*
+     * net_dns is deliberately left empty: no nameserver is announced unless
+     * the caller asks for one, and umnet then works it out from the host's
+     * resolv.conf.  A literal here is a guess about the network rather than
+     * about the build -- 1.1.1.1 was that guess, and on a network that blocks
+     * it the guest loses DNS while everything else still looks healthy.
+     */
     config->net_mask = "24";
 
     for (index = 1; index < argc; index++) {
@@ -1842,8 +1852,15 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
                 network_argv[network_index++] = (char *)config->net_mask;
                 network_argv[network_index++] = (char *)"--gw";
                 network_argv[network_index++] = (char *)config->net_gateway;
-                network_argv[network_index++] = (char *)"--dns";
-                network_argv[network_index++] = (char *)config->net_dns;
+                /*
+                 * Only when the caller named one.  Passing an empty --dns would
+                 * make umnet announce nothing at all, and passing a default
+                 * would put the guess back.
+                 */
+                if (config->net_dns[0] != '\0') {
+                    network_argv[network_index++] = (char *)"--dns";
+                    network_argv[network_index++] = (char *)config->net_dns;
+                }
                 network_argv[network_index++] = (char *)"--";
                 for (int kernel_index = 0; kernel_index < index; kernel_index++)
                     network_argv[network_index++] = kernel_argv[kernel_index];
@@ -2110,6 +2127,12 @@ cleanup:
         um_kill_group(child_pid, SIGKILL, group_ready);
         if (!child_done)
             (void)um_wait_for_process(child_pid, &child_status);
+        /*
+         * By now the kernel is gone however it went.  If it shut down by
+         * itself it has already removed its umid directory and this finds
+         * nothing; if it was killed, this is the only thing that will.
+         */
+        um_remove_umid_directory(child_pid);
         if (group_ready)
             *group_gone = um_wait_for_group_exit(child_pid, um_now() +
                                                  UM_SIGNAL_GRACE_SECONDS);
@@ -2205,6 +2228,85 @@ failed:
     free(*status_path);
     *status_path = NULL;
     return -1;
+}
+
+/*
+ * Remove the umid directory the kernel made for this run.
+ *
+ * The kernel removes it itself, through an exitcall on the shutdown path.  That
+ * path only runs when the guest shuts down under its own power, so every run
+ * that ends any other way -- a timeout, a forwarded signal, a guest panic --
+ * leaves the directory behind, and they accumulate.  Forty-two had built up on
+ * the phone this was written for, every one of them holding a pid that had been
+ * dead for weeks.
+ *
+ * The kernel picks the umid and exposes no way to name it: there is no `umid=`
+ * command line parameter (only `uml_dir=`), and make_umid() runs mkstemp() on a
+ * template.  So it is found by content instead.  The pid file inside holds the
+ * kernel's own pid, and that pid is the one this process started and has just
+ * reaped, which makes the match exact rather than a guess.
+ *
+ * Best effort by design.  A directory that is not there, a pid file that cannot
+ * be read, an entry that will not unlink -- none of that is a reason to report
+ * a run as failed, and after a forced kill the whole point is that the guest
+ * did not get to tidy up after itself.
+ */
+static void um_remove_umid_directory(pid_t kernel_pid)
+{
+    char uml_dir[PATH_MAX];
+    const char *home = getenv("HOME");
+    DIR *directory;
+    struct dirent *entry;
+
+    if (kernel_pid <= 0 || home == NULL || home[0] != '/')
+        return;
+    if (snprintf(uml_dir, sizeof(uml_dir), "%s/.uml", home) >=
+        (int)sizeof(uml_dir))
+        return;
+
+    directory = opendir(uml_dir);
+    if (directory == NULL)
+        return;
+
+    while ((entry = readdir(directory)) != NULL) {
+        char path[PATH_MAX];
+        char pid_text[32];
+        char *end;
+        long pid;
+        ssize_t count;
+        int fd;
+
+        /* Skips "." and ".." along with anything else hidden. */
+        if (entry->d_name[0] == '.')
+            continue;
+        if (snprintf(path, sizeof(path), "%s/%s/pid", uml_dir,
+                     entry->d_name) >= (int)sizeof(path))
+            continue;
+
+        fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0)
+            continue;
+        count = read(fd, pid_text, sizeof(pid_text) - 1);
+        close(fd);
+        if (count <= 0)
+            continue;
+        pid_text[count] = '\0';
+
+        pid = strtol(pid_text, &end, 10);
+        if (end == pid_text || pid != (long)kernel_pid)
+            continue;
+
+        /* Ours, and the process that wrote it is gone. */
+        (void)unlink(path);
+        if (snprintf(path, sizeof(path), "%s/%s/mconsole", uml_dir,
+                     entry->d_name) < (int)sizeof(path))
+            (void)unlink(path);
+        if (snprintf(path, sizeof(path), "%s/%s", uml_dir,
+                     entry->d_name) < (int)sizeof(path))
+            (void)rmdir(path);
+    }
+
+    closedir(directory);
 }
 
 int neoproot_um_supervisor_main(int argc, char *const argv[])
