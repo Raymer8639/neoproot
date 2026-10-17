@@ -3,6 +3,35 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.11.0] - 2026-10-17
+
+**Backend selection becomes real, and one command line works on every backend**
+
+- Implement `--backend=auto`. It used to parse and then behave exactly like the
+  default. It now selects the UML backend only when the caller configured its
+  prerequisites -- a kernel and a stub (options or non-empty
+  `NEOPROOT_UM_KERNEL`/`NEOPROOT_UM_STUB`) plus a rootfs -- and the default
+  PRoot path otherwise, reporting the choice on stderr. It does not probe
+  `PATH` for a kernel: an experimental backend is never switched on behind the
+  caller's back.
+- Make the `--` separator mean the same thing on every backend. It was
+  forwarded unconditionally, so `neoproot -r rootfs -- cmd` died with
+  `unknown option '--'` on every backend except UM, and one command line could
+  not be reused across backends. The CLI now consumes it and the UML dispatcher
+  restores it, delimiter-optional included.
+- Give the UML backend a real network (`--net` via `umnet` + `passt`:
+  DHCP/DNS/ICMP/TCP) and a terminal whose size and `SIGWINCH` are forwarded to
+  the guest. The guest is no longer told a hard-coded `1.1.1.1`: the host's
+  resolver is read unless `--net-dns=` says otherwise, and `--net-dns=none`
+  announces none.
+- Stop leaking the `~/.uml/<umid>` runtime directory on a killed or panicking
+  run: the supervisor (and the device gate, which does not go through it)
+  removes the directory once the kernel it names is gone.
+- Report the session directory in the error message when it cannot be created,
+  instead of a bare "Permission denied".
+- Add `tests/test-backend-cli.sh` (wired into CI) fixing the separator routing
+  and the `auto` decision without a kernel or a rootfs.
+
 ## [v5.10.14] - 2026-10-03
 
 - Fix Codex 0.160 sandbox startup on Termux by keeping long Unix socket

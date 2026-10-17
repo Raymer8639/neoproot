@@ -116,15 +116,25 @@ Regular options
     need for running a shell and then entering the directory manually.
 
 --backend=mode
-    Select the execution backend.  The first-stage UML backend is selected
-    with ``--backend=um``; ``fast`` selects the existing PRoot path and
-    ``auto`` currently has the same behavior as the default.  The option
-    must be placed before the guest command.
+    Select the execution backend.  ``um`` selects the first-stage UML
+    backend; ``fast`` selects the existing PRoot path; ``auto`` selects UML
+    only when the caller configured its prerequisites -- a kernel and a stub
+    (from ``--kernel``/``--stub``, or non-empty ``NEOPROOT_UM_KERNEL`` and
+    ``NEOPROOT_UM_STUB``) and a rootfs -- and otherwise the PRoot path,
+    reporting the choice on stderr.  The option must be placed before the
+    guest command.
 
     UML mode requires ``-r path`` or ``--rootfs=path`` and a command
     separator before the guest command, for example::
 
         neoproot --backend=um -r /path/to/rootfs -- /bin/sh
+
+    The separator ``--`` belongs to neoproot itself: the CLI consumes it and
+    does not forward it to a backend that has no use for it, and the UML
+    dispatch restores it for the UML supervisor, whose syntax requires it.
+    One command line is therefore portable across backends::
+
+        neoproot -r /path/to/rootfs -- /bin/sh
 
     A directory rootfs selects UML ``hostfs`` mode. Bind sources already inside
     that root can be mapped with ``-b host:guest[:ro]``; sources outside it and
@@ -135,8 +145,16 @@ Regular options
     isolation boundary. Ext4 mode requires an image containing ``/um-init``
     from the matching UM harness. The init script uses the session-v1 protocol
     to mount the temporary hostfs session at ``/run/neoproot`` and return the
-    command status. Ext4 mode does not currently support ``-b``. Guest network
-    setup is not supported in UML mode.
+    command status. Ext4 mode does not currently support ``-b``.
+
+    ``--net`` gives the guest a real network through ``umnet`` and ``passt``
+    (DHCP, DNS, ICMP and TCP), while the guest's exit status still comes back
+    through the session protocol.  The helpers are found on ``$PATH`` or named
+    by ``NEOPROOT_UM_NET`` and ``NEOPROOT_UM_PASST``.  ``--net-addr=`` and
+    ``--net-gateway=`` set the guest address and gateway (default
+    ``10.0.2.15/24`` and ``10.0.2.2``).  A nameserver is announced only when
+    ``--net-dns=<address>`` is given; otherwise ``umnet`` reads the host's
+    resolver, and ``--net-dns=none`` announces none.
 
     The UML kernel and ``stub_exe`` may be provided to the standalone
     ``neoproot-um`` backend with ``--kernel=path`` and ``--stub=path``, or

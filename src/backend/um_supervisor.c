@@ -1515,7 +1515,12 @@ static void um_print_usage(void)
     puts("  --cwd=PATH          guest working directory");
     puts("  --timeout=SECONDS   bounded runtime (default: 120)");
     puts("  -b HOST:GUEST[:ro]  bind a rootfs path into the guest");
-    puts("Environment defaults: NEOPROOT_UM_KERNEL, NEOPROOT_UM_STUB");
+    puts("  --net               give the guest a network via umnet + passt");
+    puts("  --net-addr=ADDR     guest IPv4 address (default: 10.0.2.15)");
+    puts("  --net-gateway=ADDR  guest default gateway (default: 10.0.2.2)");
+    puts("  --net-dns=ADDR      nameserver announced to the guest ('none' omits it)");
+    puts("Environment defaults: NEOPROOT_UM_KERNEL, NEOPROOT_UM_STUB,");
+    puts("  NEOPROOT_UM_NET, NEOPROOT_UM_PASST");
 }
 
 static int um_wait_for_process(pid_t pid, int *status)
