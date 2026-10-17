@@ -43,6 +43,30 @@ extern char **environ;
 #define UM_DRAIN_SECONDS 2.0
 #define UM_MAX_BINDS 64
 
+/*
+ * Files the supervisor and a session-aware guest init exchange through the
+ * session directory (guest path /run/neoproot/<name>).  The init declares what
+ * it implements in init-features before it runs init.sh; the supervisor puts
+ * the requested binds in binds and any guest-side protocol failure in
+ * protocol-error.
+ */
+#define UM_BINDS_NAME "binds"
+#define UM_INIT_FEATURES_NAME "init-features"
+#define UM_PROTOCOL_ERROR_NAME "protocol-error"
+#define UM_INIT_FEATURE_BINDS "feature=binds"
+
+/*
+ * UML COW v3 header, as written by arch/um/drivers/cow_user.c.  Only the
+ * fields validated here are named; backing_file and the reserved tail are not
+ * interpreted.
+ */
+#define UM_COW_MAGIC 0x4f4f4f4dU
+#define UM_COW_VERSION 3
+#define UM_COW_HEADER_SIZE 32U
+#define UM_COW_OFFSET_VERSION 4U
+#define UM_COW_OFFSET_MTIME 8U
+#define UM_COW_OFFSET_SIZE 12U
+
 /* umnet's own arguments before the `--` that introduces the kernel vector */
 #define UM_NETWORK_OPTIONS 12
 #define UM_MAX_CREATED_PATHS (UM_MAX_BINDS * 4)
@@ -57,6 +81,12 @@ typedef struct {
     char *host;
     char *guest;
     char *source_guest;
+    /*
+     * ext4 only: the hostfs mount option that reaches the source, relative to
+     * the kernel's hostfs= root (the runtime directory).  The guest init
+     * mounts these itself; hostfs is not a directory the ext4 guest can see.
+     */
+    char *mount_source;
     bool readonly;
     bool source_directory;
 } UmBind;
@@ -65,6 +95,7 @@ typedef struct {
     const char *kernel;
     const char *stub;
     const char *rootfs;
+    const char *cow_file;
     const char *cwd;
     double timeout;
     bool hostfs;
@@ -74,6 +105,7 @@ typedef struct {
     char *resolved_kernel;
     char *resolved_stub;
     char *resolved_rootfs;
+    char *resolved_cow;
     int rootfs_fd;
     char *resolved_hostfs;
     bool network;
@@ -254,6 +286,7 @@ static void um_free_bind(UmBind *bind)
     free(bind->host);
     free(bind->guest);
     free(bind->source_guest);
+    free(bind->mount_source);
     memset(bind, 0, sizeof(*bind));
 }
 
@@ -264,6 +297,7 @@ static void um_free_config(UmConfig *config)
     free(config->resolved_kernel);
     free(config->resolved_stub);
     free(config->resolved_rootfs);
+    free(config->resolved_cow);
     if (config->rootfs_fd >= 0)
         close(config->rootfs_fd);
     free(config->resolved_hostfs);
@@ -513,6 +547,126 @@ static void um_cleanup_created_paths(UmConfig *config)
     }
 }
 
+/*
+ * Express a host path as a hostfs mount option.
+ *
+ * The kernel resolves a hostfs mount option as "<hostfs= root>/<option>", so
+ * reaching an arbitrary host path from the runtime directory means walking up
+ * to "/" and back down.  Both strings are realpath() output, so every '/'
+ * separates a component and the count is exact.  The guest init passes the
+ * result straight to mount -t hostfs -o, which is how an ext4 guest -- whose
+ * root is an image file -- gets at a host directory or file.
+ */
+static int um_hostfs_mount_source(const char *root, const char *path,
+                                  char **result)
+{
+    size_t components = 0;
+    size_t path_length;
+    char *value;
+    char *cursor;
+    const char *relative = path;
+    const char *scan;
+
+    for (scan = root; *scan != '\0'; scan++)
+        if (*scan == '/')
+            components++;
+    while (*relative == '/')
+        relative++;
+    path_length = strlen(relative);
+    value = malloc(components * 3 + path_length + 1);
+    if (value == NULL) {
+        perror("neoproot-um: malloc");
+        return -1;
+    }
+    cursor = value;
+    for (size_t index = 0; index < components; index++) {
+        memcpy(cursor, "../", 3);
+        cursor += 3;
+    }
+    memcpy(cursor, relative, path_length + 1);
+    *result = value;
+    return 0;
+}
+
+/*
+ * Resolve "-b HOST:GUEST[:ro]" for an ext4 root.
+ *
+ * In hostfs mode the source lives inside the directory the guest sees as "/",
+ * so the wrapper binds it by guest path.  An ext4 guest has its own root, and
+ * the only host directory it can reach is the runtime directory through
+ * hostfs.  So the supervisor hands the guest a mount option per source (see
+ * um_hostfs_mount_source) and the guest init performs the mount.  The hostfs
+ * mount of a file is not possible, so a file source is described by its parent
+ * directory plus a name.
+ */
+static int um_prepare_ext4_binds(UmConfig *config)
+{
+    size_t index;
+
+    if (config->rootfs_kind != UM_ROOTFS_EXT4 || config->bind_count == 0)
+        return 0;
+    /* Shortest guest path first, so a bind inside another bind is mounted
+     * after the directory that contains it. */
+    qsort(config->binds, config->bind_count, sizeof(config->binds[0]),
+          um_bind_compare);
+    for (index = 0; index < config->bind_count; index++) {
+        UmBind *bind = &config->binds[index];
+        char resolved[PATH_MAX];
+        char directory[PATH_MAX];
+        struct stat status;
+        char *slash;
+
+        if (realpath(bind->host, resolved) == NULL ||
+            stat(resolved, &status) < 0) {
+            fprintf(stderr, "neoproot-um: cannot resolve bind source '%s': %s\n",
+                    bind->host, strerror(errno));
+            return -1;
+        }
+        if (!S_ISDIR(status.st_mode) && !S_ISREG(status.st_mode)) {
+            fprintf(stderr,
+                    "neoproot-um: bind source must be a file or directory: %s\n",
+                    resolved);
+            return -1;
+        }
+        /*
+         * The guest reads one record per line with tab-separated fields, so a
+         * control character in a host path would corrupt the protocol instead
+         * of failing it.
+         */
+        if (strpbrk(resolved, "\t\n\r") != NULL) {
+            fprintf(stderr,
+                    "neoproot-um: bind source contains an unsupported character: %s\n",
+                    resolved);
+            return -1;
+        }
+        free(bind->host);
+        bind->host = strdup(resolved);
+        if (bind->host == NULL) {
+            perror("neoproot-um: strdup");
+            return -1;
+        }
+        bind->source_directory = S_ISDIR(status.st_mode);
+        if (snprintf(directory, sizeof(directory), "%s", resolved) >=
+            (int)sizeof(directory))
+            return -1;
+        if (!bind->source_directory) {
+            slash = strrchr(directory, '/');
+            if (slash == NULL)
+                return -1;
+            if (slash == directory)
+                directory[1] = '\0';
+            else
+                *slash = '\0';
+        }
+        free(bind->mount_source);
+        bind->mount_source = NULL;
+        if (um_hostfs_mount_source(config->resolved_hostfs, directory,
+                                   &bind->mount_source) < 0)
+            return -1;
+    }
+    return 0;
+}
+
 static int um_resolve_host_path(const char *name, const char *value,
                                 bool directory, bool executable, char **result)
 {
@@ -666,6 +820,195 @@ static int um_resolve_ext4_image(const char *value, char **result,
     return 0;
 }
 
+static uint32_t um_be32(const unsigned char *value)
+{
+    return ((uint32_t)value[0] << 24) | ((uint32_t)value[1] << 16) |
+           ((uint32_t)value[2] << 8) | (uint32_t)value[3];
+}
+
+static uint32_t um_le32(const unsigned char *value)
+{
+    return ((uint32_t)value[3] << 24) | ((uint32_t)value[2] << 16) |
+           ((uint32_t)value[1] << 8) | (uint32_t)value[0];
+}
+
+static uint64_t um_be64(const unsigned char *value)
+{
+    return ((uint64_t)um_be32(value) << 32) | (uint64_t)um_be32(value + 4);
+}
+
+/*
+ * Judge an existing COW file before the kernel sees it.
+ *
+ * A COW file is only reusable with the image it was created for: its v3 header
+ * records the backing file's size and mtime.  The kernel checks the same two
+ * values, but it does so while opening the root device, and answers a mismatch
+ * with a failed mount and a panic -- after the caller has already waited for a
+ * boot.  Checking here turns that into a message and an exit status.
+ *
+ * Files in the older v1/v2 formats are left to the kernel, which still reads
+ * them; only the format this kernel writes is interpreted.
+ */
+static int um_check_cow_file(const char *cow_path, const char *image_path)
+{
+    unsigned char header[UM_COW_HEADER_SIZE];
+    struct stat image;
+    uint32_t magic;
+    uint32_t version;
+    uint32_t mtime;
+    uint64_t size;
+    ssize_t length;
+    int fd;
+
+    fd = open(cow_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        fprintf(stderr, "neoproot-um: cannot open cow file '%s': %s\n",
+                cow_path, strerror(errno));
+        return -1;
+    }
+    length = read(fd, header, sizeof(header));
+    close(fd);
+    if (length != (ssize_t)sizeof(header)) {
+        fprintf(stderr, "neoproot-um: cow file is not a UML COW file: %s\n",
+                cow_path);
+        return -1;
+    }
+    magic = um_be32(header);
+    if (magic != UM_COW_MAGIC) {
+        if (um_le32(header) != UM_COW_MAGIC) {
+            fprintf(stderr,
+                    "neoproot-um: cow file is not a UML COW file: %s\n",
+                    cow_path);
+            return -1;
+        }
+        return 0;
+    }
+    version = um_be32(header + UM_COW_OFFSET_VERSION);
+    if (version != UM_COW_VERSION)
+        return 0;
+    mtime = um_be32(header + UM_COW_OFFSET_MTIME);
+    size = um_be64(header + UM_COW_OFFSET_SIZE);
+    if (stat(image_path, &image) < 0) {
+        fprintf(stderr, "neoproot-um: cannot stat rootfs image '%s': %s\n",
+                image_path, strerror(errno));
+        return -1;
+    }
+    if (size != (uint64_t)image.st_size ||
+        mtime != (uint32_t)image.st_mtime) {
+        fprintf(stderr,
+                "neoproot-um: cow file '%s' was created for a different rootfs image\n",
+                cow_path);
+        fprintf(stderr,
+                "neoproot-um: remove it, or use another --cow-file\n");
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Validate and canonicalise a caller-supplied COW file.
+ *
+ * The kernel opens it by name, so every property it relies on has to hold
+ * before the run: an absolute path with no kernel-separator characters, a
+ * parent directory that exists, and -- when the file is already there -- either
+ * a COW header written for this very image or nothing at all.
+ */
+static int um_resolve_cow_file(const UmConfig *config, char **result)
+{
+    const char *value = config->cow_file;
+    char parent[PATH_MAX];
+    char directory[PATH_MAX];
+    char full[PATH_MAX];
+    char name[PATH_MAX];
+    struct stat status;
+    struct stat image;
+    char *slash;
+
+    if (um_validate_guest_path("cow file", value) < 0)
+        return -1;
+    if (um_path_has_kernel_separator(value)) {
+        fprintf(stderr,
+                "neoproot-um: cow file contains an unsupported character\n");
+        return -1;
+    }
+    if (snprintf(parent, sizeof(parent), "%s", value) >=
+        (int)sizeof(parent)) {
+        fprintf(stderr, "neoproot-um: cow file path is too long\n");
+        return -1;
+    }
+    slash = strrchr(parent, '/');
+    if (snprintf(name, sizeof(name), "%s", slash + 1) >= (int)sizeof(name))
+        return -1;
+    if (slash == parent)
+        strcpy(parent, "/");
+    else
+        *slash = '\0';
+    if (realpath(parent, directory) == NULL) {
+        fprintf(stderr,
+                "neoproot-um: cow file directory is not usable: %s: %s\n",
+                parent, strerror(errno));
+        return -1;
+    }
+    if (snprintf(full, sizeof(full), "%s/%s",
+                 strcmp(directory, "/") == 0 ? "" : directory, name) >=
+        (int)sizeof(full)) {
+        fprintf(stderr, "neoproot-um: cow file path is too long\n");
+        return -1;
+    }
+    if (lstat(value, &status) == 0) {
+        if (S_ISLNK(status.st_mode)) {
+            fprintf(stderr,
+                    "neoproot-um: cow file must not be a symlink: %s\n",
+                    value);
+            return -1;
+        }
+    } else if (errno != ENOENT) {
+        fprintf(stderr, "neoproot-um: cannot stat cow file '%s': %s\n",
+                value, strerror(errno));
+        return -1;
+    }
+    if (lstat(full, &status) == 0) {
+        if (!S_ISREG(status.st_mode)) {
+            fprintf(stderr,
+                    "neoproot-um: cow file must be a regular file: %s\n",
+                    full);
+            return -1;
+        }
+        if (stat(config->resolved_rootfs, &image) == 0 &&
+            image.st_dev == status.st_dev && image.st_ino == status.st_ino) {
+            fprintf(stderr,
+                    "neoproot-um: cow file must not be the rootfs image: %s\n",
+                    full);
+            return -1;
+        }
+        if (status.st_size == 0) {
+            /*
+             * A zero-length file cannot hold a COW header, so the kernel would
+             * refuse it.  It is a placeholder -- "touch the path, then run" --
+             * and removing it is what lets the kernel create the COW there.
+             */
+            if (unlink(full) < 0) {
+                fprintf(stderr,
+                        "neoproot-um: cannot replace empty cow file '%s': %s\n",
+                        full, strerror(errno));
+                return -1;
+            }
+        } else if (um_check_cow_file(full, config->resolved_rootfs) < 0) {
+            return -1;
+        }
+    } else if (errno != ENOENT) {
+        fprintf(stderr, "neoproot-um: cannot stat cow file '%s': %s\n",
+                full, strerror(errno));
+        return -1;
+    }
+    *result = strdup(full);
+    if (*result == NULL) {
+        perror("neoproot-um: strdup");
+        return -1;
+    }
+    return 0;
+}
+
 static void um_remove_runtime_marker(const char *runtime_path);
 
 static int um_write_runtime_marker(const char *runtime_path)
@@ -697,6 +1040,7 @@ static int um_make_runtime_root(char **result)
 {
     const char *tmpdir = getenv("TMPDIR");
     char template[PATH_MAX];
+    char resolved[PATH_MAX];
     struct stat status;
     char *copy;
 
@@ -713,18 +1057,31 @@ static int um_make_runtime_root(char **result)
                 strerror(errno));
         return -1;
     }
-    if (chmod(template, 0700) < 0) {
+    /*
+     * Canonicalise before anyone remembers the path.  It is handed to the
+     * kernel as hostfs= and the guest's bind mount options are computed
+     * relative to it, so a symlinked TMPDIR component would make ".." refer to
+     * the link's target's parent rather than to the parent of this name.
+     */
+    if (realpath(template, resolved) == NULL) {
+        fprintf(stderr,
+                "neoproot-um: cannot resolve runtime directory '%s': %s\n",
+                template, strerror(errno));
         rmdir(template);
         return -1;
     }
-    if (um_write_runtime_marker(template) < 0) {
-        rmdir(template);
+    if (chmod(resolved, 0700) < 0) {
+        rmdir(resolved);
         return -1;
     }
-    copy = strdup(template);
+    if (um_write_runtime_marker(resolved) < 0) {
+        rmdir(resolved);
+        return -1;
+    }
+    copy = strdup(resolved);
     if (copy == NULL) {
-        um_remove_runtime_marker(template);
-        rmdir(template);
+        um_remove_runtime_marker(resolved);
+        rmdir(resolved);
         return -1;
     }
     *result = copy;
@@ -788,6 +1145,7 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
     bool kernel_set = false;
     bool stub_set = false;
     bool rootfs_set = false;
+    bool cow_file_set = false;
     bool cwd_set = false;
     bool timeout_set = false;
 
@@ -835,6 +1193,16 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
                 goto invalid;
             config->rootfs = argument + 9;
             rootfs_set = true;
+        } else if (strcmp(argument, "--cow-file") == 0) {
+            if (++index >= argc || cow_file_set || argv[index][0] == '\0')
+                goto invalid;
+            config->cow_file = argv[index];
+            cow_file_set = true;
+        } else if (strncmp(argument, "--cow-file=", 11) == 0) {
+            if (cow_file_set || argument[11] == '\0')
+                goto invalid;
+            config->cow_file = argument + 11;
+            cow_file_set = true;
         } else if (strcmp(argument, "-b") == 0 ||
                    strcmp(argument, "--bind") == 0) {
             if (++index >= argc || um_parse_bind(config, argv[index]) < 0)
@@ -939,6 +1307,11 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
                 fprintf(stderr, "neoproot-um: --readonly requires an ext4 image\n");
                 return -1;
             }
+            if (config->cow_file != NULL) {
+                fprintf(stderr,
+                        "neoproot-um: --cow-file requires an ext4 rootfs image\n");
+                return -1;
+            }
             config->rootfs_kind = UM_ROOTFS_HOSTFS;
             if (um_resolve_host_path("rootfs", config->rootfs, true, false,
                                      &config->resolved_rootfs) < 0)
@@ -953,15 +1326,20 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
                 fprintf(stderr, "neoproot-um: --hostfs requires a rootfs directory\n");
                 return -1;
             }
-            if (config->bind_count != 0) {
-                fprintf(stderr, "neoproot-um: --bind is only supported with hostfs rootfs\n");
-                return -1;
-            }
             config->rootfs_kind = UM_ROOTFS_EXT4;
             if (um_resolve_ext4_image(config->rootfs,
                                       &config->resolved_rootfs,
                                       &config->rootfs_fd) < 0)
                 return -1;
+            if (config->cow_file != NULL) {
+                if (config->readonly) {
+                    fprintf(stderr,
+                            "neoproot-um: --cow-file and --readonly are mutually exclusive\n");
+                    return -1;
+                }
+                if (um_resolve_cow_file(config, &config->resolved_cow) < 0)
+                    return -1;
+            }
         }
         if (config->rootfs_kind == UM_ROOTFS_HOSTFS &&
             config->resolved_hostfs == NULL)
@@ -1105,9 +1483,81 @@ static bool um_allow_environment_name(const char *name, size_t length)
     return length > 3 && strncmp(name, "LC_", 3) == 0;
 }
 
+/*
+ * Hand the requested ext4 binds to the guest init.
+ *
+ * The session directory is already the channel for init.sh and the command
+ * status, and it is the only host directory the guest can see, so the list
+ * travels the same way.  One record per line, tab-separated:
+ *
+ *     source<TAB>target<TAB>dir|file<TAB>ro|rw<TAB>name
+ *
+ * source is the hostfs mount option computed by um_prepare_ext4_binds (the
+ * init passes it to mount -t hostfs -o), name is the basename of a file bind
+ * and "-" for a directory bind.  Lines starting with '#' are ignored.
+ */
+static int um_write_binds_file(const UmConfig *config,
+                               const char *session_path)
+{
+    char path[PATH_MAX];
+    size_t index;
+    int fd;
+
+    if (config->rootfs_kind != UM_ROOTFS_EXT4 || config->bind_count == 0)
+        return 0;
+    if (snprintf(path, sizeof(path), "%s/%s", session_path, UM_BINDS_NAME) >=
+        (int)sizeof(path)) {
+        fprintf(stderr, "neoproot-um: session path is too long\n");
+        return -1;
+    }
+    fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+              0600);
+    if (fd < 0) {
+        fprintf(stderr, "neoproot-um: cannot create bind list '%s': %s\n",
+                path, strerror(errno));
+        return -1;
+    }
+    if (um_write_text(fd,
+                      "# neoproot binds v1\n"
+                      "# source<TAB>target<TAB>dir|file<TAB>ro|rw<TAB>name\n") <
+        0)
+        goto failed;
+    for (index = 0; index < config->bind_count; index++) {
+        const UmBind *bind = &config->binds[index];
+        const char *name = strrchr(bind->host, '/');
+
+        name = name != NULL ? name + 1 : bind->host;
+        if (um_write_text(fd, bind->mount_source) < 0 ||
+            um_write_text(fd, "\t") < 0 ||
+            um_write_text(fd, bind->guest) < 0 ||
+            um_write_text(fd, "\t") < 0 ||
+            um_write_text(fd, bind->source_directory ? "dir" : "file") < 0 ||
+            um_write_text(fd, "\t") < 0 ||
+            um_write_text(fd, bind->readonly ? "ro" : "rw") < 0 ||
+            um_write_text(fd, "\t") < 0 ||
+            um_write_text(fd, bind->source_directory ? "-" : name) < 0 ||
+            um_write_text(fd, "\n") < 0)
+            goto failed;
+    }
+    if (fsync(fd) < 0)
+        goto failed;
+    if (close(fd) < 0) {
+        unlink(path);
+        return -1;
+    }
+    return 0;
+
+failed:
+    fprintf(stderr, "neoproot-um: failed to write bind list '%s': %s\n",
+            path, strerror(errno));
+    close(fd);
+    unlink(path);
+    return -1;
+}
+
 static int um_write_wrapper(const char *wrapper_path, const char *cwd,
                             const char *status_path, const UmConfig *config,
-                            bool ext4_rootfs,
+                            bool ext4_rootfs, bool ext4_binds,
                             int guest_argc,
                             char *const guest_argv[])
 {
@@ -1125,6 +1575,27 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
     }
     if (ext4_rootfs) {
         if (um_write_text(fd, "#!/bin/sh\n") < 0)
+            goto failed;
+        /*
+         * Binds for an ext4 root are mounted by the guest init, which has to
+         * declare that it knows how before this script runs the caller's
+         * command.  Without the declaration the command would run with the
+         * binds silently absent -- which is exactly the failure a user cannot
+         * see.  A legacy /um-init writes no declaration, so this refuses to
+         * run rather than pretending.
+         */
+        if (ext4_binds &&
+            um_write_text(fd,
+                          "um_bind_declared=\n"
+                          "if [ -r /run/neoproot/init-features ]; then\n"
+                          "    while IFS= read -r um_line; do\n"
+                          "        [ \"$um_line\" = \"feature=binds\" ] && um_bind_declared=1\n"
+                          "    done < /run/neoproot/init-features\n"
+                          "fi\n"
+                          "if [ -z \"$um_bind_declared\" ]; then\n"
+                          "    printf '%s\\n' 'UM_PROTOCOL_ERROR=binds-unsupported' >&2\n"
+                          "    exit 125\n"
+                          "fi\n") < 0)
             goto failed;
     } else if (um_write_text(fd, "#!/bin/sh\n"
                               "um_fail() { printf '%s\\n' \"$1\" > ") < 0 ||
@@ -1168,7 +1639,8 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
             goto failed;
     }
 
-    for (bind_index = 0; bind_index < config->bind_count; bind_index++) {
+    for (bind_index = 0; !ext4_rootfs && bind_index < config->bind_count;
+         bind_index++) {
         const UmBind *bind = &config->binds[bind_index];
 
         if (um_write_text(fd, "mount --bind ") < 0 ||
@@ -1512,6 +1984,7 @@ static void um_print_usage(void)
     puts("  --rootfs=PATH       hostfs directory or ext4 image");
     puts("  --hostfs            require directory hostfs mode");
     puts("  --readonly          open an ext4 image without a COW file");
+    puts("  --cow-file=PATH     keep the ext4 COW file at PATH (created if missing)");
     puts("  --cwd=PATH          guest working directory");
     puts("  --timeout=SECONDS   bounded runtime (default: 120)");
     puts("  -b HOST:GUEST[:ro]  bind a rootfs path into the guest");
@@ -1559,6 +2032,61 @@ static int um_read_guest_status(const char *status_path, int *status)
         return -1;
     *status = (int)value;
     return 0;
+}
+
+/*
+ * Read what a session-aware guest init declared before running init.sh.
+ *
+ * The declaration is written into the session directory, so it survives the
+ * run and can be checked from here: a run that asked for binds and got no
+ * declaration ran without them, whatever status the guest reported.
+ */
+static bool um_session_declares(const char *session_path, const char *feature)
+{
+    char path[PATH_MAX];
+    char line[256];
+    bool found = false;
+    FILE *file;
+
+    if (snprintf(path, sizeof(path), "%s/%s", session_path,
+                 UM_INIT_FEATURES_NAME) >= (int)sizeof(path))
+        return false;
+    file = fopen(path, "r");
+    if (file == NULL)
+        return false;
+    while (fgets(line, sizeof(line), file) != NULL) {
+        size_t length = strlen(line);
+
+        while (length > 0 &&
+               (line[length - 1] == '\n' || line[length - 1] == '\r'))
+            line[--length] = '\0';
+        if (strcmp(line, feature) == 0) {
+            found = true;
+            break;
+        }
+    }
+    fclose(file);
+    return found;
+}
+
+/* The first line of a guest-reported protocol failure, if there is one. */
+static bool um_session_error(const char *session_path, char *result,
+                             size_t size)
+{
+    char path[PATH_MAX];
+    FILE *file;
+
+    if (size == 0 || snprintf(path, sizeof(path), "%s/%s", session_path,
+                              UM_PROTOCOL_ERROR_NAME) >= (int)sizeof(path))
+        return false;
+    file = fopen(path, "r");
+    if (file == NULL)
+        return false;
+    if (fgets(result, (int)size, file) == NULL)
+        result[0] = '\0';
+    fclose(file);
+    result[strcspn(result, "\r\n")] = '\0';
+    return true;
 }
 
 static int um_run_kernel(const UmConfig *config, const char *init_path,
@@ -1637,13 +2165,41 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
                    (int)sizeof(session_argument) ||
                snprintf(image_argument, sizeof(image_argument),
                         "/proc/self/fd/%d", config->rootfs_fd) >=
-                   (int)sizeof(image_argument) ||
-               (!config->readonly &&
-                snprintf(cow_argument, sizeof(cow_argument),
-                         "ubd0=%s/root.cow,%s", session_path,
-                         image_argument) >= (int)sizeof(cow_argument))) {
+                   (int)sizeof(image_argument)) {
         fprintf(stderr, "neoproot-um: UML argument is too long\n");
         return EXIT_FAILURE;
+    }
+
+    if (!config->readonly && config->rootfs_kind == UM_ROOTFS_EXT4) {
+        const char *cow_path = config->resolved_cow;
+        const char *backing = image_argument;
+        char temporary_cow[PATH_MAX];
+
+        if (cow_path == NULL) {
+            if (snprintf(temporary_cow, sizeof(temporary_cow), "%s/root.cow",
+                         session_path) >= (int)sizeof(temporary_cow)) {
+                fprintf(stderr, "neoproot-um: UML argument is too long\n");
+                return EXIT_FAILURE;
+            }
+            cow_path = temporary_cow;
+        } else {
+            /*
+             * A COW header names its backing file, and the kernel resolves
+             * /proc/self/fd/N through its own /proc, so with the descriptor
+             * the header would record /proc/<pid>/fd/N and every reuse would
+             * look like a backing-file change (the kernel answers that by
+             * rewriting the header and logging two errors).  Naming the image
+             * keeps the header stable, which is what makes a persistent COW
+             * reopen quietly.  The temporary COW keeps the descriptor: it is
+             * written once and thrown away.
+             */
+            backing = config->resolved_rootfs;
+        }
+        if (snprintf(cow_argument, sizeof(cow_argument), "ubd0=%s,%s",
+                     cow_path, backing) >= (int)sizeof(cow_argument)) {
+            fprintf(stderr, "neoproot-um: UML argument is too long\n");
+            return EXIT_FAILURE;
+        }
     }
 
     kernel_argv[index++] = config->resolved_kernel;
@@ -2242,6 +2798,15 @@ failed:
     return -1;
 }
 
+static void um_unlink_session_file(const char *session_path, const char *name)
+{
+    char path[PATH_MAX];
+
+    if (snprintf(path, sizeof(path), "%s/%s", session_path, name) <
+        (int)sizeof(path))
+        (void)unlink(path);
+}
+
 /*
  * Remove the umid directory the kernel made for this run.
  *
@@ -2352,8 +2917,12 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
     if (config.rootfs_kind == UM_ROOTFS_EXT4 &&
         um_make_runtime_root(&config.resolved_hostfs) < 0)
         goto failed;
+    if (um_prepare_ext4_binds(&config) < 0)
+        goto failed;
     if (um_make_session(&config, &session_path, &wrapper_path,
                         &init_path, &status_path) < 0)
+        goto failed;
+    if (um_write_binds_file(&config, session_path) < 0)
         goto failed;
     session_name = strrchr(session_path, '/') + 1;
     if (snprintf(status_guest_path, sizeof(status_guest_path), "/%s/status",
@@ -2361,6 +2930,7 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
         goto failed;
     if (um_write_wrapper(wrapper_path, config.cwd, status_guest_path, &config,
                          config.rootfs_kind == UM_ROOTFS_EXT4,
+                         config.bind_count > 0,
                          argc - guest_index,
                          &argv[guest_index]) < 0)
         goto failed;
@@ -2378,13 +2948,36 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
         um_free_config(&config);
         return EXIT_FAILURE;
     }
-    if (config.rootfs_kind == UM_ROOTFS_EXT4) {
-        char cow_path[PATH_MAX];
+    /*
+     * A COW file the caller named is theirs to keep; the temporary one belongs
+     * to this run and goes away with it.
+     */
+    if (config.rootfs_kind == UM_ROOTFS_EXT4 && config.resolved_cow == NULL)
+        um_unlink_session_file(session_path, "root.cow");
+    /*
+     * Binds were requested and the guest never declared that it can mount
+     * them: the command may have reported success, but it ran without them.
+     */
+    if (config.rootfs_kind == UM_ROOTFS_EXT4 && config.bind_count > 0) {
+        char protocol_error[256];
 
-        if (snprintf(cow_path, sizeof(cow_path), "%s/root.cow", session_path) <
-            (int)sizeof(cow_path))
-            (void)unlink(cow_path);
+        if (um_session_error(session_path, protocol_error,
+                             sizeof(protocol_error))) {
+            fprintf(stderr, "neoproot-um: guest init reported: %s\n",
+                    protocol_error);
+            result = EXIT_FAILURE;
+        } else if (!um_session_declares(session_path, UM_INIT_FEATURE_BINDS)) {
+            fprintf(stderr,
+                    "neoproot-um: the guest /um-init does not support binds "
+                    "(init protocol 2)\n");
+            fprintf(stderr,
+                    "neoproot-um: update /um-init in the image, or drop -b\n");
+            result = EXIT_FAILURE;
+        }
     }
+    um_unlink_session_file(session_path, UM_BINDS_NAME);
+    um_unlink_session_file(session_path, UM_INIT_FEATURES_NAME);
+    um_unlink_session_file(session_path, UM_PROTOCOL_ERROR_NAME);
     unlink(wrapper_path);
     unlink(status_path);
     if (config.rootfs_kind == UM_ROOTFS_EXT4) {
@@ -2411,8 +3004,12 @@ failed:
         unlink(wrapper_path);
     if (status_path != NULL)
         unlink(status_path);
-    if (session_path != NULL)
+    if (session_path != NULL) {
+        um_unlink_session_file(session_path, UM_BINDS_NAME);
+        um_unlink_session_file(session_path, UM_INIT_FEATURES_NAME);
+        um_unlink_session_file(session_path, UM_PROTOCOL_ERROR_NAME);
         rmdir(session_path);
+    }
     if (config.rootfs_kind == UM_ROOTFS_EXT4 && config.resolved_hostfs != NULL) {
         (void)um_cleanup_runtime_root(config.resolved_hostfs);
     }

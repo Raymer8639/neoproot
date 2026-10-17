@@ -19,7 +19,7 @@ enum backend_mode {
 static bool option_takes_separate_value(const char *argument)
 {
     static const char *const options[] = {
-        "-r", "--rootfs", "-b", "--bind", "-m", "--mount",
+        "-r", "--rootfs", "--cow-file", "-b", "--bind", "-m", "--mount",
         "-w", "--pwd", "--cwd", "-k", "--kernel-release",
         "-i", "--change-id", "-v", "--verbose", "-R", "-S", NULL
     };

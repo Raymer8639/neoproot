@@ -76,8 +76,14 @@ Termux host process rather than from inside an existing PRoot or sandbox.
 
 The backend accepts either a host directory or an ext4 image passed with `-r`
 or `--rootfs`. A directory is used as the UML `hostfs` root. An ext4 image is
-mounted as the UML guest root with a per-run temporary COW file; `--readonly`
-uses the image directly without a COW file. The UML kernel and
+mounted as the UML guest root with a per-run temporary COW file that is
+deleted when the run ends; `--readonly` uses the image directly without a COW
+file. `--cow-file=PATH` names the COW file instead: it is created when it does
+not exist, kept after the run, and reused by the next run, so a second run sees
+what the first one wrote. The base image is never written. A COW file is tied
+to the image it was created for (its header records the image's size and
+mtime), and a run refuses to start when the file was made for a different
+image; `--cow-file` and `--readonly` are mutually exclusive. The UML kernel and
 `stub_exe` can be supplied with command-line options to `neoproot-um`, or
 through these environment variables:
 
@@ -90,12 +96,39 @@ neoproot --backend=um -r /path/to/rootfs -- /bin/sh
 Hostfs exposes the selected host directory directly to the guest; it is not a
 security isolation boundary. Bind sources already inside that root can be
 mapped with `-b host:guest[:ro]`; sources outside it, controlled targets such
-as `/proc`, `/sys`, and `/dev`, and unsafe targets are rejected. Ext4 mode
-requires `/um-init` from the matching UM harness. The supervisor passes the
-`session-v1` protocol parameters after mounting the guest's proc filesystem;
-the init script mounts the temporary hostfs session at `/run/neoproot` and
-returns the command status through that mount. Ext4 mode does not currently
-support `-b`.
+as `/proc`, `/sys`, and `/dev`, and unsafe targets are rejected.
+
+Ext4 mode accepts the same `-b host:guest[:ro]` syntax, with host paths as
+sources: an ext4 guest has its own root, so there is no "inside the rootfs" to
+restrict a source to. The guest init mounts each source -- itself a hostfs
+mount, made read-only for `:ro` -- and a directory target must exist, or be
+creatable, inside the guest. Ext4 mode requires `/um-init` from the matching UM
+harness. The supervisor passes the `session-v1` protocol parameters after
+mounting the guest's proc filesystem; the init script mounts the temporary
+hostfs session at `/run/neoproot` and returns the command status through that
+mount.
+
+Binds need an init that knows how to mount them, and that is carried as an
+explicit protocol feature rather than assumed:
+
+- The supervisor writes the requested binds to `/run/neoproot/binds`, one
+  record per line with tab-separated fields:
+  `source<TAB>target<TAB>dir|file<TAB>ro|rw<TAB>name`. `source` is a hostfs
+  mount option (a path relative to the kernel's `hostfs=` root), and `name` is
+  the file name for a file bind and `-` for a directory bind.
+- An init that implements them writes `/run/neoproot/init-features` before it
+  runs the command, with `neoproot-init-protocol=2` and `feature=binds`.
+- When binds were requested and that declaration is missing, the supervisor
+  refuses to report success (`neoproot-um: the guest /um-init does not support
+  binds`), and the generated wrapper refuses to run the command at all. A
+  guest-side mount failure is reported through
+  `/run/neoproot/protocol-error` and printed as `neoproot-um: guest init
+  reported: ...`.
+
+[tests/um-init-ext4.sh](tests/um-init-ext4.sh) is the reference implementation
+of that init, and [tests/stability-um-backend.sh](tests/stability-um-backend.sh)
+installs it into the images it builds. The UM harness's own `um-init` needs the
+same two additions before it can be used with `-b` on an ext4 root.
 
 `--net` gives the guest a real network through `umnet` + `passt`: DHCP, DNS,
 ICMP and TCP work, and the guest's exit status still comes back through the
