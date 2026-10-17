@@ -78,14 +78,14 @@ The backend accepts either a host directory or an ext4 image passed with `-r`
 or `--rootfs`. A directory is used as the UML `hostfs` root. An ext4 image is
 mounted as the UML guest root with a per-run temporary COW file that is
 deleted when the run ends; `--readonly` uses the image directly without a COW
-file. `--cow-file=PATH` names the COW file instead: it is created when it does
-not exist, kept after the run, and reused by the next run, so a second run sees
-what the first one wrote. The base image is never written. A COW file is tied
-to the image it was created for (its header records the image's size and
-mtime), and a run refuses to start when the file was made for a different
-image; `--cow-file` and `--readonly` are mutually exclusive. The UML kernel and
-`stub_exe` can be supplied with command-line options to `neoproot-um`, or
-through these environment variables:
+file. `--cow-file=PATH` names the COW file instead (`PATH` must be absolute):
+it is created when it does not exist, kept after the run, and reused by the
+next run, so a second run sees what the first one wrote. The base image is
+never written. A COW file is tied to the image it was created for (its header
+records the image's size and mtime), and a run refuses to start when the file
+was made for a different image; `--cow-file` and `--readonly` are mutually
+exclusive. The UML kernel and `stub_exe` can be supplied with command-line
+options to `neoproot-um`, or through these environment variables:
 
 ```sh
 export NEOPROOT_UM_KERNEL=/path/to/linux-bionic

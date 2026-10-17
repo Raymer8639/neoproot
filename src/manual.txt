@@ -141,15 +141,15 @@ Regular options
     targets under ``/proc``, ``/sys`` or ``/dev`` are rejected. An ext4 image
     selects UML block-device mode and gets a fresh temporary COW file for each
     run, deleted when the run ends; ``--readonly`` opens the image directly
-    without creating a COW file. ``--cow-file=path`` keeps the COW file at
-    *path* instead: it is created when missing, kept after the run, and reused
-    by the next run, so the guest sees the writes of the run before. A COW file
-    is tied to the image it was created for; a mismatch is refused with a
-    message naming the file, and ``--cow-file`` cannot be combined with
-    ``--readonly``. Hostfs directly exposes the selected host directory and is
-    not a security isolation boundary. Ext4 mode requires an image containing
-    ``/um-init`` from the matching UM harness. The init script uses the
-    session-v1 protocol to mount the temporary hostfs session at
+    without creating a COW file. ``--cow-file=path`` (an absolute path) keeps
+    the COW file at *path* instead: it is created when missing, kept after the
+    run, and reused by the next run, so the guest sees the writes of the run
+    before. A COW file is tied to the image it was created for; a mismatch is
+    refused with a message naming the file, and ``--cow-file`` cannot be
+    combined with ``--readonly``. Hostfs directly exposes the selected host
+    directory and is not a security isolation boundary. Ext4 mode requires an
+    image containing ``/um-init`` from the matching UM harness. The init script
+    uses the session-v1 protocol to mount the temporary hostfs session at
     ``/run/neoproot`` and return the command status.
 
     In ext4 mode ``-b host:guest[:ro]`` accepts host paths as sources, since
