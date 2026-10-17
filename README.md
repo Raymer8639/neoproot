@@ -155,9 +155,29 @@ the session protocol. `umnet` and `passt` are taken from `$PATH`, or from
 `--net-gateway=` override the guest address and gateway (default
 `10.0.2.15/24` via `10.0.2.2`). The guest is told a nameserver only when
 `--net-dns=<address>` is given with `--net`; by default `umnet` reads the
-host's own resolver, and `--net-dns=none` announces none. IPv6 is not
-available on this path: the work is in the UM harness, and neoproot does not
-expose a `--net-ipv6` option.
+host's own resolver, and `--net-dns=none` announces none.
+
+IPv6 is available with `--net-ipv6`, which tells `umnet` to start its second,
+IPv6-only `passt` helper:
+
+```sh
+neoproot --backend=um -r /path/to/rootfs --net --net-ipv6 -- /bin/sh
+```
+
+`--net-ipv6-addr=ADDR[/PLEN]` and `--net-ipv6-gw=ADDR` override the guest's
+IPv6 address and gateway (default `fd00::2/64` and `fe80::1`); without them
+`umnet`'s own defaults are used, so neoproot passes no value it would have to
+guess. `--net-ipv6-dns=ADDR` announces an IPv6 resolver, `--net-ipv6-dns=none`
+announces none, and by default `umnet` reads the host's resolver. The IPv6
+options are a mode of `--net`, not a network of their own: without `--net` the
+run fails with `neoproot-um: --net-ipv6 options require --net` rather than
+starting a guest that was promised a stack it does not get.
+
+IPv6 is a second helper rather than a dual-stack one, so that a `passt`
+without prepatched IPv6 support -- which loses its IPv6 half on Android
+because it opens `NETLINK_ROUTE` -- leaves IPv4 working. That helper needs a
+UM harness built with the support; with an older one the run continues with
+IPv4 only and says so.
 
 ### Console, lifetime and exit status
 
@@ -186,7 +206,6 @@ behind: the supervisor removes the directory once the kernel it names is gone.
 - The guest kernel is uniprocessor (no SMP).
 - The guest runs aarch64 userland only: the kernel is built with
   `CONFIG_COMPAT` off, so 32-bit ARM binaries do not run.
-- Networking is IPv4 only; there is no `--net-ipv6`.
 - Kernel, stub, `um-init`, `umnet` and `passt` must come from matching
   linux-um-arm64 builds.
 - Ext4 roots have been exercised at 64 MB and 256 MB; other sizes are untested.
@@ -201,14 +220,61 @@ See [tests/stability-um-backend.sh](tests/stability-um-backend.sh).
 
 When `--backend` is omitted, neoproot uses the default PRoot backend;
 `--backend=fast` selects that same path explicitly.
-`--backend=auto` decides from what the caller configured and prints the choice
-to stderr: it selects the UML backend only when a kernel **and** a stub are
-configured -- through `--kernel`/`--stub` (forwarded to the UML supervisor,
-or given to `neoproot-um` directly) or a non-empty `NEOPROOT_UM_KERNEL` /
-`NEOPROOT_UM_STUB` -- **and** a rootfs is given with `-r`/`--rootfs`.
-Otherwise it uses the default PRoot path. It never probes `PATH` or the
-filesystem for a kernel: the optional backend only switches itself on when the
-caller has set it up.
+`--backend=auto` prints its choice to stderr and decides in two steps.
+
+First, the prerequisites: it selects the UML backend only when a kernel **and**
+a stub are configured -- through `--kernel`/`--stub` (forwarded to the UML
+supervisor, or given to `neoproot-um` directly) or a non-empty
+`NEOPROOT_UM_KERNEL` / `NEOPROOT_UM_STUB` -- **and** a rootfs is given with
+`-r`/`--rootfs`. Otherwise it uses the default PRoot path. It never probes
+`PATH` or the filesystem for a kernel: the optional backend only switches
+itself on when the caller has set it up. This is an invariant, not a
+heuristic: a command that needs a kernel cannot make `auto` start one that is
+not configured.
+
+Second, within that limit, the command decides. PRoot stays the default,
+because it is the fast path and most work is path translation; UML is chosen
+only for a command that needs a real kernel -- a container runtime's control
+plane, a mount, a namespace, a block device, a firewall, a packet filter:
+
+```
+docker dockerd podman podman-remote nerdctl containerd ctr runc crun
+systemd-nspawn machinectl mount umount losetup swapon swapoff
+unshare nsenter ip iptables nft bpftool
+```
+
+The default set is a list of names, not a guess. To replace it, use
+`--auto-um-commands=LIST` (comma-separated basenames) or the equivalent
+`NEOPROOT_UM_AUTO_COMMANDS` environment variable; the option wins when both
+are given. An empty value means the default set, and `none` means "never
+choose a backend by command":
+
+```sh
+neoproot --backend=auto --auto-um-commands=none -r /rootfs -- docker
+NEOPROOT_UM_AUTO_COMMANDS=mycmd,other neoproot --backend=auto -r /rootfs -- mycmd
+```
+
+The command is the basename at the position where the guest command begins,
+so `/usr/bin/docker` and `docker` are the same name. Simple wrappers are
+looked through -- `env`, `sudo`, `command`, `exec`, `nohup`, `time` and
+`stdbuf` -- including their `VAR=value` arguments and the options that take a
+separate value, so `env FOO=1 docker` is judged as `docker`.
+
+The boundary is deliberate and worth knowing: `sh -c 'docker run'` is `sh`
+and stays on the default backend, because auto reads the argument vector and
+does not parse guest shell code. A value packed into a combined short option
+of a wrapper (`sudo -Eu root docker`) is skipped as one argument, so that
+wrapper is not looked through. Everything else keeps working as before:
+`--backend=fast`, `--backend=um` and the default ignore both the list and the
+command.
+
+Both outcomes are reported, so `auto` is never silent about a downgrade:
+
+```
+neoproot: --backend=auto selected the um backend (command 'docker' needs a real kernel)
+neoproot: --backend=auto selected the default backend
+neoproot: --backend=auto would use the um backend for 'docker', but no kernel/stub/rootfs is configured; using the default backend
+```
 
 The `--` separator means the same thing on every backend:
 

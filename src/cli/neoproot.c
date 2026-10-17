@@ -1,166 +1,17 @@
 #include <stdlib.h>
+#include <ctype.h>
 #include <errno.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
 
+#include "cli/auto_backend.h"
+#include "cli/backend.h"
+
 // 声明cli.c中的核心函数
 extern int proot_main(int argc, char *const argv[]);
 extern int neoproot_um_supervisor_main(int argc, char *const argv[]);
-
-enum backend_mode {
-    BACKEND_DEFAULT,
-    BACKEND_FAST,
-    BACKEND_UM,
-    BACKEND_AUTO,
-};
-
-static bool option_takes_separate_value(const char *argument)
-{
-    static const char *const options[] = {
-        "-r", "--rootfs", "--cow-file", "-b", "--bind", "-m", "--mount",
-        "-w", "--pwd", "--cwd", "-k", "--kernel-release",
-        "-i", "--change-id", "-v", "--verbose", "-R", "-S", NULL
-    };
-    size_t index;
-
-    for (index = 0; options[index] != NULL; index++)
-        if (strcmp(argument, options[index]) == 0)
-            return true;
-    return false;
-}
-
-/*
- * Whether the UML backend's prerequisites have actually been configured.
- *
- * Both a kernel and a stub, given either as options or through the environment
- * the supervisor also reads, plus a rootfs for them to boot.  Nothing is
- * probed: the point is to distinguish "the caller set this up" from "something
- * with that name happens to exist".
- */
-static bool um_backend_is_configured(int argc, char *const argv[])
-{
-    bool kernel = false, stub = false, rootfs = false;
-    const char *value;
-    int index;
-
-    /*
-     * A variable that is set to the empty string is not configuration.  Testing
-     * only for non-NULL made `NEOPROOT_UM_KERNEL= neoproot --backend=auto` pick
-     * the UML backend and then fail with "set --kernel/--stub", which is the
-     * auto selection getting it wrong rather than the backend.
-     */
-    const char *environment_kernel = getenv("NEOPROOT_UM_KERNEL");
-    const char *environment_stub = getenv("NEOPROOT_UM_STUB");
-
-    if (environment_kernel != NULL && environment_kernel[0] != '\0')
-        kernel = true;
-    if (environment_stub != NULL && environment_stub[0] != '\0')
-        stub = true;
-
-    for (index = 1; index < argc; index++) {
-        value = argv[index];
-        if (value == NULL || value[0] != '-')
-            continue;
-        if (strncmp(value, "--kernel=", 9) == 0)
-            kernel = true;
-        else if (strcmp(value, "--kernel") == 0)
-            kernel = true;
-        else if (strncmp(value, "--stub=", 7) == 0)
-            stub = true;
-        else if (strcmp(value, "--stub") == 0)
-            stub = true;
-        else if (strncmp(value, "--rootfs=", 9) == 0)
-            rootfs = true;
-        else if (strcmp(value, "--rootfs") == 0)
-            rootfs = true;
-        else if (strcmp(value, "-r") == 0)
-            rootfs = true;
-    }
-    return kernel && stub && rootfs;
-}
-
-static int prepare_backend_argv(int argc, char *const argv[],
-                                char ***result, int *result_argc,
-                                enum backend_mode *mode, int *command_index)
-{
-    char **filtered;
-    int output_argc = 1;
-    int index;
-    bool command_started = false;
-    bool backend_set = false;
-
-    *mode = BACKEND_DEFAULT;
-    *command_index = 0;
-    filtered = calloc((size_t)argc + 2, sizeof(*filtered));
-    if (filtered == NULL)
-        return -1;
-    filtered[0] = argv[0];
-    for (index = 1; index < argc; index++) {
-        const char *value = NULL;
-
-        if (command_started) {
-            filtered[output_argc++] = argv[index];
-            continue;
-        }
-        /*
-         * The separator belongs to neoproot's own CLI and is not part of the
-         * vector any backend should receive.  It used to be copied through
-         * unconditionally, which meant `neoproot -r /rootfs -- /bin/sh` died
-         * with "unknown option '--'" on every backend except UM -- the one
-         * backend whose syntax does want it.  The UM dispatcher puts it back.
-         */
-        if (strcmp(argv[index], "--") == 0) {
-            command_started = true;
-            *command_index = output_argc;
-            continue;
-        }
-        if (argv[index][0] != '-') {
-            command_started = true;
-            *command_index = output_argc;
-            filtered[output_argc++] = argv[index];
-            continue;
-        }
-        if (strncmp(argv[index], "--backend=", 10) == 0) {
-            value = argv[index] + 10;
-        } else if (strcmp(argv[index], "--backend") == 0) {
-            if (++index >= argc) {
-                fprintf(stderr, "neoproot: --backend requires a value\n");
-                free(filtered);
-                return -1;
-            }
-            value = argv[index];
-        } else {
-            output_argc++;
-            filtered[output_argc - 1] = argv[index];
-            if (option_takes_separate_value(argv[index]) && index + 1 < argc)
-                filtered[output_argc++] = argv[++index];
-            continue;
-        }
-        if (backend_set) {
-            fprintf(stderr, "neoproot: duplicate --backend option\n");
-            free(filtered);
-            return -1;
-        }
-        backend_set = true;
-        if (strcmp(value, "fast") == 0)
-            *mode = BACKEND_FAST;
-        else if (strcmp(value, "um") == 0)
-            *mode = BACKEND_UM;
-        else if (strcmp(value, "auto") == 0)
-            *mode = BACKEND_AUTO;
-        else {
-            fprintf(stderr, "neoproot: unknown backend '%s'\n", value);
-            free(filtered);
-            return -1;
-        }
-    }
-    filtered[output_argc] = NULL;
-    *result = filtered;
-    *result_argc = output_argc;
-    return 0;
-}
 
 /* 优先使用 Android 的 /system/bin/sh；
  * 在嵌入式 Linux / 其他环境回退到 /bin/sh，避免 execve 直接失败 */
@@ -216,14 +67,18 @@ int main(int argc, char *const argv[])
     int effective_argc;
     enum backend_mode backend;
     int command_index;
+    const char *auto_commands_option;
 
     if (reject_traced_startup())
         return EXIT_FAILURE;
-    if (prepare_backend_argv(argc, argv, &effective_argv, &effective_argc,
-                             &backend, &command_index) < 0)
+    if (neoproot_prepare_backend_argv(argc, argv, &effective_argv,
+                                      &effective_argc, &backend,
+                                      &command_index,
+                                      &auto_commands_option) < 0)
         return EXIT_FAILURE;
 
     if (backend == BACKEND_AUTO) {
+        char message[512];
         /*
          * Pick between the two paths rather than refusing to choose.  The
          * condition is deliberately narrow: the UML backend is only taken when
@@ -231,14 +86,20 @@ int main(int argc, char *const argv[])
          * and there is a rootfs to put behind them.  "auto" must not turn an
          * experimental backend on for somebody who never asked for it by
          * relying on what happens to be on PATH.
+         *
+         * Within that limit the choice is made from the command: PRoot is
+         * faster and is the default, and UML is chosen only for a command that
+         * needs a real kernel.  When such a command cannot have UML, saying so
+         * is the point -- silently falling back would leave the caller
+         * wondering why "docker" behaved as if it had no daemon.
          */
-        if (um_backend_is_configured(effective_argc, effective_argv))
-            backend = BACKEND_UM;
-        else
-            backend = BACKEND_DEFAULT;
-
-        fprintf(stderr, "neoproot: --backend=auto selected the %s backend\n",
-                backend == BACKEND_UM ? "um" : "default");
+        backend = neoproot_auto_select(effective_argc, effective_argv,
+                                       command_index, auto_commands_option,
+                                       neoproot_um_backend_is_configured(
+                                           effective_argc, effective_argv),
+                                       message, sizeof(message))
+                     ? BACKEND_UM : BACKEND_DEFAULT;
+        fprintf(stderr, "%s\n", message);
     }
 
     if (backend == BACKEND_UM) {

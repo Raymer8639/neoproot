@@ -3,7 +3,53 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
-## [Unreleased]
+## [v5.12.0] - 2026-10-17
+
+**`--backend=auto` chooses by what the command needs, and the UML guest can have IPv6**
+
+- Make `--backend=auto` capability-aware. It used to be one question --
+  "are the UML prerequisites configured?" -- so a caller who had set a kernel
+  up for one container got the UML backend for every command, including the
+  ones PRoot runs faster. auto now decides in two steps: first the
+  prerequisites (a kernel, a stub and a rootfs, unchanged -- a command cannot
+  make auto start a backend that was never configured), then the guest
+  command. PRoot stays the default; UML is selected for a command that needs a
+  real kernel.
+- The default set is `docker dockerd podman podman-remote nerdctl containerd
+  ctr runc crun systemd-nspawn machinectl mount umount losetup swapon swapoff
+  unshare nsenter ip iptables nft bpftool`. It is a list of names, not a guess:
+  the guest command's basename is compared, simple wrappers (`env`, `sudo`,
+  `command`, `exec`, `nohup`, `time`, `stdbuf`) are looked through, and
+  `VAR=value` arguments and value-taking wrapper options are skipped.
+- Add `--auto-um-commands=LIST` (comma-separated basenames) and
+  `NEOPROOT_UM_AUTO_COMMANDS` to replace the set; the option wins. An empty
+  value means the default set and `none` means no command ever selects UML.
+  The option is neoproot's own and never reaches a backend.
+- Report both outcomes: `selected the um backend (command 'docker' needs a real
+  kernel)`, `selected the default backend`, and -- when a command needs a
+  kernel and none is configured -- `would use the um backend for 'docker', but no
+  kernel/stub/rootfs is configured; using the default backend`. The four
+  existing auto configurations are unchanged, and `--backend=fast`, `--backend=um`
+  and the default path ignore both the list and the command.
+- Add `--net-ipv6` to the UML backend, wired to the IPv6 support the UM harness
+  already has: `umnet` starts its second, IPv6-only `passt` helper. Add
+  `--net-ipv6-addr=ADDR[/PLEN]` and `--net-ipv6-gw=ADDR` (defaults stay
+  `umnet`'s own `fd00::2/64` and `fe80::1`, so nothing is restated from here) and
+  `--net-ipv6-dns=ADDR|none` (default: `umnet` reads the host's resolver). The
+  IPv6 options are a mode of `--net`: without it the run fails with
+  `neoproot-um: --net-ipv6 options require --net` instead of booting a guest
+  that was promised a stack it does not get. IPv4 argv is byte-for-byte
+  unchanged.
+- Split the dispatcher and the auto policy out of `main()` into
+  `src/cli/backend.c` and `src/cli/auto_backend.c`, so both can be tested
+  without a kernel, a rootfs or ptrace.
+- Add `tests/test-auto-backend.c` (linked against the policy: command
+  extraction, wrappers, list precedence, option consumption, and the exact
+  stderr sentences) and `tests/test-auto-commands.sh` (end to end through a
+  mock kernel that records whether UML was reached). Extend
+  `tests/test-um-supervisor-net-argv.sh` with the IPv6 vectors and
+  `tests/test-um-supervisor-cli.sh` with the `--net-ipv6`-without-`--net`
+  refusal; wire the new tests into `tests/GNUmakefile` and CI.
 
 **ext4 COW files can outlive a run, and ext4 guests can have binds**
 

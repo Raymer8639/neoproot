@@ -128,7 +128,7 @@ hostfs 挂载，`:ro` 时只读）挂载到 guest 内；目录目标必须已存
 镜像时会安装它。UM harness 自带的 `um-init` 也需要补上同样的两项，才能用于
 ext4 根上的 `-b`。
 
-### 网络（IPv4）
+### 网络
 
 `--net` 通过 `umnet` + `passt` 给 guest 提供真实 IPv4 网络：DHCP、DNS、ICMP、
 TCP 均可通，guest 退出码仍经 session 协议回传。`umnet`/`passt` 从 `$PATH`
@@ -136,8 +136,27 @@ TCP 均可通，guest 退出码仍经 session 协议回传。`umnet`/`passt` 从
 `--net-gateway=` 分别覆盖客机地址与网关（默认 `10.0.2.15/24`、网关
 `10.0.2.2`）。只有显式给出 `--net-dns=<地址>` 时才向 guest 宣告 nameserver；
 默认由 `umnet` 读取宿主自己的解析器，`--net-dns=none` 则不宣告任何
-nameserver。IPv6 不在该路径上：相关工作还在 UM harness 侧推进，neoproot 不
-暴露 `--net-ipv6` 选项。
+nameserver。
+
+`--net-ipv6` 让 `umnet` 启动它的第二个、纯 IPv6 的 `passt` helper，从而给
+guest 提供 IPv6：
+
+```sh
+neoproot --backend=um -r /path/to/rootfs --net --net-ipv6 -- /bin/sh
+```
+
+`--net-ipv6-addr=ADDR[/PLEN]`、`--net-ipv6-gw=ADDR` 覆盖 guest 的 IPv6 地址
+与网关（默认 `fd00::2/64`、`fe80::1`）；不给就用 `umnet` 自己的默认值，
+neoproot 不传它只能猜的值。`--net-ipv6-dns=ADDR` 宣告 IPv6 nameserver，
+`--net-ipv6-dns=none` 不宣告，默认由 `umnet` 读取宿主的解析器。IPv6 是
+`--net` 的一种模式而不是独立网络：没有 `--net` 时直接报错
+（`neoproot-um: --net-ipv6 options require --net`），而不是启动一个被许诺了
+却拿不到协议栈的 guest。
+
+IPv6 用独立的第二个 helper 而不是双栈 helper，是为了让没有预先打过 IPv6 补丁
+的 `passt`（在 Android 上它会因为打开 `NETLINK_ROUTE` 被拒绝而丢掉 IPv6）
+不影响 IPv4。该 helper 需要配套构建的 UM harness；旧版会在说明后继续以纯 IPv4
+运行。
 
 ### 控制台、生命周期与退出状态
 
@@ -163,7 +182,6 @@ SIGINT/SIGTERM/SIGHUP/SIGQUIT，用同一信号通知 UML 进程组，清理该�
 - guest 内核是单核（uniprocessor），没有 SMP。
 - guest 只运行 aarch64 用户态：内核构建时关闭 `CONFIG_COMPAT`，32 位 ARM
   程序不能运行。
-- 网络目前只有 IPv4，没有 `--net-ipv6`。
 - 内核、stub、`um-init`、`umnet`、`passt` 必须来自配套的 linux-um-arm64
   构建。
 - ext4 根目前只在 64 MB 和 256 MB 镜像上验证过，其他容量未测试。
@@ -176,11 +194,52 @@ ext4 带/不带 `--net`、ext4 `--readonly`、持久与临时 COW、读写/只�
 ## 后端选择与 `--` 分隔符
 
 不写 `--backend` 时使用默认 PRoot 后端；`--backend=fast` 显式选择同一路径。
-`--backend=auto` 根据调用者的配置选择，并在 stderr 说明选了哪个：只有
-kernel 与 stub 都已配置（`--kernel`/`--stub`，或非空的
+`--backend=auto` 把选择写到 stderr，并分两步决定。
+
+第一步看前提：只有 kernel 与 stub 都已配置（`--kernel`/`--stub`，或非空的
 `NEOPROOT_UM_KERNEL`/`NEOPROOT_UM_STUB`）**且** 用 `-r`/`--rootfs`
-给了 rootfs 时才选 UML 后端，否则走默认 PRoot 路径。它不会去 `PATH` 或文件
-系统里探测内核——可选后端只应在调用者明确配置后启用。
+给了 rootfs 时才可能选 UML 后端，否则走默认 PRoot 路径。它不会去 `PATH` 或
+文件系统里探测内核——可选后端只应在调用者明确配置后启用。这是不变量而不是
+启发式：需要真内核的命令也不能让 `auto` 启动一个没配置的内核。
+
+第二步在这个前提内看命令。默认仍是 PRoot——它是快路径，而大部分工作就是路径
+翻译；只有需要真内核的命令才选 UML，例如容器运行时控制面、挂载、命名空间、
+块设备、防火墙、包过滤：
+
+```
+docker dockerd podman podman-remote nerdctl containerd ctr runc crun
+systemd-nspawn machinectl mount umount losetup swapon swapoff
+unshare nsenter ip iptables nft bpftool
+```
+
+默认集合是一张名字表，不是对命令行的猜测。要替换它，用
+`--auto-um-commands=LIST`（逗号分隔的 basename）或等价的
+`NEOPROOT_UM_AUTO_COMMANDS` 环境变量；两者同时给出时选项优先。空值表示
+默认集合，`none` 表示"从不因命令选择后端"：
+
+```sh
+neoproot --backend=auto --auto-um-commands=none -r /rootfs -- docker
+NEOPROOT_UM_AUTO_COMMANDS=mycmd,other neoproot --backend=auto -r /rootfs -- mycmd
+```
+
+命令取 guest 命令起点的 basename，所以 `/usr/bin/docker` 与 `docker` 是同一个
+名字。简单包装器会被跳过——`env`、`sudo`、`command`、`exec`、`nohup`、
+`time`、`stdbuf`——包括它们的 `VAR=value` 参数和带独立取值的选项，因此
+`env FOO=1 docker` 按 `docker` 判断。
+
+边界是刻意划定的，也值得记住：`sh -c 'docker run'` 的命令是 `sh`，仍走默认
+后端，因为 auto 只看参数向量，不解析 guest 的 shell 代码。包装器把取值塞进
+合写的短选项（`sudo -Eu root docker`）时，该参数整体被跳过，因此这个包装器
+不会被看穿。其余行为不变：`--backend=fast`、`--backend=um` 和默认路径都
+既不看列表也不看命令。
+
+两种结果都会报告，`auto` 不会悄悄降级：
+
+```
+neoproot: --backend=auto selected the um backend (command 'docker' needs a real kernel)
+neoproot: --backend=auto selected the default backend
+neoproot: --backend=auto would use the um backend for 'docker', but no kernel/stub/rootfs is configured; using the default backend
+```
 
 `--` 分隔符在所有后端含义一致：
 

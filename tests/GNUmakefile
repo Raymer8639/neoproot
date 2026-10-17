@@ -8,6 +8,10 @@ PROOT ?= ../src/neoproot
 # 测试程序列表
 TEST_PROGS = test_argv test_echo test_file_ops test_dir_ops
 
+# 纯逻辑测试：链接被测源码，不需要 rootfs、内核或 ptrace
+# （test-auto-backend 覆盖 --backend=auto 的选择策略与选项消费）
+CHECK_PROGS = test-auto-backend
+
 # 测试脚本列表
 TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-runtime-bindings.sh test-security-regressions.sh \
@@ -43,10 +47,11 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-um-supervisor-cli.sh test-um-supervisor-bind-cli.sh \
 	test-um-supervisor-ext4-cli.sh test-um-supervisor-net-argv.sh \
 	test-um-supervisor-cow-file-cli.sh \
-	test-um-supervisor-ext4-binds-cli.sh
+	test-um-supervisor-ext4-binds-cli.sh \
+	test-auto-commands.sh
 
 # 默认目标
-all: $(TEST_PROGS)
+all: $(TEST_PROGS) $(CHECK_PROGS)
 
 # 编译测试程序
 test_argv: test_argv.c
@@ -64,9 +69,19 @@ test_dir_ops: test_dir_ops.c
 test-openat2: test-openat2.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# 链接被测源码而不是整个程序：选择策略是纯函数，容器与 CI 都能跑。
+test-auto-backend: test-auto-backend.c ../src/cli/auto_backend.c \
+		../src/cli/backend.c ../src/cli/auto_backend.h ../src/cli/backend.h
+	$(CC) $(CFLAGS) -I../src -o $@ test-auto-backend.c \
+		../src/cli/auto_backend.c ../src/cli/backend.c
+
 # 运行所有测试
 test: all
 	@echo "运行 SciCat PRoot 测试..."
+	@for prog in $(CHECK_PROGS); do \
+		echo "运行 $$prog..."; \
+		./$$prog || { echo "测试 $$prog 失败"; exit 1; }; \
+	done
 	@for prog in $(TEST_PROGS); do \
 		echo "运行 $$prog..."; \
 		expected=0; \
@@ -96,7 +111,7 @@ test: all
 
 # 清理编译产物
 clean:
-	rm -f $(TEST_PROGS)
+	rm -f $(TEST_PROGS) $(CHECK_PROGS)
 
 # 深度清理，同时清理临时文件
 distclean: clean
