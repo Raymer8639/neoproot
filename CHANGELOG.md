@@ -3,6 +3,31 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [Unreleased]
+
+**ext4 COW files can outlive a run, and ext4 guests can have binds**
+
+- Add `--cow-file=PATH` to the UML backend. An ext4 image still gets a
+  temporary COW file by default and that file is still deleted when the run
+  ends; naming one keeps it, reuses it on the next run -- so the guest sees its
+  earlier writes -- and never writes the base image. The file is created when
+  missing, an empty file is treated as a placeholder, and a file that was made
+  for a different image is refused with a message instead of a failed root
+  mount. `--readonly` and `--cow-file` are mutually exclusive.
+- Support `-b host:guest[:ro]` on ext4 roots, where it used to be rejected.
+  An ext4 guest has its own root, so sources are host paths; the guest init
+  mounts them through hostfs (read-only for `:ro`). The supervisor describes
+  the binds in `/run/neoproot/binds` and the init declares the feature in
+  `/run/neoproot/init-features`; a run that asked for binds and found no
+  declaration fails instead of running the command without them, and a
+  guest-side mount failure is reported through `/run/neoproot/protocol-error`.
+  `tests/um-init-ext4.sh` is the reference init.
+- Add CLI contract tests for both (`tests/test-um-supervisor-cow-file-cli.sh`,
+  `tests/test-um-supervisor-ext4-binds-cli.sh`) and real-UML cases in
+  `tests/stability-um-backend.sh`: COW persistence across two runs, no
+  persistence and no residue without `--cow-file`, and ext4 binds that are
+  read, written, kept read-only, with the base image unchanged.
+
 ## [v5.11.0] - 2026-10-17
 
 **Backend selection becomes real, and one command line works on every backend**
