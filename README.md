@@ -95,12 +95,49 @@ requires `/um-init` from the matching UM harness. The supervisor passes the
 `session-v1` protocol parameters after mounting the guest's proc filesystem;
 the init script mounts the temporary hostfs session at `/run/neoproot` and
 returns the command status through that mount. Ext4 mode does not currently
-support `-b`. Guest network setup is not supported. The backend must therefore
-be treated as experimental and explicitly requested.
+support `-b`.
+
+`--net` gives the guest a real network through `umnet` + `passt`: DHCP, DNS,
+ICMP and TCP work, and the guest's exit status still comes back through the
+session protocol. `umnet` and `passt` are taken from `$PATH`, or from
+`NEOPROOT_UM_NET` / `NEOPROOT_UM_PASST`. `--net-addr=` and
+`--net-gateway=` override the guest address and gateway (default
+`10.0.2.15/24` via `10.0.2.2`). The guest is told a nameserver only when
+`--net-dns=<address>` is given with `--net`; by default `umnet` reads the
+host's own resolver, and `--net-dns=none` announces none. A run no longer
+leaves a `~/.uml/<umid>` runtime directory behind when it is killed or panics:
+the supervisor removes the directory once the kernel it names is gone.
+
+The guest console is attached to the caller's terminal, and terminal resizes
+are forwarded to the guest, so a full-screen tool started this way sees the
+right window size. The backend is still experimental and has to be requested
+explicitly, or selected by `auto` (below).
+
+### Backend selection and the command separator
 
 When `--backend` is omitted, the existing Neoproot behavior remains the
-default. `--backend=fast` also selects that existing path; `--backend=auto`
-does not enable UML automatically in this first stage.
+default; `--backend=fast` selects that same path explicitly.
+`--backend=auto` decides from what the caller configured and prints the choice
+to stderr: it selects the UML backend only when a kernel **and** a stub are
+configured -- through `--kernel`/`--stub` (forwarded to the UML supervisor,
+or given to `neoproot-um` directly) or a non-empty `NEOPROOT_UM_KERNEL` /
+`NEOPROOT_UM_STUB` -- **and** a rootfs is given with `-r`/`--rootfs`.
+Otherwise it uses the default PRoot path. It never probes `PATH` or the
+filesystem for a kernel: an experimental backend only switches itself on when
+the caller has set it up.
+
+The `--` separator means the same thing on every backend:
+
+```sh
+neoproot -r /path/to/rootfs -- /bin/sh
+```
+
+The CLI consumes the separator once and does not forward it, so a backend that
+does not know it never sees it, and the same command line can be reused with a
+different `--backend` -- which is what `auto` needs. The UML dispatcher
+restores the delimiter for the UML supervisor, whose own syntax requires it.
+Omitting `--` also works, since the CLI already knows where the guest command
+begins.
 
 ## Performance evidence
 

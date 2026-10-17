@@ -82,7 +82,38 @@ neoproot --backend=um --rootfs=/path/to/rootfs -- /bin/sh
 neoproot --backend=um --rootfs=/path/to/rootfs.ext4 --readonly -- /bin/true
 ```
 
-UML 后端仍处于实验阶段；hostfs 直接暴露宿主目录，不是安全隔离边界。
+`--net` 通过 `umnet` + `passt` 给 guest 提供真实网络（DHCP、DNS、ICMP、TCP
+均可通，客机退出码仍经 session 协议回传）。`umnet`/`passt` 从 `$PATH` 查找，
+也可以用 `NEOPROOT_UM_NET`/`NEOPROOT_UM_PASST` 指定；`--net-addr=`、
+`--net-gateway=` 分别覆盖客机地址与网关（默认 `10.0.2.15/24`、网关
+`10.0.2.2`）。只有显式给出 `--net-dns=<地址>` 时才向 guest 宣告 nameserver；
+默认由 `umnet` 读取宿主自己的解析器，`--net-dns=none` 则不宣告任何
+nameserver。运行被杀死或 guest panic 后不再遗留 `~/.uml/<umid>` 运行时目录：
+supervisor 会在它记录的内核进程消失后清理。
+
+guest 控制台连接调用者的终端，终端尺寸变化（SIGWINCH）会转发给 guest，因此从
+该模式启动的全屏程序能拿到正确的窗口大小。UML 后端仍处于实验阶段；hostfs 直接
+暴露宿主目录，不是安全隔离边界。
+
+### 后端选择与 `--` 分隔符
+
+不写 `--backend` 时保持原有 Neoproot 行为；`--backend=fast` 显式选择同一
+路径。`--backend=auto` 根据调用者的配置选择，并在 stderr 说明选了哪个：只有
+kernel 与 stub 都已配置（`--kernel`/`--stub`，或非空的
+`NEOPROOT_UM_KERNEL`/`NEOPROOT_UM_STUB`）**且** 用 `-r`/`--rootfs`
+给了 rootfs 时才选 UML 后端，否则走默认 PRoot 路径。它不会去 `PATH` 或文件
+系统里探测内核——实验性后端只应在调用者明确配置后启用。
+
+`--` 分隔符在所有后端含义一致：
+
+```sh
+neoproot -r /path/to/rootfs -- /bin/sh
+```
+
+CLI 自己消费该分隔符、不再向下转发，因此不认识它的后端不会看到它，同一条命令行
+可以换 `--backend` 复用——这正是 `auto` 需要的行为。UML 分发器只对 UML
+supervisor 把分隔符补回（其语法需要）。不写 `--` 也可以，CLI 已经知道 guest
+命令从哪里开始。
 
 命令行接口遵循官方 PRoot 习惯。无需手动取消设置 `LD_PRELOAD`、`LD_LIBRARY_PATH` 或 `LD_BIND_NOW`；启动器会在进入 guest 前自动处理这些变量。
 
