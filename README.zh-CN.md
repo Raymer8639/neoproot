@@ -65,15 +65,25 @@ neoproot -0 -r /data/data/com.termux/files/home/rootfs \
     /bin/bash --login
 ```
 
-## UML 后端
+命令行接口遵循官方 PRoot 习惯。无需手动取消设置 `LD_PRELOAD`、`LD_LIBRARY_PATH` 或 `LD_BIND_NOW`；启动器会在进入 guest 前自动处理这些变量。
 
-使用 `--backend=um` 可启动独立的 UML 内核。该模式必须从未被跟踪的
-Termux 宿主进程启动，不能在已有 PRoot 或 sandbox 内嵌套运行。
+## UML 后端（可选的第二执行后端）
 
-`--rootfs` 可以是目录或 ext4 镜像：目录使用 hostfs，镜像使用每次运行
-独立的 COW；`--readonly` 使用只读 UBD，不创建 COW。ext4 镜像必须包含与
-当前 UM harness 匹配的 `/um-init`，并支持会话参数、`/run/neoproot` 和
-退出码 status 协议。`-b` 当前只支持目录 hostfs 模式。
+neoproot 有两个执行后端。默认是 PRoot tracer：不写 `--backend` 或显式
+`--backend=fast` 时使用，通过 `ptrace`（以及可选的 seccomp USER_NOTIF）翻译
+路径和用户/组 ID，不需要 root。UML 后端是可选的第二执行后端：
+`--backend=um` 通过 `neoproot-um` supervisor 启动独立的 UML guest 内核，命令
+运行在真实 Linux 内核上，而不是经过系统调用翻译。它必须从未被跟踪的 Termux
+宿主进程启动，不能在已有 PRoot 容器或 sandbox 内嵌套运行。
+
+`-r`/`--rootfs` 既可以是宿主目录，也可以是 ext4 镜像。目录以 UML `hostfs`
+导出给 guest；ext4 镜像作为 guest 根挂载，每次运行使用独立的临时 COW 文件，
+运行结束即删除，基础镜像永远不会被写入。`--cow-file=PATH` 改为把 COW 文件
+保存在 `PATH`（必须是绝对路径）：文件不存在时创建，下次运行继续复用——因此
+下一次能看到上一次写入的内容——运行结束后保留。COW 文件与创建它时的镜像
+绑定（文件头记录镜像大小和 mtime），镜像不匹配时会拒绝启动；`--cow-file` 与
+`--readonly` 互斥，`--readonly` 直接打开 ext4 镜像，不创建 COW。UML 内核和
+`stub_exe` 可以通过 `neoproot-um` 的命令行参数提供，也可以用下面的环境变量：
 
 ```sh
 export NEOPROOT_UM_KERNEL=/path/to/linux-bionic
@@ -82,27 +92,95 @@ neoproot --backend=um --rootfs=/path/to/rootfs -- /bin/sh
 neoproot --backend=um --rootfs=/path/to/rootfs.ext4 --readonly -- /bin/true
 ```
 
-`--net` 通过 `umnet` + `passt` 给 guest 提供真实网络（DHCP、DNS、ICMP、TCP
-均可通，客机退出码仍经 session 协议回传）。`umnet`/`passt` 从 `$PATH` 查找，
-也可以用 `NEOPROOT_UM_NET`/`NEOPROOT_UM_PASST` 指定；`--net-addr=`、
+内核和 stub 必须用 linux-um-arm64 仓库的 `build-bionic.sh` 构建，并与配套的
+`um-init`、`umnet`、`passt` 一起使用；不匹配的组合不受支持。
+
+### 绑定（`-b`）
+
+hostfs 直接把选定的宿主目录暴露给 guest，**不是**安全隔离边界。源目录已在
+该根内时，可以用 `-b host:guest[:ro]` 映射；根外来源、`/proc`、`/sys`、`/dev`
+等受控目标以及不安全目标会被拒绝。
+
+ext4 模式接受同样的 `-b host:guest[:ro]`，源是宿主路径：ext4 guest 有自己的
+根，不存在“rootfs 内部”这一限制。guest init 负责把每个来源（本身是一个
+hostfs 挂载，`:ro` 时只读）挂载到 guest 内；目录目标必须已存在或可在 guest
+内创建。ext4 模式要求镜像中的 `/um-init` 来自匹配的 UM harness。supervisor
+在挂载 guest 的 proc 后传入 `session-v1` 协议参数，init 脚本把临时 hostfs
+会话挂到 `/run/neoproot`，并通过该挂载回传命令状态。
+
+绑定需要 init 真正会挂载它们，这一点作为显式协议特性声明，而不是默认假设：
+
+- supervisor 把请求的绑定写到 `/run/neoproot/binds`，每行一条，字段用制表符
+  分隔：`source<TAB>target<TAB>dir|file<TAB>ro|rw<TAB>name`。`source` 是
+  hostfs 挂载选项（相对于内核 `hostfs=` 根的路径），`name` 是文件绑定的文件
+  名，目录绑定用 `-`。
+- 实现该特性的 init 在运行命令前写 `/run/neoproot/init-features`，内容包含
+  `neoproot-init-protocol=2` 和 `feature=binds`。
+- 请求了绑定却缺少该声明时，supervisor 不会报告成功
+  （`neoproot-um: the guest /um-init does not support binds`），生成的包装
+  脚本也不会运行命令。guest 侧挂载失败会通过
+  `/run/neoproot/protocol-error` 上报，并打印为
+  `neoproot-um: guest init reported: ...`。
+
+因此 ext4 根上的 `-b` 要求 init 实现 **init protocol 2** 和 `binds` 特性。
+不支持该协议的老 `um-init` 会被明确拒绝，而不是静默跳过绑定。
+`tests/um-init-ext4.sh` 是参考实现，`tests/stability-um-backend.sh` 在构建
+镜像时会安装它。UM harness 自带的 `um-init` 也需要补上同样的两项，才能用于
+ext4 根上的 `-b`。
+
+### 网络（IPv4）
+
+`--net` 通过 `umnet` + `passt` 给 guest 提供真实 IPv4 网络：DHCP、DNS、ICMP、
+TCP 均可通，guest 退出码仍经 session 协议回传。`umnet`/`passt` 从 `$PATH`
+查找，也可以用 `NEOPROOT_UM_NET`/`NEOPROOT_UM_PASST` 指定；`--net-addr=`、
 `--net-gateway=` 分别覆盖客机地址与网关（默认 `10.0.2.15/24`、网关
 `10.0.2.2`）。只有显式给出 `--net-dns=<地址>` 时才向 guest 宣告 nameserver；
 默认由 `umnet` 读取宿主自己的解析器，`--net-dns=none` 则不宣告任何
-nameserver。运行被杀死或 guest panic 后不再遗留 `~/.uml/<umid>` 运行时目录：
-supervisor 会在它记录的内核进程消失后清理。
+nameserver。IPv6 不在该路径上：相关工作还在 UM harness 侧推进，neoproot 不
+暴露 `--net-ipv6` 选项。
+
+### 控制台、生命周期与退出状态
 
 guest 控制台连接调用者的终端，终端尺寸变化（SIGWINCH）会转发给 guest，因此从
-该模式启动的全屏程序能拿到正确的窗口大小。UML 后端仍处于实验阶段；hostfs 直接
-暴露宿主目录，不是安全隔离边界。
+该模式启动的全屏程序能拿到正确的窗口大小。
 
-### 后端选择与 `--` 分隔符
+`--timeout=SECONDS` 限制单次运行时长（默认 120 秒）。supervisor 会捕获
+SIGINT/SIGTERM/SIGHUP/SIGQUIT，用同一信号通知 UML 进程组，清理该进程组，并
+返回有明确含义的状态：
 
-不写 `--backend` 时保持原有 Neoproot 行为；`--backend=fast` 显式选择同一
-路径。`--backend=auto` 根据调用者的配置选择，并在 stderr 说明选了哪个：只有
+- guest 自身的退出码原样返回；
+- 超时返回 `124`；
+- 被转发的信号返回 `128 + 信号编号`（SIGTERM 为 `143`）；
+- guest session/init 失败返回 `125`，无法进入请求的工作目录返回 `126`。
+
+运行被杀死或 guest panic 后不再遗留 `~/.uml/<umid>` 运行时目录：supervisor
+会在它记录的内核进程消失后清理。
+
+### 当前边界
+
+- hostfs 直接暴露宿主路径，不是安全隔离边界。
+- UML 模式必须从未被跟踪的宿主进程启动，不能嵌套在 PRoot 或其他 sandbox 中。
+- guest 内核是单核（uniprocessor），没有 SMP。
+- guest 只运行 aarch64 用户态：内核构建时关闭 `CONFIG_COMPAT`，32 位 ARM
+  程序不能运行。
+- 网络目前只有 IPv4，没有 `--net-ipv6`。
+- 内核、stub、`um-init`、`umnet`、`passt` 必须来自配套的 linux-um-arm64
+  构建。
+- ext4 根目前只在 64 MB 和 256 MB 镜像上验证过，其他容量未测试。
+
+真机稳定性矩阵 18/18 PASS，覆盖 hostfs 带/不带 `--net`、guest 退出码 7 和 125、
+ext4 带/不带 `--net`、ext4 `--readonly`、持久与临时 COW、读写/只读绑定、
+旧 init 被拒绝、绑定目标缺失、`--timeout`、SIGTERM。详见
+[tests/stability-um-backend.sh](tests/stability-um-backend.sh)。
+
+## 后端选择与 `--` 分隔符
+
+不写 `--backend` 时使用默认 PRoot 后端；`--backend=fast` 显式选择同一路径。
+`--backend=auto` 根据调用者的配置选择，并在 stderr 说明选了哪个：只有
 kernel 与 stub 都已配置（`--kernel`/`--stub`，或非空的
 `NEOPROOT_UM_KERNEL`/`NEOPROOT_UM_STUB`）**且** 用 `-r`/`--rootfs`
 给了 rootfs 时才选 UML 后端，否则走默认 PRoot 路径。它不会去 `PATH` 或文件
-系统里探测内核——实验性后端只应在调用者明确配置后启用。
+系统里探测内核——可选后端只应在调用者明确配置后启用。
 
 `--` 分隔符在所有后端含义一致：
 
@@ -115,7 +193,24 @@ CLI 自己消费该分隔符、不再向下转发，因此不认识它的后端�
 supervisor 把分隔符补回（其语法需要）。不写 `--` 也可以，CLI 已经知道 guest
 命令从哪里开始。
 
-命令行接口遵循官方 PRoot 习惯。无需手动取消设置 `LD_PRELOAD`、`LD_LIBRARY_PATH` 或 `LD_BIND_NOW`；启动器会在进入 guest 前自动处理这些变量。
+## 为什么不做 per-syscall 混合
+
+很容易想到一种“正常系统调用走 neoproot、其余交给 UML”的模式。它在架构上
+不成立，因为两个后端处在不同层次：
+
+- PRoot 是 tracer。guest 进程本身就是宿主进程；`ptrace`（以及部分调用上的
+  seccomp USER_NOTIF）在系统调用边界拦住它，neoproot 改写路径、ID 和返回值，
+  然后才由宿主内核执行。
+- UML 模式里 guest 是真实内核。guest 的系统调用由 UML 内核处理，根本不会以
+  同一条 syscall 出现在宿主上，因此没有可被 neoproot 拦截、也没有可被按调用
+  分流的宿主系统调用。
+
+所以 per-syscall 拆分要么要求一侧看见它本来看不见的调用，要么要求一个今天
+不存在的内核接口。受支持的粒度是**调用/进程树粒度**：在命令启动时选定一个
+后端，这正是 `--backend=auto` 做的事。要做到更细，必须改动内核层，不属于
+neoproot 的范围。
+
+这不是“暂未实现”：该架构不允许这种拆分，不应把它当作待办功能再次提出。
 
 ## 性能依据
 

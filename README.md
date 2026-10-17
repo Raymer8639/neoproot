@@ -68,30 +68,41 @@ neoproot -0 -r /data/data/com.termux/files/home/rootfs \
 
 The command-line interface follows official PRoot conventions. You do not need to manually unset `LD_PRELOAD`, `LD_LIBRARY_PATH`, or `LD_BIND_NOW`; the launcher handles those variables before entering the guest.
 
-## First-stage UM backend
+## UML backend (the optional second execution backend)
 
-The first-stage UML backend is selected explicitly with `--backend=um`. It
-starts a separate UML guest kernel, so it must be launched from an untraced
-Termux host process rather than from inside an existing PRoot or sandbox.
+neoproot has two execution backends. The default PRoot tracer -- selected when
+`--backend` is omitted, or explicitly with `--backend=fast` -- translates paths
+and user/group IDs with `ptrace` (plus optional seccomp USER_NOTIF) and needs no
+root. The UML backend is the optional second execution backend: `--backend=um`
+boots a separate UML guest kernel through the `neoproot-um` supervisor, so the
+command runs on a real Linux kernel instead of behind syscall translation. It
+must be started from an untraced Termux host process, not from inside an
+existing PRoot container or sandbox.
 
-The backend accepts either a host directory or an ext4 image passed with `-r`
-or `--rootfs`. A directory is used as the UML `hostfs` root. An ext4 image is
-mounted as the UML guest root with a per-run temporary COW file that is
-deleted when the run ends; `--readonly` uses the image directly without a COW
-file. `--cow-file=PATH` names the COW file instead (`PATH` must be absolute):
-it is created when it does not exist, kept after the run, and reused by the
-next run, so a second run sees what the first one wrote. The base image is
-never written. A COW file is tied to the image it was created for (its header
-records the image's size and mtime), and a run refuses to start when the file
-was made for a different image; `--cow-file` and `--readonly` are mutually
-exclusive. The UML kernel and `stub_exe` can be supplied with command-line
-options to `neoproot-um`, or through these environment variables:
+`-r`/`--rootfs` accepts either a host directory or an ext4 image. A directory is
+exported to the guest as UML `hostfs`. An ext4 image is mounted as the guest root
+with a per-run temporary COW file that is deleted when the run ends; the base
+image is never written. `--cow-file=PATH` keeps the COW file at `PATH` instead
+(`PATH` must be absolute): it is created when missing, reused by the next run --
+so that run sees what the previous one wrote -- and kept after the run.
+`--cow-file` and `--readonly` are mutually exclusive; with `--readonly` an ext4
+image is opened directly without a COW file. A COW file is tied to the image it
+was created for (its header records the image's size and mtime), and a run
+refuses to start when the file was made for a different image. The UML kernel
+and `stub_exe` can be supplied with command-line options to `neoproot-um`, or
+through these environment variables:
 
 ```sh
 export NEOPROOT_UM_KERNEL=/path/to/linux-bionic
 export NEOPROOT_UM_STUB=/path/to/stub_exe
 neoproot --backend=um -r /path/to/rootfs -- /bin/sh
 ```
+
+Build the kernel and stub with `build-bionic.sh` from the linux-um-arm64 tree,
+and keep them matched with the `um-init`, `umnet` and `passt` they are used
+with; a mismatched set is not supported.
+
+### Binds
 
 Hostfs exposes the selected host directory directly to the guest; it is not a
 security isolation boundary. Bind sources already inside that root can be
@@ -102,11 +113,12 @@ Ext4 mode accepts the same `-b host:guest[:ro]` syntax, with host paths as
 sources: an ext4 guest has its own root, so there is no "inside the rootfs" to
 restrict a source to. The guest init mounts each source -- itself a hostfs
 mount, made read-only for `:ro` -- and a directory target must exist, or be
-creatable, inside the guest. Ext4 mode requires `/um-init` from the matching UM
-harness. The supervisor passes the `session-v1` protocol parameters after
-mounting the guest's proc filesystem; the init script mounts the temporary
-hostfs session at `/run/neoproot` and returns the command status through that
-mount.
+creatable, inside the guest; with `--readonly` the image cannot be modified, so
+a target there must already exist. Ext4 mode requires `/um-init` from the
+matching UM harness. The supervisor passes the `session-v1` protocol
+parameters after mounting the guest's proc filesystem; the init script mounts
+the temporary hostfs session at `/run/neoproot` and returns the command status
+through that mount.
 
 Binds need an init that knows how to mount them, and that is carried as an
 explicit protocol feature rather than assumed:
@@ -125,39 +137,78 @@ explicit protocol feature rather than assumed:
   `/run/neoproot/protocol-error` and printed as `neoproot-um: guest init
   reported: ...`.
 
+On an ext4 root, `-b` therefore requires an init implementing **init protocol
+2** with the `binds` feature. An init that predates it -- including a legacy
+`um-init` -- makes the run fail with `neoproot-um: the guest /um-init does not
+support binds`; the command is not run with its binds silently missing.
 [tests/um-init-ext4.sh](tests/um-init-ext4.sh) is the reference implementation
 of that init, and [tests/stability-um-backend.sh](tests/stability-um-backend.sh)
 installs it into the images it builds. The UM harness's own `um-init` needs the
 same two additions before it can be used with `-b` on an ext4 root.
 
-`--net` gives the guest a real network through `umnet` + `passt`: DHCP, DNS,
-ICMP and TCP work, and the guest's exit status still comes back through the
-session protocol. `umnet` and `passt` are taken from `$PATH`, or from
+### Network
+
+`--net` gives the guest a real IPv4 network through `umnet` + `passt`: DHCP,
+DNS, ICMP and TCP work, and the guest's exit status still comes back through
+the session protocol. `umnet` and `passt` are taken from `$PATH`, or from
 `NEOPROOT_UM_NET` / `NEOPROOT_UM_PASST`. `--net-addr=` and
 `--net-gateway=` override the guest address and gateway (default
 `10.0.2.15/24` via `10.0.2.2`). The guest is told a nameserver only when
 `--net-dns=<address>` is given with `--net`; by default `umnet` reads the
-host's own resolver, and `--net-dns=none` announces none. A run no longer
-leaves a `~/.uml/<umid>` runtime directory behind when it is killed or panics:
-the supervisor removes the directory once the kernel it names is gone.
+host's own resolver, and `--net-dns=none` announces none. IPv6 is not
+available on this path: the work is in the UM harness, and neoproot does not
+expose a `--net-ipv6` option.
+
+### Console, lifetime and exit status
 
 The guest console is attached to the caller's terminal, and terminal resizes
-are forwarded to the guest, so a full-screen tool started this way sees the
-right window size. The backend is still experimental and has to be requested
-explicitly, or selected by `auto` (below).
+(SIGWINCH) are forwarded to the guest, so a full-screen tool started this way
+sees the right window size.
 
-### Backend selection and the command separator
+`--timeout=SECONDS` bounds a run (default 120). The supervisor catches
+SIGINT/SIGTERM/SIGHUP/SIGQUIT, signals the UML process group with them, cleans
+that group up, and returns a meaningful status:
 
-When `--backend` is omitted, the existing Neoproot behavior remains the
-default; `--backend=fast` selects that same path explicitly.
+- the guest's own exit status is returned unchanged;
+- a timed-out run returns `124`;
+- a forwarded signal returns `128 + signal` (`143` for SIGTERM);
+- a guest session/init failure returns `125`, and failure to enter the
+  requested working directory returns `126`.
+
+A killed or panicking run no longer leaves a `~/.uml/<umid>` runtime directory
+behind: the supervisor removes the directory once the kernel it names is gone.
+
+### Current limits
+
+- Hostfs exposes host paths directly and is not a security isolation boundary.
+- Start UML mode from an untraced host process; it cannot be nested inside
+  PRoot or another sandbox.
+- The guest kernel is uniprocessor (no SMP).
+- The guest runs aarch64 userland only: the kernel is built with
+  `CONFIG_COMPAT` off, so 32-bit ARM binaries do not run.
+- Networking is IPv4 only; there is no `--net-ipv6`.
+- Kernel, stub, `um-init`, `umnet` and `passt` must come from matching
+  linux-um-arm64 builds.
+- Ext4 roots have been exercised at 64 MB and 256 MB; other sizes are untested.
+
+The on-device stability matrix is 18/18 PASS, covering hostfs with and without
+`--net`, guest exit status 7 and 125, ext4 with and without `--net`, ext4
+`--readonly`, persistent and temporary COW files, read-write and read-only
+binds, refusal of a legacy init, a missing bind target, `--timeout`, and SIGTERM.
+See [tests/stability-um-backend.sh](tests/stability-um-backend.sh).
+
+## Backend selection and the command separator
+
+When `--backend` is omitted, neoproot uses the default PRoot backend;
+`--backend=fast` selects that same path explicitly.
 `--backend=auto` decides from what the caller configured and prints the choice
 to stderr: it selects the UML backend only when a kernel **and** a stub are
 configured -- through `--kernel`/`--stub` (forwarded to the UML supervisor,
 or given to `neoproot-um` directly) or a non-empty `NEOPROOT_UM_KERNEL` /
 `NEOPROOT_UM_STUB` -- **and** a rootfs is given with `-r`/`--rootfs`.
 Otherwise it uses the default PRoot path. It never probes `PATH` or the
-filesystem for a kernel: an experimental backend only switches itself on when
-the caller has set it up.
+filesystem for a kernel: the optional backend only switches itself on when the
+caller has set it up.
 
 The `--` separator means the same thing on every backend:
 
@@ -171,6 +222,29 @@ different `--backend` -- which is what `auto` needs. The UML dispatcher
 restores the delimiter for the UML supervisor, whose own syntax requires it.
 Omitting `--` also works, since the CLI already knows where the guest command
 begins.
+
+## Why there is no per-syscall hybrid
+
+It is tempting to ask for a mode that "runs normal syscalls through neoproot and
+sends the rest to UML". That cannot work, for a structural reason: the two
+backends operate at different levels.
+
+- PRoot is a tracer. The guest process is a host process; `ptrace` (and, for
+  selected calls, seccomp USER_NOTIF) stops it at the syscall boundary, and
+  neoproot rewrites paths, IDs and results before the host kernel runs the call.
+- In UML mode the guest is a real kernel. The guest's syscalls are serviced
+  inside the UML kernel and never appear as the same syscall on the host, so
+  there is no intercepted host syscall to hand to neoproot or to route
+  selectively.
+
+A per-syscall split would therefore need one side to see calls it cannot see, or
+a kernel-level interface that does not exist today. The supported granularity is
+per invocation, or per process tree: choose a backend when the command starts.
+That is exactly what `--backend=auto` does. Making this finer would require
+deeper kernel changes and is outside neoproot.
+
+This is not "not implemented yet": the architecture does not admit it, so it
+should not be proposed again as a backlog item.
 
 ## Performance evidence
 
