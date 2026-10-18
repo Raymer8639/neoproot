@@ -1828,7 +1828,17 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
                               "    ip -6 addr add ") < 0)
                 goto failed;
             if (config->net_ipv6_addr[0] != '\0') {
+                /*
+                 * "ip addr add" needs a prefix length.  A bare address is a
+                 * natural thing to pass, and without this it is accepted here
+                 * and then rejected by ip inside the guest, where every error
+                 * is discarded -- leaving a guest with IPv6 enabled and no
+                 * address on it.  Append the same /64 umnet defaults to.
+                 */
                 if (um_write_shell_word(fd, config->net_ipv6_addr) < 0)
+                    goto failed;
+                if (strchr(config->net_ipv6_addr, '/') == NULL &&
+                    um_write_text(fd, "/64") < 0)
                     goto failed;
             } else if (um_write_text(fd, "fd00::2/64") < 0)
                 goto failed;

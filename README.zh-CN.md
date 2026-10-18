@@ -163,14 +163,14 @@ nameserver。
 down 的、没有地址也没有路由。加上 `--net-auto` 就由这一侧替你配好：先向
 DHCP 服务端跑 `udhcpc`，没有客户端或没拿到租约时用
 `--net-addr=`/`--net-gateway=` 做静态回退。它不会让运行失败——网络没起来的
-容器仍然是能用的容器。`--net-auto` 蕴含 `--net`，且需要 hostfs 根
-（ext4 根由它自己的 `/um-init` 负责配置）。
+容器仍然是能用的容器。`--net-auto` 蕴含 `--net`，两种根都适用：配置脚本由
+supervisor 生成，无论 hostfs 还是 ext4 都由 guest 的 init 执行。
 
 ```sh
 neoproot --backend=um -r /path/to/rootfs --net-auto -- /bin/sh
 ```
 
-hostfs 根下 guest 的 loopback 会自动起好，`127.0.0.1` 无需额外设置即可用；
+guest 的 loopback 每次运行都会自动起好，`127.0.0.1` 无需额外设置即可用；
 其余网络才依赖 `--net`。
 
 
