@@ -79,8 +79,37 @@ command runs on a real Linux kernel instead of behind syscall translation. It
 must be started from an untraced Termux host process, not from inside an
 existing PRoot container or sandbox.
 
+### Root filesystem: ext4 by default for the UML backend
+
+The UML backend is meant to be used with an **ext4 image + COW file**; the
+default in the launcher and in the documentation examples. Measured on the
+phone this was developed on, an ext4 root is faster than a hostfs root for
+sequential IO -- 295 vs 242 MB/s for a 64 MiB write, 1.1 GB/s vs 672 MB/s for a
+64 MiB read -- because hostfs pays a user-space round trip per operation while
+the ext4 block layer batches inside the guest. Metadata-heavy work is the other
+way (300 renames: 0.19 s hostfs vs 0.26 s ext4) but the absolute difference is a
+few tens of milliseconds.
+
+The decisive reason is correctness, not speed: a hostfs root passes host
+ownership through unchanged, so files appear in the guest with the Termux app
+uid and `chown` cannot succeed (the host process has no `CAP_CHOWN`). That
+makes `apk add` print `Failed to set ownership ... Operation not permitted` for
+every file. An ext4 root has real ownership inside the guest, so package
+management works: `apk add sudo` completes with `OK: 10 MiB in 17 packages`.
+
+A hostfs root remains available for the UML backend with `--hostfs` (the
+launcher's flag), and is still what the PRoot-based backends use, because path
+translation needs a directory tree rather than a filesystem image.
 `-r`/`--rootfs` accepts either a host directory or an ext4 image. A directory is
-exported to the guest as UML `hostfs`. An ext4 image is mounted as the guest root
+exported to the guest as UML `hostfs`. A hostfs root is not isolated: file
+ownership is the host's, passed through unchanged, so files owned by the Termux
+app uid appear with that uid inside the guest and `chown` cannot succeed -- the
+host process has no `CAP_CHOWN`, and changing a file's owner to another uid is
+exactly what that capability is for. Anything that only installs files works
+(writing, creating, deleting, chmod); anything that must re-own them does not,
+which includes `apk add` (it reports `Failed to set ownership ... Operation not
+permitted` for each file and still exits having written them). Use an ext4 image
+when guest-side ownership matters. An ext4 image is mounted as the guest root
 with a per-run temporary COW file that is deleted when the run ends; the base
 image is never written. `--cow-file=PATH` keeps the COW file at `PATH` instead
 (`PATH` must be absolute): it is created when missing, reused by the next run --
@@ -170,6 +199,10 @@ configured by its own `/um-init`).
 ```sh
 neoproot --backend=um -r /path/to/rootfs --net-auto -- /bin/sh
 ```
+
+The guest's loopback is brought up for every hostfs run, so `127.0.0.1` works
+without any extra setup; only the rest of the network depends on `--net`.
+
 
 IPv6 is available with `--net-ipv6`, which tells `umnet` to start its second,
 IPv6-only `passt` helper:

@@ -24,6 +24,32 @@
   `--net-auto` runs `udhcpc` first and falls back to the configured static
   address and gateway; neither failure stops the run. Hostfs roots only --
   an ext4 root is configured by its own `/um-init`.
+- Bring the guest's loopback up for every hostfs run. Nothing did it before: the
+  kernel does not configure interfaces and the wrapper is the guest's init, so
+  `lo` stayed down and anything that talks to itself over `127.0.0.1` failed with
+  `Network unreachable` -- which reads like a broken network path rather than a
+  missing interface.
+- Document that a hostfs root passes host ownership through unchanged. Files
+  appear in the guest with the Termux app uid and `chown` cannot succeed (no
+  `CAP_CHOWN` on the host side), so `apk add` reports `Failed to set ownership`
+  for each file it installs; an ext4 root is the answer when guest-side ownership
+  matters.
+- Make the UML backend's default root an **ext4 image with a COW file**, and
+  drop the hostfs-only restriction on `--net-auto`, the loopback bring-up and
+  the `setsid -c` session wrapper so all three work on ext4 too. Hostfs remains
+  available with `--hostfs` and is still what the PRoot backends use.
+  Reason, measured on the phone: an ext4 root is faster for sequential IO
+  (295 vs 242 MB/s write, 1.1 GB/s vs 672 MB/s read) and -- the part that
+  matters -- it gives the guest real file ownership, so `chown` succeeds and
+  `apk add` works instead of printing `Failed to set ownership` per file.
+- Mount `devpts` in the ext4 reference init (and the UM harness init).
+  `devtmpfs` provides `/dev/ptmx` but not `/dev/pts`, so allocating a pty failed
+  with ENXIO: `sudo: unable to allocate pty: No such file or directory`, and
+  the same would hit sshd, screen and any terminal multiplexer.
+- `--net-ipv6` together with `--net-auto` now configures the guest's IPv6
+  address and route as well. The auto path used to return as soon as DHCP
+  succeeded, so the second, IPv6-only helper was started but the guest never
+  got an address on it.
 
 ## [v5.12.0] - 2026-10-17
 

@@ -1451,18 +1451,6 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
         fprintf(stderr, "neoproot-um: invalid hostfs mode for ext4 image\n");
         return -1;
     }
-    /*
-     * --net-auto means "this side configures the guest", which only works when
-     * this side runs the guest's command.  With an ext4 image /um-init is PID 1
-     * and owns the session, including its network setup, so accepting the
-     * option there would promise something nothing implements.
-     */
-    if (config->network_auto && config->rootfs_kind != UM_ROOTFS_HOSTFS) {
-        fprintf(stderr,
-                "neoproot-um: --net-auto requires a hostfs rootfs "
-                "(an ext4 root configures itself through /um-init)\n");
-        return -1;
-    }
     if (config->network) {
         const char *umnet = getenv("NEOPROOT_UM_NET");
         const char *passt = getenv("NEOPROOT_UM_PASST");
@@ -1713,6 +1701,27 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
                               "test -c /dev/null || um_fail 125\n") < 0)
         goto failed;
 
+    /*
+     * Bring the loopback up.  Nothing else does it: the kernel does not
+     * configure interfaces, and this wrapper is the guest's init.  Without lo,
+     * 127.0.0.1 is unreachable and anything that talks to itself over it fails
+     * with "Network unreachable" -- which looks like a networking bug rather
+     * than a missing interface.
+     *
+     * Runs for both root kinds: the wrapper is executed inside the guest either
+     * way (as PID 1 for hostfs, from /um-init for an ext4 image), and neither
+     * the kernel nor a stock /um-init brings lo up.  Before --net-auto, so that
+     * function only has to deal with vec0.  Best effort: a guest without an ip
+     * tool still starts.
+     */
+    if (um_write_text(fd,
+                      "if command -v ip >/dev/null 2>&1; then\n"
+                      "    ip link set lo up 2>/dev/null\n"
+                      "elif command -v ifconfig >/dev/null 2>&1; then\n"
+                      "    ifconfig lo up 2>/dev/null\n"
+                      "fi\n") < 0)
+        goto failed;
+
     if (um_write_text(fd, "unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW "
                          "NEOPROOT_MEMFD_LOADER NEOPROOT_UNSET_DONE "
                          "BASH_ENV ENV CDPATH IFS\n"
@@ -1776,7 +1785,7 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
      * did not come up is still a container, and refusing to start would take
      * the shell away for a problem the user can see and fix.
      */
-    if (config->network_auto && !ext4_rootfs) {
+    if (config->network_auto) {
         if (um_write_text(fd,
                           "um_net_auto() {\n"
                           "    [ -e /proc/net/dev ] || return 0\n"
@@ -1785,23 +1794,49 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
                           "        return 0\n"
                           "    fi\n"
                           "    ip link set vec0 up 2>/dev/null\n"
-                          "    if command -v udhcpc >/dev/null 2>&1; then\n"
-                          "        if udhcpc -n -q -t 3 -T 1 -i vec0 >/dev/null 2>&1; then\n"
-                          "            return 0\n"
-                          "        fi\n"
-                          "    fi\n"
-                          "    ip addr add ") < 0)
+                          "    if command -v udhcpc >/dev/null 2>&1 &&\n"
+                          "       udhcpc -n -q -t 3 -T 1 -i vec0 >/dev/null 2>&1; then\n"
+                          "        :\n"
+                          "    else\n"
+                          "        ip addr add ") < 0)
             goto failed;
         if (um_write_text(fd, config->net_addr) < 0 ||
             um_write_text(fd, "/") < 0 ||
             um_write_text(fd, config->net_mask) < 0 ||
             um_write_text(fd, " dev vec0 2>/dev/null\n"
-                              "    ip route add default via ") < 0)
+                              "        ip route add default via ") < 0)
             goto failed;
         if (um_write_text(fd, config->net_gateway) < 0 ||
             um_write_text(fd, " dev vec0 2>/dev/null\n"
-                              "}\n"
-                              "um_net_auto\n") < 0)
+                              "    fi\n") < 0)
+            goto failed;
+        /*
+         * IPv6 is not DHCP: umnet runs a second, IPv6-only passt whose guest
+         * side has a fixed address and a link-local gateway.  When the caller
+         * asked for it, put it on vec0 here -- otherwise --net-ipv6 gives the
+         * guest a stack with no address and every v6 command fails.
+         */
+        if (config->net_ipv6) {
+            if (um_write_text(fd,
+                              "    ip -6 addr add ") < 0)
+                goto failed;
+            if (config->net_ipv6_addr[0] != '\0') {
+                if (um_write_text(fd, config->net_ipv6_addr) < 0)
+                    goto failed;
+            } else if (um_write_text(fd, "fd00::2/64") < 0)
+                goto failed;
+            if (um_write_text(fd, " dev vec0 2>/dev/null\n"
+                              "    ip -6 route add default via ") < 0)
+                goto failed;
+            if (config->net_ipv6_gw[0] != '\0') {
+                if (um_write_text(fd, config->net_ipv6_gw) < 0)
+                    goto failed;
+            } else if (um_write_text(fd, "fe80::1") < 0)
+                goto failed;
+            if (um_write_text(fd, " dev vec0 2>/dev/null\n") < 0)
+                goto failed;
+        }
+        if (um_write_text(fd, "}\num_net_auto\n") < 0)
             goto failed;
     }
 
@@ -1830,14 +1865,12 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
      * new session would have no controlling terminal at all, which is worse
      * than what we started with.
      *
-     * This only applies to the hostfs path.  With an ext4 image the guest's own
-     * /um-init is PID 1 and owns the console; the command it runs inherits
-     * whatever /um-init established.  Old roots have no setsid, so a missing one
-     * must not fail the run: it just keeps the old behaviour.
+     * The same reasoning holds for an ext4 root: /um-init is PID 1 there and
+     * does not call setsid() either, so the command it runs has the same
+     * missing controlling terminal.  Old roots without setsid keep the old
+     * behaviour rather than failing the run.
      */
-    if (!ext4_rootfs &&
-        um_write_text(fd,
-                      "um_session_leader() {\n"
+    if (um_write_text(fd, "um_session_leader() {\n"
                       "    if command -v setsid >/dev/null 2>&1; then\n"
                       "        setsid -c \"$@\"\n"
                       "    else\n"
@@ -1854,7 +1887,7 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
             goto failed;
     }
     if (ext4_rootfs) {
-        if (um_write_text(fd, "\n\"$@\"\nexit $?\n") < 0)
+        if (um_write_text(fd, "\num_session_leader \"$@\"\nexit $?\n") < 0)
             goto failed;
     } else if (um_write_text(fd,
                              "\num_session_leader \"$@\"\nrc=$?\n"

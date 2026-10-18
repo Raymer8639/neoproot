@@ -76,8 +76,28 @@ neoproot 有两个执行后端。默认是 PRoot tracer：不写 `--backend` 或
 运行在真实 Linux 内核上，而不是经过系统调用翻译。它必须从未被跟踪的 Termux
 宿主进程启动，不能在已有 PRoot 容器或 sandbox 内嵌套运行。
 
+### 根文件系统：UML 后端默认用 ext4
+
+UML 后端应当配 **ext4 镜像 + COW 文件**使用（启动脚本与本文示例都以此为默认）。
+在这台开发机上实测，ext4 根的顺序 IO 比 hostfs 更快 —— 64 MiB 写入 295 vs
+242 MB/s、读取 1.1 GB/s vs 672 MB/s —— 因为 hostfs 每次操作要往返用户态，而 ext4
+的块层在 guest 内核里成批提交。元数据密集操作相反（300 次 rename：hostfs 0.19 s、
+ext4 0.26 s），但绝对差只有几十毫秒。
+
+决定性的理由不是速度而是正确性：hostfs 根把宿主属主原样透传，guest 里看到的还是
+Termux 应用 uid，而 `chown` 不会成功（宿主进程没有 `CAP_CHOWN`），于是 `apk add`
+每个文件都报 `Failed to set ownership ... Operation not permitted`。ext4 根在 guest
+内有真实属主，包管理因此可用：`apk add sudo` 完成并输出 `OK: 10 MiB in 17 packages`。
+
+UML 后端仍可用 `--hostfs`（启动脚本的参数）回到 hostfs 根；PRoot 系后端本来就只能
+用目录（路径翻译需要目录树，不能直接吃文件系统镜像）。
 `-r`/`--rootfs` 既可以是宿主目录，也可以是 ext4 镜像。目录以 UML `hostfs`
-导出给 guest；ext4 镜像作为 guest 根挂载，每次运行使用独立的临时 COW 文件，
+导出给 guest，**这种根不是隔离沙箱**：文件属主用的是宿主真实 uid，原样透传给
+guest —— Termux 应用 uid 拥有的文件在 guest 里就显示成那个 uid，而 `chown` 不会
+成功（宿主进程没有 `CAP_CHOWN`，而改属主正是这个能力的作用）。只写文件的安装
+流程（创建/写入/删除/chmod）正常；需要重新 chown 的不行，`apk add` 就属于后者
+（每个文件报 `Failed to set ownership ... Operation not permitted`，但文件已经写
+进去了）。需要 guest 侧属主语义时用 ext4 镜像。ext4 镜像作为 guest 根挂载，每次运行使用独立的临时 COW 文件，
 运行结束即删除，基础镜像永远不会被写入。`--cow-file=PATH` 改为把 COW 文件
 保存在 `PATH`（必须是绝对路径）：文件不存在时创建，下次运行继续复用——因此
 下一次能看到上一次写入的内容——运行结束后保留。COW 文件与创建它时的镜像
@@ -149,6 +169,10 @@ DHCP 服务端跑 `udhcpc`，没有客户端或没拿到租约时用
 ```sh
 neoproot --backend=um -r /path/to/rootfs --net-auto -- /bin/sh
 ```
+
+hostfs 根下 guest 的 loopback 会自动起好，`127.0.0.1` 无需额外设置即可用；
+其余网络才依赖 `--net`。
+
 
 `--net-ipv6` 让 `umnet` 启动它的第二个、纯 IPv6 的 `passt` helper，从而给
 guest 提供 IPv6：

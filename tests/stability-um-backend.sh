@@ -99,11 +99,39 @@ fi
 
 # --- helpers -------------------------------------------------------------
 
+# A UML run started outside this matrix -- an interactive session the developer
+# left open -- looks exactly like a survivor.  Record what is already running
+# before the first case and subtract it, so the check judges this run only.
+baseline_processes=
+
+# Count only processes this matrix is not already aware of.  $1 is the
+# baseline captured before the first case: a map of pid -> comm.
 leftover_processes() {
 	for stat in /proc/[0-9]*/comm; do
 		comm=$(cat "$stat" 2>/dev/null) || continue
 		case "$comm" in
-		linux-bionic | umnet | passt-bionic) printf '%s ' "$comm" ;;
+		linux-bionic | umnet | passt-bionic) ;;
+		*) continue ;;
+		esac
+		pid=${stat#/proc/}
+		pid=${pid%/comm}
+		if [ -n "${baseline_processes:-}" ] &&
+		   printf '%s\n' "$baseline_processes" | grep -qx "$pid"; then
+			continue
+		fi
+		printf '%s ' "$comm"
+	done
+}
+
+# Snapshot the pids of our process names before any case runs.
+snapshot_processes() {
+	for stat in /proc/[0-9]*/comm; do
+		comm=$(cat "$stat" 2>/dev/null) || continue
+		case "$comm" in
+		linux-bionic | umnet | passt-bionic)
+			pid=${stat#/proc/}
+			printf '%s\n' "${pid%/comm}"
+			;;
 		esac
 	done
 }
@@ -476,6 +504,8 @@ check_missing_target() {
 	fi
 	check_image_unchanged
 }
+
+baseline_processes=$(snapshot_processes)
 
 if command -v mke2fs >/dev/null 2>&1 && [ -x "$bbstatic" ] &&
 	[ -f "$ext4_init_source" ]; then
