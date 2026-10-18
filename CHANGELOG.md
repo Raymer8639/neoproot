@@ -3,9 +3,9 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
-## [Unreleased]
+## [v5.13.0] - 2026-10-18
 
-**UML console fixes and `--net-auto`**
+**UML backend defaults to ext4, console fixes, `--net-auto`**
 
 - Put the caller's terminal into raw mode while a UML run owns it. Three
   symptoms had one cause: the guest's line editor asks for the cursor
