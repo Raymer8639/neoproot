@@ -301,15 +301,13 @@ if grep -q -- "--net-auto" "$argv_file"; then
 	fail "--net-auto leaked into umnet's argv"
 fi
 
-# On an ext4 root --net-auto is refused before any helper runs: /um-init owns
-# that session, network included.  The run must not reach umnet at all.
-rm -f "$argv_file"
-TMPDIR="$temporary_directory" "$um_supervisor" \
-	--kernel="$temporary_directory/kernel" \
-	--stub="$temporary_directory/kernel" \
-	--rootfs="$image" --net-auto -- /bin/true >/dev/null 2>&1 || true
-if [ -f "$argv_file" ]; then
-	fail "umnet ran for --net-auto on an ext4 rootfs"
+# --net-auto works for an ext4 root too: the wrapper that configures the guest
+# runs from /um-init, so the same option has to start the helper there and the
+# kernel vector has to carry the session parameters.
+run_with_net --rootfs="$image" --net-auto
+require_argument "neoproot_session="
+if grep -q -- "--net-auto" "$argv_file"; then
+	fail "--net-auto leaked into umnet's argv on ext4"
 fi
 
 # --net must not change the non-network path: without it the kernel is exec'd

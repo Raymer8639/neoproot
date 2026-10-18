@@ -99,11 +99,57 @@ fi
 
 # --- helpers -------------------------------------------------------------
 
+# A UML run started outside this matrix -- an interactive session the developer
+# left open -- looks exactly like a survivor.  Record the matching pids before
+# the first case and subtract them, so the check judges this run only.
+baseline_processes=
+
+# Count only processes this matrix did not start: the baseline is the pid list
+# captured before the first case.
+#
+# A terminated bridge needs a moment to exit: it forwards SIGTERM to its
+# helpers and reaps them, which is not instantaneous.  Reading /proc the
+# instant run_case() returns would therefore report a process that is on its
+# way out, so the check polls for a short grace period before judging.
+# Wait up to ~5 s for the process list to stop matching, then report.
+# The teardown forwards SIGTERM, reaps each helper and removes the umid
+# directory; under load that can take longer than the first read suggests.
+settled_leftover_processes() {
+	attempt=0
+	while [ "$attempt" -lt 50 ]; do
+		found=$(leftover_processes)
+		[ -z "$found" ] && return 0
+		sleep 0.1 2>/dev/null || sleep 1
+		attempt=$((attempt + 1))
+	done
+	printf '%s' "$found"
+}
 leftover_processes() {
 	for stat in /proc/[0-9]*/comm; do
 		comm=$(cat "$stat" 2>/dev/null) || continue
 		case "$comm" in
-		linux-bionic | umnet | passt-bionic) printf '%s ' "$comm" ;;
+		linux-bionic | umnet | passt-bionic) ;;
+		*) continue ;;
+		esac
+		pid=${stat#/proc/}
+		pid=${pid%/comm}
+		if [ -n "${baseline_processes:-}" ] &&
+		   printf '%s\n' "$baseline_processes" | grep -qx "$pid"; then
+			continue
+		fi
+		printf '%s ' "$comm"
+	done
+}
+
+# Snapshot the pids of our process names before any case runs.
+snapshot_processes() {
+	for stat in /proc/[0-9]*/comm; do
+		comm=$(cat "$stat" 2>/dev/null) || continue
+		case "$comm" in
+		linux-bionic | umnet | passt-bionic)
+			pid=${stat#/proc/}
+			printf '%s\n' "${pid%/comm}"
+			;;
 		esac
 	done
 }
@@ -158,7 +204,7 @@ EOF
 
 	umid_after=$(umid_count)
 	runtime_after=$(runtime_dirs)
-	leftover=$(leftover_processes)
+	leftover=$(settled_leftover_processes)
 
 	printf '%-22s ' "$name"
 
@@ -212,7 +258,11 @@ i=1
 while [ "$i" -le "$iterations" ]; do
 	[ "$iterations" -gt 1 ] && echo "--- iteration $i/$iterations ---"
 
-	# hostfs, no network: the plainest path, and the one a user hits first.
+	# Snapshot before any case runs: processes this matrix starts are the only
+# ones the survivor check may judge, and a leaked one must not become baseline.
+baseline_processes=$(snapshot_processes)
+
+# hostfs, no network: the plainest path, and the one a user hits first.
 	run_case hostfs 0 hostfs-ok --rootfs="$netroot" --hostfs
 
 	# hostfs with the bridge: exercises the umnet handoff and teardown.
@@ -636,7 +686,7 @@ EOF
 		problem "rc=$actual_rc, expected 124"
 		ok=0
 	fi
-	leftover=$(leftover_processes)
+	leftover=$(settled_leftover_processes)
 	if [ -n "$leftover" ]; then
 		problem "processes survived the timeout: $leftover"
 		ok=0
@@ -679,7 +729,7 @@ EOF
 		problem "rc=$actual_rc, expected 143 (128+SIGTERM)"
 		ok=0
 	fi
-	leftover=$(leftover_processes)
+	leftover=$(settled_leftover_processes)
 	if [ -n "$leftover" ]; then
 		problem "processes survived SIGTERM: $leftover"
 		ok=0
