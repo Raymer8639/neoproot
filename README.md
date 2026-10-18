@@ -157,6 +157,20 @@ the session protocol. `umnet` and `passt` are taken from `$PATH`, or from
 `--net-dns=<address>` is given with `--net`; by default `umnet` reads the
 host's own resolver, and `--net-dns=none` announces none.
 
+`--net` builds the **link**, not the guest's configuration of it: in UML the
+guest owns its interfaces, and the DHCP server `passt` runs only answers a
+client that asks. So `--net -- /bin/sh` alone comes up with `vec0` down, no
+address and no route. Add `--net-auto` to have the guest side configured for
+you -- `udhcpc` against the DHCP server first, then a static fallback using
+`--net-addr=`/`--net-gateway=` if there is no client or no lease. It never
+fails the run: a guest without a working network still starts its shell.
+`--net-auto` implies `--net` and needs a hostfs root (an ext4 root is
+configured by its own `/um-init`).
+
+```sh
+neoproot --backend=um -r /path/to/rootfs --net-auto -- /bin/sh
+```
+
 IPv6 is available with `--net-ipv6`, which tells `umnet` to start its second,
 IPv6-only `passt` helper:
 
@@ -184,6 +198,19 @@ IPv4 only and says so.
 The guest console is attached to the caller's terminal, and terminal resizes
 (SIGWINCH) are forwarded to the guest, so a full-screen tool started this way
 sees the right window size.
+
+The terminal is put into raw mode for the duration of the run and restored
+afterwards. Without that, the guest's own line editor asks for the cursor
+position (`ESC [ 6 n`), the answer is echoed back and `^[[r;cR` appears on
+screen; typed input is echoed twice; and control characters are interpreted
+by the host terminal before the guest sees them. Pipes and redirected files
+are left untouched.
+
+On a hostfs root the guest command runs under a fresh session (`setsid -c`),
+so the console is its controlling terminal: `/dev/tty` opens, login shells
+stop printing `can't access tty; job control turned off`, and Ctrl-C / Ctrl-Z
+reach the guest's foreground process. An ext4 root is owned by its own
+`/um-init`, which does the same for the session it starts.
 
 `--timeout=SECONDS` bounds a run (default 120). The supervisor catches
 SIGINT/SIGTERM/SIGHUP/SIGQUIT, signals the UML process group with them, cleans

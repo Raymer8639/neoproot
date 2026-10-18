@@ -224,6 +224,14 @@ Regular options
     only when ``--net-dns=<address>`` is given; otherwise ``umnet`` reads
     the host's resolver, and ``--net-dns=none`` announces none.
 
+    ``--net`` builds the link, not the guest's configuration of it: in UML the
+    guest owns its interfaces, and the DHCP server ``passt`` runs only answers
+    a client that asks.  ``--net-auto`` has the guest side configured for the
+    caller -- ``udhcpc`` against that server first, then a static fallback
+    using ``--net-addr=``/``--net-gateway=`` -- and never fails the run.  It
+    implies ``--net`` and needs a hostfs root; an ext4 root is configured by
+    its own ``/um-init``.
+
     ``--net-ipv6`` also gives the guest IPv6, through the second, IPv6-only
     ``passt`` helper that ``umnet`` starts.  ``--net-ipv6-addr=A[/P]`` and
     ``--net-ipv6-gw=G`` set the guest address and gateway (default
@@ -238,7 +246,13 @@ Regular options
     its IPv6 half on Android.
 
     The guest console is the caller's terminal, and terminal resizes
-    (SIGWINCH) are forwarded to the guest.  ``--timeout=seconds`` bounds a
+    (SIGWINCH) are forwarded to the guest.  The terminal is put into raw
+    mode for the run and restored afterwards, so the guest's line editor can
+    query the cursor position without the answer being echoed back, input is
+    not echoed twice and control characters reach the guest as input.  On a
+    hostfs root the command runs in a fresh session (``setsid -c``), which
+    makes the console its controlling terminal: ``/dev/tty`` opens, shell job
+    control works and ``can't access tty`` is gone.  ``--timeout=seconds`` bounds a
     run (default 120).  The guest's exit status is returned unchanged; a
     timed-out run returns 124, a forwarded signal returns 128 plus the signal
     number (143 for SIGTERM), a guest session or init failure returns 125, and

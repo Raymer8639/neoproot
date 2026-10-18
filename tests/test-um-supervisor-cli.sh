@@ -82,6 +82,33 @@ expect_failure "--net-ipv6-addr with a space" \
 expect_failure "unknown argument after --net-ipv6" \
 	--rootfs="$rootfs" --hostfs --net --net-ipv6 --unknown-option -- /bin/true
 
+expect_failure "duplicate --net-auto" \
+	--rootfs="$rootfs" --hostfs --net --net-auto --net-auto -- /bin/true
+# --net-auto configures the guest from this side, which only happens for a
+# hostfs root; an ext4 root owes its session, network included, to /um-init.
+# Saying yes there would be a promise nothing keeps.
+# The mechanism, in the same place the other invalid combinations are checked:
+# the run must fail, and the message must name the reason rather than whichever
+# helper happened to be missing first.  A kernel and stub are supplied because
+# their presence is checked before the rootfs is examined; without them the run
+# would stop at that message instead of the one under test.
+printf '#!/bin/sh\nexit 0\n' >"$temporary_directory/kernel"
+chmod 755 "$temporary_directory/kernel"
+if ! output=$("$um_supervisor" --kernel="$temporary_directory/kernel" \
+	--stub="$temporary_directory/kernel" --rootfs="$image" --net-auto -- \
+	/bin/true 2>&1); then
+	case "$output" in
+	*"--net-auto requires a hostfs rootfs"*) ;;
+	*)
+		echo "FAIL: --net-auto on ext4 said: $output" >&2
+		exit 1
+		;;
+	esac
+else
+	echo "FAIL: --net-auto with an ext4 rootfs succeeded" >&2
+	exit 1
+fi
+
 # The message has to name the option, not the parser that happened to see it.
 if ! output=$("$um_supervisor" --rootfs="$rootfs" --hostfs --net-ipv6 -- \
 	/bin/true 2>&1); then
