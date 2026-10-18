@@ -39,7 +39,7 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null
 # a terminal multiplexer -- says "unable to allocate pty".  Mount it after
 # devtmpfs so the pts directory can be created under it.
 mkdir -p /dev/pts 2>/dev/null
-mount -t devpts devpts /dev/pts 2>/dev/null
+mount -t devpts devpts /dev/pts 2>/dev/null || [ -c /dev/pts/ptmx ]
 # /run holds the session mount point and the scratch mounts for file binds.
 # A tmpfs keeps them out of the image and works with a read-only root too.
 mount -t tmpfs tmpfs /run 2>/dev/null

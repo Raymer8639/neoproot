@@ -1800,13 +1800,20 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
                           "    else\n"
                           "        ip addr add ") < 0)
             goto failed;
-        if (um_write_text(fd, config->net_addr) < 0 ||
+        /*
+         * Every value below comes from the caller and ends up in a shell
+         * script that runs as root inside the guest, so it is quoted rather
+         * than interpolated raw.  A value like "10.0.2.2;id" is a valid
+         * argv token -- it has no whitespace, so the option parser accepts
+         * it -- and unquoted it would end the ip command and run "id".
+         */
+        if (um_write_shell_word(fd, config->net_addr) < 0 ||
             um_write_text(fd, "/") < 0 ||
             um_write_text(fd, config->net_mask) < 0 ||
             um_write_text(fd, " dev vec0 2>/dev/null\n"
                               "        ip route add default via ") < 0)
             goto failed;
-        if (um_write_text(fd, config->net_gateway) < 0 ||
+        if (um_write_shell_word(fd, config->net_gateway) < 0 ||
             um_write_text(fd, " dev vec0 2>/dev/null\n"
                               "    fi\n") < 0)
             goto failed;
@@ -1821,7 +1828,7 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
                               "    ip -6 addr add ") < 0)
                 goto failed;
             if (config->net_ipv6_addr[0] != '\0') {
-                if (um_write_text(fd, config->net_ipv6_addr) < 0)
+                if (um_write_shell_word(fd, config->net_ipv6_addr) < 0)
                     goto failed;
             } else if (um_write_text(fd, "fd00::2/64") < 0)
                 goto failed;
@@ -1829,7 +1836,7 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
                               "    ip -6 route add default via ") < 0)
                 goto failed;
             if (config->net_ipv6_gw[0] != '\0') {
-                if (um_write_text(fd, config->net_ipv6_gw) < 0)
+                if (um_write_shell_word(fd, config->net_ipv6_gw) < 0)
                     goto failed;
             } else if (um_write_text(fd, "fe80::1") < 0)
                 goto failed;
