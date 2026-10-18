@@ -292,6 +292,26 @@ require_ipv6_needs_net --net-ipv6-addr=fd00::2/64
 require_ipv6_needs_net --net-ipv6-gw=fe80::1
 require_ipv6_needs_net --net-ipv6-dns=none
 
+# --net-auto implies --net: the helper has to start, and the option itself is
+# consumed by the supervisor rather than forwarded to umnet (umnet would not
+# know it, and the guest side does not need to).
+run_with_net --rootfs="$rootfs" --hostfs --net-auto
+require_options
+if grep -q -- "--net-auto" "$argv_file"; then
+	fail "--net-auto leaked into umnet's argv"
+fi
+
+# On an ext4 root --net-auto is refused before any helper runs: /um-init owns
+# that session, network included.  The run must not reach umnet at all.
+rm -f "$argv_file"
+TMPDIR="$temporary_directory" "$um_supervisor" \
+	--kernel="$temporary_directory/kernel" \
+	--stub="$temporary_directory/kernel" \
+	--rootfs="$image" --net-auto -- /bin/true >/dev/null 2>&1 || true
+if [ -f "$argv_file" ]; then
+	fail "umnet ran for --net-auto on an ext4 rootfs"
+fi
+
 # --net must not change the non-network path: without it the kernel is exec'd
 # directly and umnet is never started.
 rm -f "$argv_file"

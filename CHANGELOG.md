@@ -3,6 +3,28 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [Unreleased]
+
+**UML console fixes and `--net-auto`**
+
+- Put the caller's terminal into raw mode while a UML run owns it. Three
+  symptoms had one cause: the guest's line editor asks for the cursor
+  position (`ESC [ 6 n`) and the answer was echoed back as `^[[r;cR`; input
+  was echoed two or three times; and control characters were interpreted by
+  the host terminal before the guest could see them. Pipes and redirected
+  files are untouched.
+- Run a hostfs guest command under `setsid -c`, so the console becomes its
+  controlling terminal. The kernel execs the wrapper as PID 1 without calling
+  `setsid()`, so `/dev/tty` could not be opened and every login shell printed
+  `/bin/sh: can't access tty; job control turned off`, with no Ctrl-C, Ctrl-Z
+  or job control. A missing `setsid` keeps the previous behaviour.
+- Add `--net-auto` (implies `--net`): configure the guest side of the link.
+  `--net` builds the link but leaves `vec0` down, because in UML the guest
+  owns its interfaces and the DHCP server only answers a client that asks.
+  `--net-auto` runs `udhcpc` first and falls back to the configured static
+  address and gateway; neither failure stops the run. Hostfs roots only --
+  an ext4 root is configured by its own `/um-init`.
+
 ## [v5.12.0] - 2026-10-17
 
 **`--backend=auto` chooses by what the command needs, and the UML guest can have IPv6**

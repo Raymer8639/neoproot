@@ -138,6 +138,18 @@ TCP 均可通，guest 退出码仍经 session 协议回传。`umnet`/`passt` 从
 默认由 `umnet` 读取宿主自己的解析器，`--net-dns=none` 则不宣告任何
 nameserver。
 
+`--net` 建的是**链路**，不是 guest 侧的配置：UML 里接口归 guest 所有，而
+`passt` 起的 DHCP 服务端只会应答来问的客户端。所以单用 `--net` 时 `vec0` 是
+down 的、没有地址也没有路由。加上 `--net-auto` 就由这一侧替你配好：先向
+DHCP 服务端跑 `udhcpc`，没有客户端或没拿到租约时用
+`--net-addr=`/`--net-gateway=` 做静态回退。它不会让运行失败——网络没起来的
+容器仍然是能用的容器。`--net-auto` 蕴含 `--net`，且需要 hostfs 根
+（ext4 根由它自己的 `/um-init` 负责配置）。
+
+```sh
+neoproot --backend=um -r /path/to/rootfs --net-auto -- /bin/sh
+```
+
 `--net-ipv6` 让 `umnet` 启动它的第二个、纯 IPv6 的 `passt` helper，从而给
 guest 提供 IPv6：
 
@@ -162,6 +174,15 @@ IPv6 用独立的第二个 helper 而不是双栈 helper，是为了让没有预
 
 guest 控制台连接调用者的终端，终端尺寸变化（SIGWINCH）会转发给 guest，因此从
 该模式启动的全屏程序能拿到正确的窗口大小。
+
+运行期间终端会被切到 raw 模式，结束后恢复。否则 guest 自己的行编辑器会向终端
+查询光标位置（`ESC [ 6 n`），回复被回显成 `^[[r;cR` 出现在屏幕上；输入会回显
+两遍；控制字符也会先被宿主终端解释掉。管道与重定向文件不受影响。
+
+hostfs 根下 guest 命令跑在一个新会话里（`setsid -c`），控制台因此成为它的控制
+终端：`/dev/tty` 可以打开，登录 shell 不再打印 `can't access tty; job control
+turned off`，Ctrl-C / Ctrl-Z 也能送到 guest 的前台进程。ext4 根由它自己的
+`/um-init` 负责同样的会话设置。
 
 `--timeout=SECONDS` 限制单次运行时长（默认 120 秒）。supervisor 会捕获
 SIGINT/SIGTERM/SIGHUP/SIGQUIT，用同一信号通知 UML 进程组，清理该进程组，并

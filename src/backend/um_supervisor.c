@@ -110,6 +110,20 @@ typedef struct {
     int rootfs_fd;
     char *resolved_hostfs;
     bool network;
+    /*
+     * Whether the guest's own side of the link is configured for the caller.
+     *
+     * --net builds the link (umnet + passt, DHCP *server* included) but does
+     * not run a DHCP client inside the guest: the guest is the side that has to
+     * ask for an address.  Leaving that to the caller is the honest behaviour,
+     * but it means a plain "--net -- /bin/sh" comes up with vec0 down and no
+     * route, so every command that reaches the network fails as if there were
+     * none.  --net-auto asks this side to configure the guest instead: DHCP
+     * first, then a static fallback that uses the address the server was told
+     * to hand out, and no failure if neither works (the shell still starts,
+     * just without a network).
+     */
+    bool network_auto;
     char net_addr[32];
     char net_gateway[32];
     char net_dns[32];
@@ -1257,6 +1271,11 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
             if (config->network)
                 goto invalid;
             config->network = true;
+        } else if (strcmp(argument, "--net-auto") == 0) {
+            if (config->network_auto)
+                goto invalid;
+            config->network_auto = true;
+            config->network = true;
         } else if (strncmp(argument, "--net-addr=", 11) == 0) {
             if (argument[11] == '\0' ||
                 snprintf(config->net_addr, sizeof(config->net_addr), "%s",
@@ -1430,6 +1449,18 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
     }
     if (config->rootfs_kind == UM_ROOTFS_EXT4 && config->hostfs) {
         fprintf(stderr, "neoproot-um: invalid hostfs mode for ext4 image\n");
+        return -1;
+    }
+    /*
+     * --net-auto means "this side configures the guest", which only works when
+     * this side runs the guest's command.  With an ext4 image /um-init is PID 1
+     * and owns the session, including its network setup, so accepting the
+     * option there would promise something nothing implements.
+     */
+    if (config->network_auto && config->rootfs_kind != UM_ROOTFS_HOSTFS) {
+        fprintf(stderr,
+                "neoproot-um: --net-auto requires a hostfs rootfs "
+                "(an ext4 root configures itself through /um-init)\n");
         return -1;
     }
     if (config->network) {
@@ -1729,9 +1760,90 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
             goto failed;
     }
 
+    /*
+     * Configure the guest side of the link when the caller asked for it.
+     *
+     * vec0 exists as soon as the kernel is up (umnet appended it to the command
+     * line), but nothing brings it up or gives it an address: in UML the guest
+     * owns its interfaces, and the DHCP server that passt runs only answers a
+     * client that asks.  The gate has always done this by hand; --net-auto is
+     * the same sequence for everybody else.
+     *
+     * DHCP is the path that gets the resolver from the server.  If udhcpc is
+     * missing or gets nothing, the static fallback uses the very address and
+     * gateway the server was told to hand out, so the link still ends up
+     * usable.  Neither failure stops the command: a container whose network
+     * did not come up is still a container, and refusing to start would take
+     * the shell away for a problem the user can see and fix.
+     */
+    if (config->network_auto && !ext4_rootfs) {
+        if (um_write_text(fd,
+                          "um_net_auto() {\n"
+                          "    [ -e /proc/net/dev ] || return 0\n"
+                          "    if ! grep -q '^ *vec0:' /proc/net/dev; then\n"
+                          "        printf '%s\\n' 'neoproot-um: --net-auto: guest has no vec0'\n"
+                          "        return 0\n"
+                          "    fi\n"
+                          "    ip link set vec0 up 2>/dev/null\n"
+                          "    if command -v udhcpc >/dev/null 2>&1; then\n"
+                          "        if udhcpc -n -q -t 3 -T 1 -i vec0 >/dev/null 2>&1; then\n"
+                          "            return 0\n"
+                          "        fi\n"
+                          "    fi\n"
+                          "    ip addr add ") < 0)
+            goto failed;
+        if (um_write_text(fd, config->net_addr) < 0 ||
+            um_write_text(fd, "/") < 0 ||
+            um_write_text(fd, config->net_mask) < 0 ||
+            um_write_text(fd, " dev vec0 2>/dev/null\n"
+                              "    ip route add default via ") < 0)
+            goto failed;
+        if (um_write_text(fd, config->net_gateway) < 0 ||
+            um_write_text(fd, " dev vec0 2>/dev/null\n"
+                              "}\n"
+                              "um_net_auto\n") < 0)
+            goto failed;
+    }
+
     if (um_write_text(fd, "cd ") < 0 ||
         um_write_shell_word(fd, cwd) < 0 ||
         um_write_text(fd, " || exit 126\n") < 0)
+        goto failed;
+
+    /*
+     * Give the command a controlling terminal.
+     *
+     * The kernel execs this script as PID 1.  Before exec it opens /dev/console
+     * and dup2()s it onto 0,1,2, but the session leader test in
+     * tty_open_proc_set_tty() fails for init: ksys_setsid() is never called on
+     * it, so its pgrp and session are 0 and the console does not become its
+     * controlling terminal.  /dev/tty then cannot be opened and every login
+     * shell prints
+     *
+     *     /bin/sh: can't access tty; job control turned off
+     *
+     * with no Ctrl-C, no Ctrl-Z and no job control in the guest.
+     *
+     * setsid(1) -c fixes both halves at once: it is a fresh session leader (so
+     * the console open in the child is allowed to claim the tty) and its -c
+     * flag explicitly sets the controlling terminal to stdin.  Without -c the
+     * new session would have no controlling terminal at all, which is worse
+     * than what we started with.
+     *
+     * This only applies to the hostfs path.  With an ext4 image the guest's own
+     * /um-init is PID 1 and owns the console; the command it runs inherits
+     * whatever /um-init established.  Old roots have no setsid, so a missing one
+     * must not fail the run: it just keeps the old behaviour.
+     */
+    if (!ext4_rootfs &&
+        um_write_text(fd,
+                      "um_session_leader() {\n"
+                      "    if command -v setsid >/dev/null 2>&1; then\n"
+                      "        setsid -c \"$@\"\n"
+                      "    else\n"
+                      "        \"$@\"\n"
+                      "    fi\n"
+                      "}\n") < 0)
         goto failed;
 
     if (um_write_text(fd, "set --") < 0)
@@ -1744,7 +1856,9 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
     if (ext4_rootfs) {
         if (um_write_text(fd, "\n\"$@\"\nexit $?\n") < 0)
             goto failed;
-    } else if (um_write_text(fd, "\n\"$@\"\nrc=$?\nprintf '%s\\n' \"$rc\" > ") < 0 ||
+    } else if (um_write_text(fd,
+                             "\num_session_leader \"$@\"\nrc=$?\n"
+                             "printf '%s\\n' \"$rc\" > ") < 0 ||
                um_write_shell_word(fd, status_path) < 0 ||
                um_write_text(fd, "\nsync\npoweroff -f\nwhile :; do sleep 3600; done\n") < 0)
         goto failed;
@@ -1880,6 +1994,68 @@ static int um_set_nonblocking(int fd, int *old_flags)
     if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
         return -1;
     return 0;
+}
+
+/*
+ * Put the caller's terminal into raw mode for the duration of the run.
+ *
+ * The console path is a PTY: UML writes to the master side and the guest reads
+ * the slave.  Leaving the host terminal in its default (cooked) mode has three
+ * visible consequences, all of them reported as bugs:
+ *
+ *   - The guest's own line editor asks the terminal for the cursor position
+ *     (ESC [ 6 n) and the terminal answers with ESC [ row ; col R.  In cooked
+ *     mode the answer is echoed back, so the escape sequence shows up on screen
+ *     as literal text: the "^[[r;cR" leak.
+ *   - Typed input is echoed twice, once by the host terminal and once by the
+ *     guest tty, so every command appears two or three times.
+ *   - Control characters are interpreted by the host terminal first, so ^C
+ *     reaches the guest as a signal to the supervisor instead of as input the
+ *     guest can deliver to its foreground process, and job control cannot work
+ *     across the boundary.
+ *
+ * The kernel side of the fd channel would normally raw() the fd itself
+ * (arch/um/drivers/fd.c, raw=1 for the console channel), but that happens in
+ * the UML process, whose stdin is our PTY master's slave -- not the user's
+ * terminal.  Raw'ing that slave does not affect the terminal the user types on,
+ * because the master side is where the user's terminal settings live.  So it
+ * has to be done here, by the process that owns the real terminal.
+ *
+ * Saving is conditional on isatty(): pipes and redirected files are left exactly
+ * as they were, and a failed tcgetattr is not an error for the same reason.
+ */
+struct um_terminal_state {
+    bool valid;
+    struct termios saved;
+};
+
+static void um_enter_raw_terminal(struct um_terminal_state *state)
+{
+    struct termios raw;
+
+    state->valid = false;
+    if (!isatty(STDIN_FILENO))
+        return;
+    if (tcgetattr(STDIN_FILENO, &state->saved) < 0)
+        return;
+    raw = state->saved;
+    cfmakeraw(&raw);
+    /*
+     * cfmakeraw() clears OPOST, which also disables the conversion of \n to
+     * \r\n on output.  The guest sends bare newlines and expects the terminal
+     * to advance to column zero; without this the output staircases.
+     */
+    raw.c_oflag |= OPOST;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) < 0)
+        return;
+    state->valid = true;
+}
+
+static void um_leave_raw_terminal(const struct um_terminal_state *state)
+{
+    if (!state->valid)
+        return;
+    (void)tcsetattr(STDIN_FILENO, TCSANOW, &state->saved);
 }
 
 static void um_kill_group(pid_t pid, int signal_number, bool group_ready)
@@ -2062,6 +2238,8 @@ static void um_print_usage(void)
     puts("  --timeout=SECONDS   bounded runtime (default: 120)");
     puts("  -b HOST:GUEST[:ro]  bind a rootfs path into the guest");
     puts("  --net               give the guest a network via umnet + passt");
+    puts("  --net-auto          also configure the guest side of --net (DHCP,");
+    puts("                      then a static fallback); implies --net");
     puts("  --net-addr=ADDR     guest IPv4 address (default: 10.0.2.15)");
     puts("  --net-gateway=ADDR  guest default gateway (default: 10.0.2.2)");
     puts("  --net-dns=ADDR      nameserver announced to the guest ('none' omits it)");
@@ -2189,6 +2367,7 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
     int master_flags = -1;
     int stdin_flags = -1;
     int stdout_flags = -1;
+    struct um_terminal_state terminal = { .valid = false };
     pid_t child_pid = -1;
     pid_t watchdog_pid = -1;
     pid_t supervisor_pid = getpid();
@@ -2365,6 +2544,13 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
     }
     um_requested_signal = 0;
     um_window_changed = 0;
+    /*
+     * Raw mode is entered around the run, not inside it: everything between
+     * here and the cleanup block below can return early, and the terminal must
+     * be restored exactly once on all of them.  um_leave_raw_terminal() is
+     * called on the way out of cleanup.
+     */
+    um_enter_raw_terminal(&terminal);
     child_pid = fork();
     if (child_pid < 0) {
         fprintf(stderr, "neoproot-um: fork: %s\n", strerror(errno));
@@ -2826,6 +3012,7 @@ cleanup:
         (void)fcntl(STDIN_FILENO, F_SETFL, stdin_flags);
     if (stdout_flags >= 0)
         (void)fcntl(STDOUT_FILENO, F_SETFL, stdout_flags);
+    um_leave_raw_terminal(&terminal);
     if (master_flags >= 0)
         (void)fcntl(master_fd, F_SETFL, master_flags);
     if (master_fd >= 0)
