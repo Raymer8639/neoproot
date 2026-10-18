@@ -2561,8 +2561,10 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
         int child_slave;
         char tmpdir_environment[PATH_MAX + 8];
         char home_environment[PATH_MAX + 6];
+        char prefix_environment[PATH_MAX + 8];
         const char *host_tmpdir = getenv("TMPDIR");
         const char *host_home = getenv("HOME");
+        const char *host_prefix = getenv("PREFIX");
 
         close(watchdog_pipe[0]);
         close(watchdog_pipe[1]);
@@ -2636,12 +2638,29 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
                 (char *)"PATH=/usr/bin:/bin",
                 NULL
             };
-            char *environment[4];
+            char *environment[5];
+
+            /*
+             * PREFIX is how umnet finds Termux's $PREFIX/etc/resolv.conf.  On
+             * Android there is no /etc/resolv.conf at all (DNS goes through
+             * netd), so without this the helper cannot read the host's
+             * nameserver, falls back to the compiled-in 1.1.1.1, and hands the
+             * guest a resolver the network may well block -- lookups then fail
+             * after DHCP has already succeeded, which reads like a broken
+             * bridge.  Only passed when it is an absolute path.
+             */
+            if (host_prefix == NULL || host_prefix[0] != '/' ||
+                strlen(host_prefix) >= PATH_MAX - 8)
+                host_prefix = NULL;
+            if (host_prefix != NULL)
+                snprintf(prefix_environment, sizeof(prefix_environment),
+                         "PREFIX=%s", host_prefix);
 
             environment[0] = home_environment;
             environment[1] = kernel_environment[0];
             environment[2] = tmpdir_environment;
-            environment[3] = NULL;
+            environment[3] = host_prefix != NULL ? prefix_environment : NULL;
+            environment[4] = NULL;
 
             if (um_mark_inherited_fds_cloexec(
                     config->rootfs_kind == UM_ROOTFS_EXT4
