@@ -110,6 +110,9 @@ done
 # --cow-file is an unknown option.
 image="$temporary_directory/image"
 dd if=/dev/zero of="$image" bs=1024 count=8 2>/dev/null
+# The supervisor checks the ext2/3/4 magic word at 1024 + 0x38 before it hands
+# the file to the mock kernel, which stands in for the kernel here.
+printf '\123\357' | dd of="$image" bs=1 seek=$((1024 + 0x38)) conv=notrunc 2>/dev/null
 for mode in "" "--backend=fast" "--backend=auto"; do
 	output=$("$neoproot" $mode -r "$image" -- /guest-command 2>&1 || true)
 	case "$output" in
