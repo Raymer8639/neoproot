@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "cli/backend.h"
+
 /*
  * The capability-aware half of --backend=auto.
  *
@@ -31,6 +33,7 @@ const char *neoproot_auto_effective_list(const char *list_option);
  */
 int neoproot_auto_select(int argc, char *const argv[], int command_index,
                          const char *list_option, bool um_configured,
+                         enum neoproot_rootfs_kind rootfs_kind,
                          char *message, size_t message_size);
 
 #endif

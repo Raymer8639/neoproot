@@ -292,6 +292,24 @@ itself on when the caller has set it up. This is an invariant, not a
 heuristic: a command that needs a kernel cannot make `auto` start one that is
 not configured.
 
+The rootfs decides as well, and this part is not a speed preference: PRoot
+translates guest paths into host paths, so it needs a directory, while an ext4
+image has no host paths and only the UML backend can boot it. When `-r` names
+an image (or `--cow-file` is given) `auto` takes the UML backend whatever the
+command is, and `--auto-um-commands` cannot override it:
+
+```
+neoproot: --backend=auto selected the um backend (the rootfs is a filesystem image, which only the um backend can use)
+```
+
+The other backends explain the same thing instead of failing on the image as if
+it were a directory (or rejecting `--cow-file` as an unknown option):
+
+```
+neoproot: the rootfs is a filesystem image; only the um backend can use it.
+neoproot: use --backend=um (or --backend=auto to select it), or pass a directory rootfs.
+```
+
 Second, within that limit, the command decides. PRoot stays the default,
 because it is the fast path and most work is path translation; UML is chosen
 only for a command that needs a real kernel -- a container runtime's control
@@ -328,12 +346,14 @@ wrapper is not looked through. Everything else keeps working as before:
 `--backend=fast`, `--backend=um` and the default ignore both the list and the
 command.
 
-Both outcomes are reported, so `auto` is never silent about a downgrade:
+Every outcome is reported, so `auto` is never silent about a downgrade:
 
 ```
 neoproot: --backend=auto selected the um backend (command 'docker' needs a real kernel)
+neoproot: --backend=auto selected the um backend (the rootfs is a filesystem image, which only the um backend can use)
 neoproot: --backend=auto selected the default backend
 neoproot: --backend=auto would use the um backend for 'docker', but no kernel/stub/rootfs is configured; using the default backend
+neoproot: --backend=auto would use the um backend because the rootfs is a filesystem image, but no kernel/stub is configured; using the default backend
 ```
 
 The `--` separator means the same thing on every backend:

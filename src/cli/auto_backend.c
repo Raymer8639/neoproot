@@ -273,16 +273,41 @@ const char *neoproot_auto_effective_list(const char *option)
  */
 int neoproot_auto_select(int argc, char *const argv[], int command_index,
                          const char *list_option, bool um_configured,
+                         enum neoproot_rootfs_kind rootfs_kind,
                          char *message, size_t message_size)
 {
     const char *list = neoproot_auto_effective_list(list_option);
     const char *command = neoproot_auto_guest_command(argc, argv,
                                                       command_index);
     bool needs_kernel = neoproot_auto_command_needs_kernel(command, list);
-    int use_um = um_configured && needs_kernel;
+    /*
+     * A filesystem image is not a performance question: PRoot has no host path
+     * to translate it to and cannot run it at all, so an image rootfs forces
+     * the UML backend whatever the command is.  --cow-file is not part of this
+     * decision: it only means anything next to an image, and a caller that
+     * passes it with a directory gets the explanation from the dispatcher.
+     */
+    bool image_rootfs = rootfs_kind == NEOPROOT_ROOTFS_IMAGE;
+    int use_um = um_configured && (needs_kernel || image_rootfs);
 
     if (message != NULL && message_size > 0) {
-        if (use_um)
+        if (use_um && image_rootfs) {
+            if (needs_kernel && command != NULL)
+                snprintf(message, message_size,
+                         "neoproot: --backend=auto selected the um backend "
+                         "(the rootfs is a filesystem image and command '%s' "
+                         "needs a real kernel)", command);
+            else
+                snprintf(message, message_size,
+                         "neoproot: --backend=auto selected the um backend "
+                         "(the rootfs is a filesystem image, which only the "
+                         "um backend can use)");
+        } else if (!um_configured && image_rootfs)
+            snprintf(message, message_size,
+                     "neoproot: --backend=auto would use the um backend "
+                     "because the rootfs is a filesystem image, but no "
+                     "kernel/stub is configured; using the default backend");
+        else if (use_um)
             snprintf(message, message_size,
                      "neoproot: --backend=auto selected the um backend "
                      "(command '%s' needs a real kernel)", command);

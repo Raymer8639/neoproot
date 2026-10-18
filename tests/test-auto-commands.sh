@@ -56,6 +56,13 @@ um_environment() {
 	NEOPROOT_UM_KERNEL="$kernel" NEOPROOT_UM_STUB="$kernel" "$@"
 }
 
+# A rootfs image the supervisor will accept: it checks only that the file is a
+# regular file and carries the ext2/3/4 magic at 1024 + 0x38, then hands it to
+# the kernel -- which is the mock above.  No mke2fs dependency, no real image.
+image="$temporary_directory/rootfs.img"
+dd if=/dev/zero of="$image" bs=1024 count=8 2>/dev/null
+printf '\123\357' | dd of="$image" bs=1 seek=$((1024 + 0x38)) conv=notrunc 2>/dev/null
+
 fail() {
 	echo "FAIL: $1" >&2
 	if [ -f "$argv_file" ]; then
@@ -140,6 +147,36 @@ esac
 # guest's shell code to find a name inside it.
 run_auto --backend=auto -r "$rootfs" -- sh -c 'docker run hello'
 require_default "sh -c 'docker run hello'"
+
+# --- an image rootfs always needs UML -------------------------------------
+#
+# PRoot translates guest paths to host paths, and an image has none, so this is
+# not a speed question: an ordinary command has to go to UML too, and the command
+# list cannot turn that off.
+run_auto --backend=auto -r "$image" -- true
+require_um "image rootfs + true"
+case "$output" in
+*"filesystem image"*) ;;
+*) fail "the selection notice does not say why: $output" ;;
+esac
+run_auto --backend=auto -r "$image" -- docker
+require_um "image rootfs + docker"
+run_auto --backend=auto --auto-um-commands=none -r "$image" -- true
+require_um "image rootfs + --auto-um-commands=none"
+
+# Without a kernel/stub the image cannot run anywhere: auto says why, and the
+# backend that would otherwise run it explains what is wrong with the rootfs.
+rm -f "$argv_file"
+output=$("$neoproot" --backend=auto -r "$image" -- true 2>&1 || true)
+case "$output" in
+*"because the rootfs is a filesystem image"*) ;;
+*) fail "no warning that an image needs UML: $output" ;;
+esac
+case "$output" in
+*"only the um backend can use it"*) ;;
+*) fail "the failing backend did not explain the image: $output" ;;
+esac
+[ ! -f "$argv_file" ] || fail "UML ran without a configured kernel"
 
 # --- the invariant: no prerequisites, no UML ------------------------------
 #

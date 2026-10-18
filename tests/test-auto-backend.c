@@ -58,12 +58,15 @@ static void check_needs_kernel(bool expected, const char *command,
     }
 }
 
-static void check_selection(int expected_backend, const char *expected_message,
-                            int argc, char *const argv[], int start,
-                            const char *list, bool configured)
+static void check_selection_rootfs(int expected_backend,
+                                  const char *expected_message, int argc,
+                                  char *const argv[], int start,
+                                  const char *list, bool configured,
+                                  enum neoproot_rootfs_kind rootfs_kind)
 {
     char message[512];
     int backend = neoproot_auto_select(argc, argv, start, list, configured,
+                                       rootfs_kind,
                                        message, sizeof(message));
 
     if (backend != expected_backend) {
@@ -76,6 +79,16 @@ static void check_selection(int expected_backend, const char *expected_message,
         fprintf(stderr, "      expected     \"%s\"\n", expected_message);
         failures++;
     }
+}
+
+/* The common case: a directory rootfs, which both backends can use. */
+static void check_selection(int expected_backend, const char *expected_message,
+                            int argc, char *const argv[], int start,
+                            const char *list, bool configured)
+{
+    check_selection_rootfs(expected_backend, expected_message, argc, argv,
+                           start, list, configured,
+                           NEOPROOT_ROOTFS_DIRECTORY);
 }
 
 
@@ -325,6 +338,56 @@ int main(void)
                         "neoproot: --backend=auto selected the um backend "
                         "(command 'docker' needs a real kernel)",
                         8, wrapped, 5, NULL, true);
+    }
+
+    /* --- a filesystem image forces the UML backend ------------------------ */
+    /*
+     * PRoot needs a directory to translate guest paths into; an ext4 image has
+     * no host path, so this is not a speed question and --auto-um-commands=none
+     * must not turn it off.  The decision is made on the -r argument itself.
+     */
+    {
+        char *plain[] = { "neoproot", "--backend=auto", "-r", "/rootfs.img",
+                          "--", "true" };
+        char *docker[] = { "neoproot", "--backend=auto", "-r", "/rootfs.img",
+                           "--", "docker" };
+
+        check_selection_rootfs(
+            1,
+            "neoproot: --backend=auto selected the um backend "
+            "(the rootfs is a filesystem image, which only the um backend "
+            "can use)",
+            6, plain, 5, NULL, true, NEOPROOT_ROOTFS_IMAGE);
+        check_selection_rootfs(
+            1,
+            "neoproot: --backend=auto selected the um backend "
+            "(the rootfs is a filesystem image and command 'docker' needs a "
+            "real kernel)",
+            6, docker, 5, NULL, true, NEOPROOT_ROOTFS_IMAGE);
+        /* The command list cannot override the rootfs kind. */
+        check_selection_rootfs(
+            1,
+            "neoproot: --backend=auto selected the um backend "
+            "(the rootfs is a filesystem image, which only the um backend "
+            "can use)",
+            6, plain, 5, "none", true, NEOPROOT_ROOTFS_IMAGE);
+        /* Without a kernel/stub the image cannot run anywhere; say so. */
+        check_selection_rootfs(
+            0,
+            "neoproot: --backend=auto would use the um backend because the "
+            "rootfs is a filesystem image, but no kernel/stub is configured; "
+            "using the default backend",
+            6, plain, 5, NULL, false, NEOPROOT_ROOTFS_IMAGE);
+        /* A directory rootfs keeps the command-based behaviour. */
+        check_selection_rootfs(
+            0,
+            "neoproot: --backend=auto selected the default backend",
+            6, plain, 5, NULL, true, NEOPROOT_ROOTFS_DIRECTORY);
+        /* No rootfs at all stays on the default path. */
+        check_selection_rootfs(
+            0,
+            "neoproot: --backend=auto selected the default backend",
+            6, plain, 5, NULL, true, NEOPROOT_ROOTFS_NONE);
     }
 
     if (failures != 0) {

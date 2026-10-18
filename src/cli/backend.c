@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /*
  * neoproot's own command line, as the backends see it.
@@ -195,4 +196,78 @@ int neoproot_prepare_backend_argv(int argc, char *const argv[],
     *result = filtered;
     *result_argc = output_argc;
     return 0;
+}
+
+/*
+ * Find the -r/--rootfs value, and notice --cow-file on the way.
+ *
+ * The scan stops at command_index exactly like the option parser does: the
+ * guest program is allowed to have its own --rootfs option, and treating it as
+ * neoproot's would choose a backend from the guest's arguments.
+ */
+static const char *backend_rootfs_value(int argc, char *const argv[],
+                                        int command_index, bool *cow_file)
+{
+    int index;
+    int limit = command_index > 0 ? command_index : argc;
+
+    if (cow_file != NULL)
+        *cow_file = false;
+    for (index = 1; index < limit; index++) {
+        const char *argument = argv[index];
+        const char *value = NULL;
+
+        if (argument == NULL)
+            continue;
+        if (strncmp(argument, "--rootfs=", 9) == 0) {
+            value = argument + 9;
+        } else if (strncmp(argument, "--cow-file=", 11) == 0) {
+            if (cow_file != NULL)
+                *cow_file = true;
+            continue;
+        } else if (strcmp(argument, "-r") == 0) {
+            if (index + 1 < limit)
+                value = argv[++index];
+        } else if (strcmp(argument, "--rootfs") == 0) {
+            if (index + 1 < limit)
+                value = argv[++index];
+        } else if (strcmp(argument, "--cow-file") == 0) {
+            if (cow_file != NULL)
+                *cow_file = true;
+            if (index + 1 < limit)
+                index++;
+            continue;
+        } else if (option_takes_separate_value(argument) && index + 1 < limit) {
+            index++;
+            continue;
+        }
+        if (value != NULL)
+            return value;
+    }
+    return NULL;
+}
+
+enum neoproot_rootfs_kind neoproot_rootfs_kind(int argc, char *const argv[],
+                                               int command_index)
+{
+    const char *value = backend_rootfs_value(argc, argv, command_index, NULL);
+    struct stat status;
+
+    if (value == NULL || value[0] == '\0')
+        return NEOPROOT_ROOTFS_NONE;
+    if (stat(value, &status) < 0)
+        return NEOPROOT_ROOTFS_NONE;
+    if (S_ISDIR(status.st_mode))
+        return NEOPROOT_ROOTFS_DIRECTORY;
+    if (S_ISREG(status.st_mode))
+        return NEOPROOT_ROOTFS_IMAGE;
+    return NEOPROOT_ROOTFS_NONE;
+}
+
+bool neoproot_has_cow_file(int argc, char *const argv[], int command_index)
+{
+    bool cow_file = false;
+
+    (void)backend_rootfs_value(argc, argv, command_index, &cow_file);
+    return cow_file;
 }

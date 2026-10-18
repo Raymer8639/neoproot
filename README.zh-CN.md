@@ -247,6 +247,23 @@ ext4 带/不带 `--net`、ext4 `--readonly`、持久与临时 COW、读写/只�
 文件系统里探测内核——可选后端只应在调用者明确配置后启用。这是不变量而不是
 启发式：需要真内核的命令也不能让 `auto` 启动一个没配置的内核。
 
+rootfs 本身也会参与决定，而且这一条不是性能偏好：PRoot 把 guest 路径翻译成
+宿主路径，所以它需要目录；ext4 镜像是块设备、没有宿主路径，只有 UML 后端能
+启动它。当 `-r` 指向镜像（或给了 `--cow-file`）时，`auto` 无论什么命令都选
+UML，`--auto-um-commands` 也不能覆盖：
+
+```
+neoproot: --backend=auto selected the um backend (the rootfs is a filesystem image, which only the um backend can use)
+```
+
+其余后端会给出同样的解释，而不是把镜像当目录去绑定、或在路径翻译时失败（也
+不会把 `--cow-file` 报成未知选项）：
+
+```
+neoproot: the rootfs is a filesystem image; only the um backend can use it.
+neoproot: use --backend=um (or --backend=auto to select it), or pass a directory rootfs.
+```
+
 第二步在这个前提内看命令。默认仍是 PRoot——它是快路径，而大部分工作就是路径
 翻译；只有需要真内核的命令才选 UML，例如容器运行时控制面、挂载、命名空间、
 块设备、防火墙、包过滤：
@@ -278,12 +295,14 @@ NEOPROOT_UM_AUTO_COMMANDS=mycmd,other neoproot --backend=auto -r /rootfs -- mycm
 不会被看穿。其余行为不变：`--backend=fast`、`--backend=um` 和默认路径都
 既不看列表也不看命令。
 
-两种结果都会报告，`auto` 不会悄悄降级：
+三种结果都会报告，`auto` 不会悄悄降级：
 
 ```
 neoproot: --backend=auto selected the um backend (command 'docker' needs a real kernel)
+neoproot: --backend=auto selected the um backend (the rootfs is a filesystem image, which only the um backend can use)
 neoproot: --backend=auto selected the default backend
 neoproot: --backend=auto would use the um backend for 'docker', but no kernel/stub/rootfs is configured; using the default backend
+neoproot: --backend=auto would use the um backend because the rootfs is a filesystem image, but no kernel/stub is configured; using the default backend
 ```
 
 `--` 分隔符在所有后端含义一致：
