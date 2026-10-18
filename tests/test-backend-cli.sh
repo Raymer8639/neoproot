@@ -102,4 +102,36 @@ for mode in "" "--backend=fast" "--backend=auto" "--backend=default"; do
 	esac
 done
 
+# --- an image rootfs is UML-only ------------------------------------------
+#
+# PRoot translates guest paths into host paths and an image has none, so it
+# cannot use one.  The dispatcher must say that, rather than let PRoot bind the
+# image as a rootfs and fail on its first path translation -- or complain that
+# --cow-file is an unknown option.
+image="$temporary_directory/image"
+dd if=/dev/zero of="$image" bs=1024 count=8 2>/dev/null
+# The supervisor checks the ext2/3/4 magic word at 1024 + 0x38 before it hands
+# the file to the mock kernel, which stands in for the kernel here.
+printf '\123\357' | dd of="$image" bs=1 seek=$((1024 + 0x38)) conv=notrunc 2>/dev/null
+for mode in "" "--backend=fast" "--backend=auto"; do
+	output=$("$neoproot" $mode -r "$image" -- /guest-command 2>&1 || true)
+	case "$output" in
+	*"only the um backend can use it"*) ;;
+	*) fail "the ${mode:-default} backend did not explain the image rootfs: $output" ;;
+	esac
+done
+
+# --cow-file is an image-only option, and says so instead of "unknown option".
+output=$("$neoproot" --backend=fast -r "$rootfs" --cow-file "$image" -- 	/guest-command 2>&1 || true)
+case "$output" in
+*"filesystem image"*) ;;
+*) fail "--cow-file without UML was not explained: $output" ;;
+esac
+
+# The UML backend still gets the image (the mock kernel is what runs).
+rm -f "$argv_file"
+NEOPROOT_UM_KERNEL="$kernel" NEOPROOT_UM_STUB="$kernel" 	"$neoproot" --backend=um -r "$image" -- /guest-command 	>/dev/null 2>&1 || true
+[ -s "$argv_file" ] ||
+	fail "the UML backend did not receive an image rootfs"
+
 echo "backend CLI separator tests passed"

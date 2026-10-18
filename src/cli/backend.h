@@ -36,4 +36,25 @@ int neoproot_prepare_backend_argv(int argc, char *const argv[],
 /* Whether a kernel, a stub and a rootfs were all configured. */
 bool neoproot_um_backend_is_configured(int argc, char *const argv[]);
 
+/*
+ * What the -r/--rootfs argument names.
+ *
+ * PRoot translates guest paths to host paths, so it can only run a directory;
+ * an ext4 image is a block device without a host path and only the UML backend
+ * can boot it.  The dispatcher looks at this before choosing a backend,
+ * because --backend=auto must not hand an image to PRoot.
+ */
+enum neoproot_rootfs_kind {
+    NEOPROOT_ROOTFS_NONE = 0,
+    NEOPROOT_ROOTFS_DIRECTORY,
+    NEOPROOT_ROOTFS_IMAGE,
+};
+
+/* The kind of -r/--rootfs, or NONE when it was not given or cannot be read. */
+enum neoproot_rootfs_kind neoproot_rootfs_kind(int argc, char *const argv[],
+                                               int command_index);
+
+/* Whether --cow-file was given (it only means anything with an image). */
+bool neoproot_has_cow_file(int argc, char *const argv[], int command_index);
+
 #endif

@@ -68,6 +68,8 @@ int main(int argc, char *const argv[])
     enum backend_mode backend;
     int command_index;
     const char *auto_commands_option;
+    enum neoproot_rootfs_kind rootfs_kind;
+    bool cow_file;
 
     if (reject_traced_startup())
         return EXIT_FAILURE;
@@ -76,6 +78,18 @@ int main(int argc, char *const argv[])
                                       &command_index,
                                       &auto_commands_option) < 0)
         return EXIT_FAILURE;
+
+    /*
+     * What -r names decides two things: whether auto may pick PRoot at all (it
+     * cannot run an image), and the message the other backends give instead of
+     * failing somewhere deeper.  --cow-file is an image-only option and gets
+     * the second treatment: passing it elsewhere is a usage error, not
+     * something to discover inside PRoot's option parser.
+     */
+    rootfs_kind = neoproot_rootfs_kind(effective_argc, effective_argv,
+                                       command_index);
+    cow_file = neoproot_has_cow_file(effective_argc, effective_argv,
+                                     command_index);
 
     if (backend == BACKEND_AUTO) {
         char message[512];
@@ -97,9 +111,32 @@ int main(int argc, char *const argv[])
                                        command_index, auto_commands_option,
                                        neoproot_um_backend_is_configured(
                                            effective_argc, effective_argv),
+                                       rootfs_kind,
                                        message, sizeof(message))
                      ? BACKEND_UM : BACKEND_DEFAULT;
         fprintf(stderr, "%s\n", message);
+    }
+
+    /*
+     * Only the UML backend can boot a filesystem image: PRoot translates guest
+     * paths to host paths, and an image has none.  Left to PRoot, an image
+     * rootfs reaches it as a bind whose first path translation fails, and
+     * --cow-file reaches it as an unknown option -- neither says what is wrong
+     * or what to do.  Say it here, before either backend starts.
+     */
+    if (backend != BACKEND_UM && rootfs_kind == NEOPROOT_ROOTFS_IMAGE) {
+        fprintf(stderr,
+                "neoproot: the rootfs is a filesystem image; only the um backend can use it.\n"
+                "neoproot: use --backend=um (or --backend=auto to select it), or pass a directory rootfs.\n");
+        free(effective_argv);
+        return EXIT_FAILURE;
+    }
+    if (backend != BACKEND_UM && cow_file) {
+        fprintf(stderr,
+                "neoproot: --cow-file only works with a filesystem image rootfs, and only the um backend can use one.\n"
+                "neoproot: use --backend=um (or --backend=auto to select it), or drop --cow-file.\n");
+        free(effective_argv);
+        return EXIT_FAILURE;
     }
 
     if (backend == BACKEND_UM) {
