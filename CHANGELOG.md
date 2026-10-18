@@ -3,6 +3,28 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.13.1] - 2026-10-18
+
+**`--backend=auto` routes an image rootfs to the UML backend**
+
+- `auto` used to choose from the guest command alone, so `-r <ext4 image>` with
+  an ordinary command selected the default PRoot backend -- which cannot use an
+  image at all, because PRoot translates guest paths into host paths and a block
+  device has none. The run failed while PRoot bound the image as a rootfs, and
+  `--cow-file` failed even earlier as an unknown option.
+- The dispatcher now looks at what `-r` names before choosing: a regular file is
+  a filesystem image, which only the UML backend can boot, so `auto` selects
+  `um` for every command and `--auto-um-commands` cannot override it. A
+  directory rootfs keeps the command-based choice.
+- The other backends refuse an image rootfs, and `--cow-file` without the UML
+  backend, with a message that names the cause and the way out
+  (`--backend=um`, `--backend=auto`, or a directory rootfs) instead of
+  `unknown option` or a failure inside path translation.
+- Tests: the auto policy unit test covers directory/image/no-rootfs cases; the
+  dispatch tests use a fake ext4 image (magic at 1024 + 0x38) with the mock
+  kernel, and the CLI test checks all three backends' diagnostics plus that the
+  UML backend really receives the image. All run on the Termux host and in CI.
+
 ## [v5.13.0] - 2026-10-18
 
 **UML backend defaults to ext4, console fixes, `--net-auto`**
