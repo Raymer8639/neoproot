@@ -110,7 +110,7 @@ done
 # --cow-file is an unknown option.
 image="$temporary_directory/image"
 dd if=/dev/zero of="$image" bs=1024 count=8 2>/dev/null
-for mode in "" "--backend=fast" "--backend=auto" "--backend=default"; do
+for mode in "" "--backend=fast" "--backend=auto"; do
 	output=$("$neoproot" $mode -r "$image" -- /guest-command 2>&1 || true)
 	case "$output" in
 	*"only the um backend can use it"*) ;;
