@@ -208,6 +208,7 @@ int neoproot_prepare_backend_argv(int argc, char *const argv[],
 static const char *backend_rootfs_value(int argc, char *const argv[],
                                         int command_index, bool *cow_file)
 {
+    const char *found = NULL;
     int index;
     int limit = command_index > 0 ? command_index : argc;
 
@@ -241,10 +242,11 @@ static const char *backend_rootfs_value(int argc, char *const argv[],
             index++;
             continue;
         }
+        /* Last -r wins, like the option parser the backends use. */
         if (value != NULL)
-            return value;
+            found = value;
     }
-    return NULL;
+    return found;
 }
 
 enum neoproot_rootfs_kind neoproot_rootfs_kind(int argc, char *const argv[],
