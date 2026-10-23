@@ -46,6 +46,7 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-i3-restart-asan.sh \
 	test-um-supervisor-cli.sh test-um-supervisor-bind-cli.sh \
 	test-um-supervisor-ext4-cli.sh test-um-supervisor-net-argv.sh \
+	test-um-supervisor-seccomp-argv.sh \
 	test-um-supervisor-cow-file-cli.sh \
 	test-um-supervisor-ext4-binds-cli.sh \
 	test-auto-commands.sh

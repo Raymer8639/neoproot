@@ -3,6 +3,24 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [Unreleased]
+
+**Opt-in UML seccomp mode and quiet boot**
+
+- Add `--seccomp=off|auto|on` to the UML supervisor. The default stays
+  `off`, which is the kernel's ptrace mode; `auto` uses seccomp when the host
+  allows it and `on` requires it. Two syscall-heavy device A/B runs measured
+  43-61 s with ptrace versus 4.2-5.1 s with seccomp; one-shot startup improved
+  much less (827 to 751 ms) because kernel boot dominates.
+- seccomp mode is not a security boundary: the kernel documentation says its
+  filter does not stop guest userspace from reading or writing all physical
+  memory. The option is opt-in and the help text says so.
+- Add `--quiet` to pass `quiet loglevel=1` to the UML kernel. This only
+  suppresses boot messages; it is independent of the syscall mode.
+- Tests cover the default (no seccomp argument), both explicit modes,
+  `off`, `--quiet`, the combined form, and pass-through through the
+  `neoproot` dispatcher with a mock kernel.
+
 ## [v5.13.1] - 2026-10-18
 
 **`--backend=auto` routes an image rootfs to the UML backend**

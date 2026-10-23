@@ -48,6 +48,14 @@ expect_failure "unknown argument" \
 	--rootfs="$rootfs" --hostfs --unknown-option -- /bin/true
 expect_failure "readonly hostfs directory" \
 	--rootfs="$rootfs" --hostfs --readonly -- /bin/true
+expect_failure "empty --seccomp mode" \
+	--rootfs="$rootfs" --hostfs --seccomp= -- /bin/true
+expect_failure "invalid --seccomp mode" \
+	--rootfs="$rootfs" --hostfs --seccomp=sometimes -- /bin/true
+expect_failure "duplicate --seccomp" \
+	--rootfs="$rootfs" --hostfs --seccomp=auto --seccomp=on -- /bin/true
+expect_failure "duplicate --quiet" \
+	--rootfs="$rootfs" --hostfs --quiet --quiet -- /bin/true
 expect_failure "hostfs flag with ext4 image" \
 	--rootfs="$image" --hostfs -- /bin/true
 expect_failure "bind with ext4 image" \
