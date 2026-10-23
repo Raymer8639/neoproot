@@ -115,6 +115,21 @@ neoproot --backend=um --rootfs=/path/to/rootfs.ext4 --readonly -- /bin/true
 内核和 stub 必须用 linux-um-arm64 仓库的 `build-bionic.sh` 构建，并与配套的
 `um-init`、`umnet`、`passt` 一起使用；不匹配的组合不受支持。
 
+### 系统调用模式与启动日志
+
+UML 内核默认用 `ptrace` 跑 guest 用户态。`--seccomp=auto` 在宿主允许时改用内核的
+seccomp 模式，`--seccomp=on` 强制要求该模式；两者都必须显式打开。同一镜像、同一
+内核、同一探针的两轮真机 A/B：系统调用密集的探针在 ptrace 下用 43–61 秒，在
+seccomp 下用 4.2–5.1 秒；`getpid` 从 158–221 µs 降到 12.5–13.0 µs，
+`open`+`close` 从 501–503 µs 降到 14–50 µs，`read` 从 209–222 µs 降到
+5.9–13.7 µs。一次性命令的启动时间变化小得多（827 → 751 ms），因为那部分主要耗在
+内核启动。`--quiet` 会把 `quiet loglevel=1` 传给内核、压掉启动日志，但
+不改变系统调用模式。
+
+seccomp 模式**不是安全边界**。内核文档明确说该过滤器不够严格：guest 用户态可以
+读写全部物理内存，也可以诱使 stub 关掉定时器信号。只对可信 guest 使用；默认仍是
+`ptrace`。
+
 ### 绑定（`-b`）
 
 hostfs 直接把选定的宿主目录暴露给 guest，**不是**安全隔离边界。源目录已在

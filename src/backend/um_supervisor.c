@@ -78,6 +78,18 @@ typedef enum {
     UM_ROOTFS_EXT4
 } UmRootfsKind;
 
+/*
+ * How the UML kernel runs guest userspace.  The default is the kernel's own
+ * default, ptrace: it is slower but does not trust the guest with the host
+ * address space.  seccomp is opt-in and the kernel documentation is explicit
+ * that its filter is not restrictive enough for untrusted userspace.
+ */
+typedef enum {
+    UM_SECCOMP_OFF,
+    UM_SECCOMP_AUTO,
+    UM_SECCOMP_ON
+} UmSeccompMode;
+
 typedef struct {
     char *host;
     char *guest;
@@ -101,6 +113,8 @@ typedef struct {
     double timeout;
     bool hostfs;
     bool readonly;
+    bool quiet;
+    UmSeccompMode seccomp;
     bool saw_delimiter;
     UmRootfsKind rootfs_kind;
     char *resolved_kernel;
@@ -1140,6 +1154,23 @@ static int um_cleanup_runtime_root(const char *runtime_path)
     return result;
 }
 
+static int um_parse_seccomp_mode(const char *value, UmSeccompMode *mode)
+{
+    if (strcmp(value, "off") == 0) {
+        *mode = UM_SECCOMP_OFF;
+        return 0;
+    }
+    if (strcmp(value, "auto") == 0) {
+        *mode = UM_SECCOMP_AUTO;
+        return 0;
+    }
+    if (strcmp(value, "on") == 0) {
+        *mode = UM_SECCOMP_ON;
+        return 0;
+    }
+    return -1;
+}
+
 static int um_parse_timeout(const char *value, double *timeout)
 {
     char *end;
@@ -1195,6 +1226,7 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
     bool cow_file_set = false;
     bool cwd_set = false;
     bool timeout_set = false;
+    bool seccomp_set = false;
     bool ipv6_flag_set = false;
     bool ipv6_requested = false;
 
@@ -1326,6 +1358,18 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
             if (config->readonly)
                 goto invalid;
             config->readonly = true;
+        } else if (strncmp(argument, "--seccomp=", 10) == 0) {
+            if (seccomp_set ||
+                um_parse_seccomp_mode(argument + 10, &config->seccomp) < 0) {
+                fprintf(stderr,
+                        "neoproot-um: --seccomp expects off, auto, or on\n");
+                return -1;
+            }
+            seccomp_set = true;
+        } else if (strcmp(argument, "--quiet") == 0) {
+            if (config->quiet)
+                goto invalid;
+            config->quiet = true;
         } else if (strcmp(argument, "-w") == 0 ||
                    strcmp(argument, "--pwd") == 0) {
             if (++index >= argc || cwd_set)
@@ -2284,6 +2328,9 @@ static void um_print_usage(void)
     puts("  --hostfs            require directory hostfs mode");
     puts("  --readonly          open an ext4 image without a COW file");
     puts("  --cow-file=PATH     keep the ext4 COW file at PATH (created if missing)");
+    puts("  --seccomp=MODE      UML syscall mode: off (ptrace, default), auto, or on");
+    puts("                      auto/on are faster but unsafe for untrusted guests");
+    puts("  --quiet             suppress UML boot messages (quiet loglevel=1)");
     puts("  --cwd=PATH          guest working directory");
     puts("  --timeout=SECONDS   bounded runtime (default: 120)");
     puts("  -b HOST:GUEST[:ro]  bind a rootfs path into the guest");
@@ -2408,8 +2455,9 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
     char protocol_argument[] = "neoproot_protocol=session-v1";
     char readonly_argument[PATH_MAX + 8];
     char stub_argument[PATH_MAX + 6];
+    char seccomp_argument[32];
     char slave_name[PATH_MAX];
-    char *kernel_argv[24];
+    char *kernel_argv[28];
     struct sigaction old_actions[UM_HANDLED_SIGNALS];
     UmBuffer input = { 0 };
     UmBuffer output = { 0 };
@@ -2510,6 +2558,18 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
 
     kernel_argv[index++] = config->resolved_kernel;
     kernel_argv[index++] = "mem=512M";
+    if (config->seccomp != UM_SECCOMP_OFF) {
+        const char *mode = config->seccomp == UM_SECCOMP_ON ? "on" : "auto";
+
+        if (snprintf(seccomp_argument, sizeof(seccomp_argument),
+                     "seccomp=%s", mode) >= (int)sizeof(seccomp_argument))
+            return EXIT_FAILURE;
+        kernel_argv[index++] = seccomp_argument;
+    }
+    if (config->quiet) {
+        kernel_argv[index++] = "quiet";
+        kernel_argv[index++] = "loglevel=1";
+    }
     kernel_argv[index++] = config->readonly ? "ro" : "rw";
     kernel_argv[index++] = init_argument;
     kernel_argv[index++] = "con=null";

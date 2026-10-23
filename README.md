@@ -131,6 +131,24 @@ Build the kernel and stub with `build-bionic.sh` from the linux-um-arm64 tree,
 and keep them matched with the `um-init`, `umnet` and `passt` they are used
 with; a mismatched set is not supported.
 
+### Syscall mode and boot output
+
+The UML kernel's default userspace mode is `ptrace`. `--seccomp=auto` lets it
+use the kernel's seccomp mode when the host allows it, and `--seccomp=on`
+requires that mode; both are opt-in. In two device A/B runs on the same image,
+kernel and probe, a syscall-heavy probe took 43-61 s with ptrace and 4.2-5.1 s
+with seccomp: `getpid` fell from 158-221 to 12.5-13.0 us, `open`+`close`
+from 501-503 to 14-50 us, and `read` from 209-222 to 5.9-13.7 us. Boot time
+for a one-shot command moved much less (827 to 751 ms), because kernel startup
+dominates that case. `--quiet`
+passes `quiet loglevel=1` to the kernel and suppresses the boot log; it does
+not change the syscall mode.
+
+seccomp mode is **not** a security boundary. The kernel documentation states
+that its filter is not restrictive enough: guest userspace can read and write
+all physical memory and can trick the stub into disabling the timer signal.
+Use it only with a guest you trust; the default stays `ptrace`.
+
 ### Binds
 
 Hostfs exposes the selected host directory directly to the guest; it is not a
