@@ -20,6 +20,12 @@
 - Tests cover the default (no seccomp argument), both explicit modes,
   `off`, `--quiet`, the combined form, and pass-through through the
   `neoproot` dispatcher with a mock kernel.
+- Add `--cpus=N` for an SMP-enabled UML kernel. It passes `ncpus=N`, defaults
+  to one CPU, and requires seccomp for more than one CPU because ptrace
+  userspace can only drive one CPU thread.
+- Add `--rootflags=OPTS` for extra ext4 mount options (for example
+  `commit=60,data=writeback`). Read-only runs keep
+  `noload` first and append caller options; hostfs rejects the option.
 
 ## [v5.13.1] - 2026-10-18
 

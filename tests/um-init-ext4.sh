@@ -33,6 +33,10 @@ set +e
 
 mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
+# cgroup v2 is what container runtimes expect; best effort so an older kernel
+# (or a non-container image) still boots.  cgroup.controllers proves it worked.
+mkdir -p /sys/fs/cgroup 2>/dev/null
+mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
 # devtmpfs gives /dev/ptmx but not /dev/pts: without a devpts mount, opening a
 # pty fails with ENXIO and anything that allocates one -- sudo, sshd, screen,

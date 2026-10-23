@@ -209,6 +209,17 @@ Regular options
     remains ptrace.  ``--quiet`` passes ``quiet loglevel=1`` to suppress the
     boot log; it does not change the syscall mode.
 
+    An SMP-enabled kernel can run more than one guest CPU.  ``--cpus=N``
+    (1-64) passes ``ncpus=N`` on the kernel command line; the default is 1,
+    so an existing invocation does not silently change CPU count when the
+    kernel is upgraded.  Each guest CPU is a host thread and the kernel must
+    have been built with ``CONFIG_SMP``.  ``--cpus`` greater than 1 requires
+    ``--seccomp=auto`` or ``--seccomp=on``: ptrace userspace drives one CPU
+    thread, so the supervisor refuses rather than letting the kernel clamp the
+    request to one CPU.  ``--rootflags=OPTS`` passes extra ext4 mount options,
+    for example ``commit=60,data=writeback``; it is accepted only for an ext4 image,
+    and ``--readonly`` keeps ``noload`` first.
+
     In ext4 mode ``-b host:guest[:ro]`` accepts host paths as sources, since
     the guest root is an image and has no "inside" to restrict a source to.
     The guest init mounts each source through hostfs (read-only for ``:ro``).
@@ -240,8 +251,8 @@ Regular options
     a client that asks.  ``--net-auto`` has the guest side configured for the
     caller -- ``udhcpc`` against that server first, then a static fallback
     using ``--net-addr=``/``--net-gateway=`` -- and never fails the run.  It
-    implies ``--net`` and needs a hostfs root; an ext4 root is configured by
-    its own ``/um-init``.
+    implies ``--net`` and works for both root kinds; the wrapper is run by
+    the guest init either way.
 
     ``--net-ipv6`` also gives the guest IPv6, through the second, IPv6-only
     ``passt`` helper that ``umnet`` starts.  ``--net-ipv6-addr=A[/P]`` and

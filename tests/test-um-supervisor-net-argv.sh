@@ -114,6 +114,7 @@ $temporary_directory/passt
 	[ "$actual" = "$expected" ] || fail "umnet options are malformed"
 	[ "$(sed -n '10p' "$argv_file")" = "$temporary_directory/kernel" ] ||
 		fail "umnet argv does not start with the kernel path"
+	require_argument "ncpus=1"
 }
 
 # --net-dns= has to reach umnet, and be the only thing that puts `--dns` there.
@@ -212,7 +213,7 @@ require_ipv6_needs_net() {
 # hostfs: 9 options + 10 kernel arguments.
 run_with_net --rootfs="$rootfs" --hostfs --net
 require_options
-require_count 19
+require_count 20
 require_argument "init="
 require_argument "con=null"
 require_argument "con0=fd:0,fd:1"
@@ -224,7 +225,7 @@ require_tail "panic=1"
 # parameters silently discards the guest command.  9 options + 15 arguments.
 run_with_net --rootfs="$image" --net
 require_options
-require_count 24
+require_count 25
 require_argument "init=/um-init"
 require_argument "ubd0="
 require_argument "root=/dev/ubda"
@@ -238,13 +239,13 @@ require_tail "panic=1"
 # --net-dns= is the only thing that may add `--dns`: 11 options + 10 arguments.
 run_with_net --rootfs="$rootfs" --hostfs --net --net-dns=9.9.9.9
 require_dns_option 9.9.9.9
-require_count 21
+require_count 22
 require_tail "panic=1"
 
 # ext4 read-only carries one extra argument (rootflags=noload).
 run_with_net --rootfs="$image" --readonly --net
 require_options
-require_count 25
+require_count 26
 require_argument "ubd0r="
 require_argument "neoproot_protocol=session-v1"
 require_argument "neoproot_session="
@@ -254,7 +255,7 @@ require_tail "panic=1"
 # --net-ipv6 alone: one extra option, and the kernel vector is untouched.
 run_with_net --rootfs="$rootfs" --hostfs --net --net-ipv6
 require_ipv6_flag_only
-require_count 20
+require_count 21
 require_argument "rootfstype=hostfs"
 require_tail "panic=1"
 
@@ -263,7 +264,7 @@ run_with_net --rootfs="$rootfs" --hostfs --net --net-ipv6 \
 	--net-ipv6-addr=fd00::2/64 --net-ipv6-gw=fe80::1 \
 	--net-ipv6-dns=2001:db8::53
 require_ipv6_options
-require_count 26
+require_count 27
 require_tail "panic=1"
 
 # A named value implies the switch: "--net-ipv6-addr=" on its own still turns
@@ -271,7 +272,7 @@ require_tail "panic=1"
 run_with_net --rootfs="$rootfs" --hostfs --net --net-ipv6-addr=fd00::9/64
 require_argument "--ipv6"
 require_argument "--ipv6-addr"
-require_count 22
+require_count 23
 require_tail "panic=1"
 
 # --net-ipv6-dns=none is a value like any other: umnet decides what it means.
@@ -283,7 +284,7 @@ require_argument "none"
 run_with_net --rootfs="$image" --net --net-ipv6
 require_argument "neoproot_session="
 require_argument "--ipv6"
-require_count 25
+require_count 26
 require_tail "panic=1"
 
 # IPv6 without a network is a mistake, not a silent no-op.

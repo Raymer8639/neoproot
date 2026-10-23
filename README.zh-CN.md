@@ -130,6 +130,19 @@ seccomp 模式**不是安全边界**。内核文档明确说该过滤器不够�
 读写全部物理内存，也可以诱使 stub 关掉定时器信号。只对可信 guest 使用；默认仍是
 `ptrace`。
 
+### CPU 数与 ext4 挂载选项
+
+启用 SMP 的内核可以跑多个 guest CPU：`--cpus=N`（1–64）把 `ncpus=N` 传给
+kernel cmdline，默认 1，避免升级内核后悄悄改变已有运行的 CPU 数。每个 guest CPU
+对应一个宿主线程，所用内核必须启用 `CONFIG_SMP`；单核内核会忽略该请求。
+`--cpus` 大于 1 时必须同时给 `--seccomp=auto` 或 `--seccomp=on`：ptrace
+用户态只能驱动一个 CPU 线程，supervisor 会直接拒绝，而不是在内核里悄悄压回 1 个
+CPU、让按多核准备的负载跑在单核上。
+
+`--rootflags=OPTS` 把额外的 ext4 挂载选项传给 kernel cmdline，例如
+`commit=60,data=writeback`。只接受 ext4 镜像；`--readonly` 时始终先放 `noload`
+（重放 journal 会写基础镜像）再把调用者的选项接在后面。
+
 ### 绑定（`-b`）
 
 hostfs 直接把选定的宿主目录暴露给 guest，**不是**安全隔离边界。源目录已在
