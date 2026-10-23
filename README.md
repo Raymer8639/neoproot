@@ -149,6 +149,22 @@ that its filter is not restrictive enough: guest userspace can read and write
 all physical memory and can trick the stub into disabling the timer signal.
 Use it only with a guest you trust; the default stays `ptrace`.
 
+### CPUs and ext4 mount options
+
+An SMP-enabled kernel can run more than one guest CPU: `--cpus=N` (1-64)
+passes `ncpus=N` on the kernel command line, with a default of 1 so upgrading
+the kernel does not silently change the CPU count of existing runs. Each guest
+CPU is a host thread, and the kernel in use must have been built with
+`CONFIG_SMP`; a uniprocessor kernel ignores the request. `--cpus` greater than
+1 requires `--seccomp=auto` or `--seccomp=on`: ptrace userspace can drive only
+one CPU thread, so the supervisor refuses the request instead of letting the
+kernel clamp it after the caller has sized the workload for several CPUs.
+
+`--rootflags=OPTS` passes extra ext4 mount options on the kernel command line,
+for example `commit=60,data=writeback`. It is accepted only for an ext4 image;
+`--readonly` always keeps `noload` first (replaying the journal would write the
+base image) and appends the caller's options after it.
+
 ### Binds
 
 Hostfs exposes the selected host directory directly to the guest; it is not a

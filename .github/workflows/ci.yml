@@ -140,12 +140,15 @@ jobs:
           net_status=$?
           TMPDIR=/tmp/neoproot-um-cli-ci sh test-um-supervisor-seccomp-argv.sh
           seccomp_status=$?
+          TMPDIR=/tmp/neoproot-um-cli-ci sh test-um-supervisor-optimizations-argv.sh
+          optim_status=$?
           set -e
           test "$um_status" -eq 0 || test "$um_status" -eq 125
           test "$cow_status" -eq 0 || test "$cow_status" -eq 125
           test "$binds_status" -eq 0 || test "$binds_status" -eq 125
           test "$net_status" -eq 0 || test "$net_status" -eq 125
           test "$seccomp_status" -eq 0 || test "$seccomp_status" -eq 125
+          test "$optim_status" -eq 0 || test "$optim_status" -eq 125
 
       - name: Test internal binding mountinfo
         run: |

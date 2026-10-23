@@ -56,6 +56,20 @@ expect_failure "duplicate --seccomp" \
 	--rootfs="$rootfs" --hostfs --seccomp=auto --seccomp=on -- /bin/true
 expect_failure "duplicate --quiet" \
 	--rootfs="$rootfs" --hostfs --quiet --quiet -- /bin/true
+expect_failure "zero --cpus" \
+	--rootfs="$rootfs" --hostfs --cpus=0 -- /bin/true
+expect_failure "too many --cpus" \
+	--rootfs="$rootfs" --hostfs --cpus=65 -- /bin/true
+expect_failure "non-numeric --cpus" \
+	--rootfs="$rootfs" --hostfs --cpus=four -- /bin/true
+expect_failure "duplicate --cpus" \
+	--rootfs="$rootfs" --hostfs --cpus=1 --cpus=2 -- /bin/true
+expect_failure "empty --rootflags" \
+	--rootfs="$rootfs" --hostfs --rootflags= -- /bin/true
+expect_failure "invalid character in --rootflags" \
+	--rootfs="$rootfs" --hostfs "--rootflags=noatime;id" -- /bin/true
+expect_failure "duplicate --rootflags" \
+	--rootfs="$rootfs" --hostfs --rootflags=noatime --rootflags=nodiratime -- /bin/true
 expect_failure "hostfs flag with ext4 image" \
 	--rootfs="$image" --hostfs -- /bin/true
 expect_failure "bind with ext4 image" \

@@ -111,6 +111,8 @@ typedef struct {
     const char *cow_file;
     const char *cwd;
     double timeout;
+    unsigned int cpus;
+    const char *rootflags;
     bool hostfs;
     bool readonly;
     bool quiet;
@@ -1154,6 +1156,43 @@ static int um_cleanup_runtime_root(const char *runtime_path)
     return result;
 }
 
+static int um_parse_cpus(const char *value, unsigned int *cpus)
+{
+    char *end;
+    unsigned long parsed;
+
+    if (value[0] == '\0')
+        return -1;
+    errno = 0;
+    parsed = strtoul(value, &end, 10);
+    if (errno != 0 || *end != '\0' || parsed < 1 || parsed > 64)
+        return -1;
+    *cpus = (unsigned int)parsed;
+    return 0;
+}
+
+/*
+ * rootflags reaches the guest kernel's ext4 mount.  Keep it to characters that
+ * mount options actually use and that cannot terminate or split the kernel
+ * command line; the value is still the caller's choice of mount semantics, not
+ * a second command line.
+ */
+static int um_set_rootflags(const char *value, const char **rootflags)
+{
+    size_t index;
+
+    if (value[0] == '\0' || strlen(value) > 256)
+        return -1;
+    for (index = 0; value[index] != '\0'; index++) {
+        unsigned char character = (unsigned char)value[index];
+
+        if (!isalnum(character) && strchr(",=._-", character) == NULL)
+            return -1;
+    }
+    *rootflags = value;
+    return 0;
+}
+
 static int um_parse_seccomp_mode(const char *value, UmSeccompMode *mode)
 {
     if (strcmp(value, "off") == 0) {
@@ -1226,6 +1265,8 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
     bool cow_file_set = false;
     bool cwd_set = false;
     bool timeout_set = false;
+    bool cpus_set = false;
+    bool rootflags_set = false;
     bool seccomp_set = false;
     bool ipv6_flag_set = false;
     bool ipv6_requested = false;
@@ -1234,6 +1275,7 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
     config->rootfs_fd = -1;
     config->cwd = "/";
     config->timeout = 120.0;
+    config->cpus = 1;
     snprintf(config->net_addr, sizeof(config->net_addr), "%s", "10.0.2.15");
     snprintf(config->net_gateway, sizeof(config->net_gateway), "%s", "10.0.2.2");
     /*
@@ -1387,6 +1429,25 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
                                                 &config->timeout) < 0)
                 goto invalid;
             timeout_set = true;
+        } else if (strncmp(argument, "--cpus=", 7) == 0 ||
+                   strncmp(argument, "--ncpus=", 8) == 0) {
+            const char *value = argument + (argument[2] == 'c' ? 7 : 8);
+
+            if (cpus_set || um_parse_cpus(value, &config->cpus) < 0) {
+                fprintf(stderr,
+                        "neoproot-um: --cpus expects a value from 1 to 64\n");
+                return -1;
+            }
+            cpus_set = true;
+        } else if (strncmp(argument, "--rootflags=", 12) == 0) {
+            if (rootflags_set ||
+                um_set_rootflags(argument + 12, &config->rootflags) < 0) {
+                fprintf(stderr,
+                        "neoproot-um: --rootflags expects comma-separated "
+                        "ext4 mount options\n");
+                return -1;
+            }
+            rootflags_set = true;
         } else {
             goto invalid;
         }
@@ -1480,6 +1541,18 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
         if (config->rootfs_kind == UM_ROOTFS_HOSTFS &&
             config->resolved_hostfs == NULL)
             return -1;
+    }
+    if (config->rootflags != NULL &&
+        config->rootfs_kind != UM_ROOTFS_EXT4) {
+        fprintf(stderr,
+                "neoproot-um: --rootflags requires an ext4 rootfs image\n");
+        return -1;
+    }
+    if (config->cpus > 1 && config->seccomp == UM_SECCOMP_OFF) {
+        fprintf(stderr,
+                "neoproot-um: --cpus greater than 1 requires --seccomp=auto "
+                "or --seccomp=on; ptrace userspace runs on one CPU\n");
+        return -1;
     }
     if (config->rootfs_kind == UM_ROOTFS_HOSTFS) {
         if (config->bind_count > 0 && um_resolve_bind_sources(config) < 0)
@@ -2331,6 +2404,8 @@ static void um_print_usage(void)
     puts("  --seccomp=MODE      UML syscall mode: off (ptrace, default), auto, or on");
     puts("                      auto/on are faster but unsafe for untrusted guests");
     puts("  --quiet             suppress UML boot messages (quiet loglevel=1)");
+    puts("  --cpus=N            guest CPUs, 1-64 (default: 1); >1 needs --seccomp");
+    puts("  --rootflags=OPTS    extra ext4 root mount options (ro adds noload)");
     puts("  --cwd=PATH          guest working directory");
     puts("  --timeout=SECONDS   bounded runtime (default: 120)");
     puts("  -b HOST:GUEST[:ro]  bind a rootfs path into the guest");
@@ -2456,6 +2531,8 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
     char readonly_argument[PATH_MAX + 8];
     char stub_argument[PATH_MAX + 6];
     char seccomp_argument[32];
+    char cpus_argument[32];
+    char rootflags_argument[320];
     char slave_name[PATH_MAX];
     char *kernel_argv[28];
     struct sigaction old_actions[UM_HANDLED_SIGNALS];
@@ -2498,7 +2575,9 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
         snprintf(hostfs_argument, sizeof(hostfs_argument), "hostfs=%s",
                  config->resolved_hostfs) >= (int)sizeof(hostfs_argument) ||
         snprintf(cwd_argument, sizeof(cwd_argument), "neoproot_cwd=%s",
-                 config->cwd) >= (int)sizeof(cwd_argument)) {
+                 config->cwd) >= (int)sizeof(cwd_argument) ||
+        snprintf(cpus_argument, sizeof(cpus_argument), "ncpus=%u",
+                 config->cpus) >= (int)sizeof(cpus_argument)) {
         fprintf(stderr, "neoproot-um: UML argument is too long\n");
         return EXIT_FAILURE;
     }
@@ -2522,6 +2601,26 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
                    (int)sizeof(image_argument)) {
         fprintf(stderr, "neoproot-um: UML argument is too long\n");
         return EXIT_FAILURE;
+    }
+
+    rootflags_argument[0] = '\0';
+    if (config->rootfs_kind == UM_ROOTFS_EXT4 &&
+        (config->readonly || config->rootflags != NULL)) {
+        int written;
+
+        if (config->readonly && config->rootflags != NULL)
+            written = snprintf(rootflags_argument, sizeof(rootflags_argument),
+                               "rootflags=noload,%s", config->rootflags);
+        else if (config->readonly)
+            written = snprintf(rootflags_argument, sizeof(rootflags_argument),
+                               "rootflags=noload");
+        else
+            written = snprintf(rootflags_argument, sizeof(rootflags_argument),
+                               "rootflags=%s", config->rootflags);
+        if (written >= (int)sizeof(rootflags_argument)) {
+            fprintf(stderr, "neoproot-um: UML argument is too long\n");
+            return EXIT_FAILURE;
+        }
     }
 
     if (!config->readonly && config->rootfs_kind == UM_ROOTFS_EXT4) {
@@ -2558,6 +2657,7 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
 
     kernel_argv[index++] = config->resolved_kernel;
     kernel_argv[index++] = "mem=512M";
+    kernel_argv[index++] = cpus_argument;
     if (config->seccomp != UM_SECCOMP_OFF) {
         const char *mode = config->seccomp == UM_SECCOMP_ON ? "on" : "auto";
 
@@ -2594,8 +2694,8 @@ static int um_run_kernel(const UmConfig *config, const char *init_path,
         kernel_argv[index++] = protocol_argument;
         kernel_argv[index++] = session_argument;
         kernel_argv[index++] = cwd_argument;
-        if (config->readonly)
-            kernel_argv[index++] = "rootflags=noload";
+        if (rootflags_argument[0] != '\0')
+            kernel_argv[index++] = rootflags_argument;
     }
     kernel_argv[index++] = "panic=1";
     kernel_argv[index] = NULL;
