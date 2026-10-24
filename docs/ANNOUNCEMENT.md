@@ -1,9 +1,9 @@
 # neoproot — announcement drafts
 
-Current public release: **v5.13.1** (2026-10-18). The post-release work on
-`master` — opt-in UML seccomp, `--cpus`, `--rootflags`, cgroup2,
-and the SMP/Docker kernel profile — is marked **unreleased** below. Do not
-describe those changes as part of v5.13.1 in a release announcement.
+Current public release: **v5.14.0** (2026-10-24), which includes opt-in UML
+seccomp, `--quiet`, `--cpus`, `--rootflags` and the cgroup2 reference init.
+The separate SMP/Docker kernel profile is a matching kernel asset from
+`linux-um-arm64`, not a neoproot binary.
 
 All numbers below are device measurements. Fast-path numbers are from the
 existing CHANGELOG benchmarks on a Termux aarch64 device with an Arch Linux ARM
@@ -76,9 +76,9 @@ Ext4 is the UML default because ownership is real: 64 MiB sequential write is
 configures the guest side of the network (DHCP, then static fallback), and the
 supervisor restores the host terminal after the run.
 
-### Post-release master (unreleased)
+### New in v5.14.0
 
-These are on `master`, not in the v5.13.1 tag:
+These are included in the v5.14.0 neoproot release:
 
 - `--seccomp=off|auto|on` and `--quiet` for the UML supervisor.
   seccomp is faster but is **not** a security boundary: the UML kernel’s own
@@ -97,7 +97,7 @@ These are on `master`, not in the v5.13.1 tag:
 
 ### Install
 
-The public release is **v5.13.1**. Termux builds the bionic binary from source;
+The public release is **v5.14.0**. Termux builds the bionic binary from source;
 the release binaries are ARM64 glibc builds:
 
 ```sh
@@ -108,7 +108,8 @@ UML also needs a matching kernel and stub from
 [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64), plus its
 `um-init`/`umnet` compatibility. The `passt-bionic` companion comes from
 [passt-android](https://github.com/Raymer8639/passt-android). The current
-`--seccomp`/`--cpus`/`--rootflags` work is not in a tagged release yet.
+`--seccomp`/`--cpus`/`--rootflags` are included in v5.14.0; the matching
+SMP/Docker kernel profile is released separately from linux-um-arm64.
 
 ARM64 only: x86_64 is intentionally not supported. UML mode must start from an
 untraced host process; ext4 roots have been exercised at 64/128/256 MB.
@@ -180,9 +181,9 @@ UML 默认用 ext4，因为属主语义是真的：64 MiB 顺序写 295 MB/s vs 
 242 MB/s，读 1.1 GB/s vs 672 MB/s。`--net-auto` 会配好 guest 侧 DHCP/静态回退，
 supervisor 在退出时恢复宿主终端。
 
-### master 上尚未发版的内容
+### v5.14.0 新增内容
 
-这些在 `master`，不在 v5.13.1 tag 里：
+这些已包含在 v5.14.0 的 neoproot 发布中：
 
 - UML 的 `--seccomp=off|auto|on` 与 `--quiet`。seccomp 更快，但**不是
   安全边界**：UML 内核文档明确说 guest 用户态可以读写全部物理内存；只对可信
@@ -198,7 +199,7 @@ supervisor 在退出时恢复宿主终端。
 
 ### 安装
 
-公开版本是 **v5.13.1**。Termux 从源码构建 bionic 二进制，release 里的二进制是
+公开版本是 **v5.14.0**。Termux 从源码构建 bionic 二进制，release 里的二进制是
 ARM64 glibc：
 
 ```sh
@@ -208,7 +209,7 @@ curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/insta
 UML 还需要 [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) 的
 kernel/stub 和配套的 `um-init`/`umnet`；`passt-bionic` 来自
 [passt-android](https://github.com/Raymer8639/passt-android)。当前的
-`--seccomp`/`--cpus`/`--rootflags` 还没有 tagged release。
+`--seccomp`/`--cpus`/`--rootflags` 已包含在 v5.14.0；配套 SMP/Docker 内核由 linux-um-arm64 单独发布。
 
 只支持 ARM64，x86_64 刻意不支持；UML 必须从未被跟踪的宿主进程启动；ext4 根验证过
 64/128/256 MB。细节和完整命令：https://github.com/Raymer8639/neoproot
@@ -227,10 +228,10 @@ https://github.com/Raymer8639/neoproot
 
 ## Posting checklist
 
-- [ ] The release page you link is **v5.13.1** (or a newer tag); do not put
-      post-release master features in that tag’s release notes.
-- [ ] If you mention UML seccomp/`--cpus`/`--rootflags`, mark them as
-      **master/unreleased**, and link the kernel assets separately.
+- [ ] The release page you link is **v5.14.0** (or a newer tag); do not put
+      post-v5.14.0 master features in that tag’s release notes.
+- [ ] If you mention UML seccomp/`--cpus`/`--rootflags`, link the matching
+      kernel assets from linux-um-arm64 separately.
 - [ ] Run the one-line installer on a clean Termux host before posting.
 - [ ] Name the device and rootfs; do not round 2.32× up to “3×”.
 - [ ] Do not claim a compile-time win, and do not imply x86_64 works.

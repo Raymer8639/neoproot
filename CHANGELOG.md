@@ -3,15 +3,16 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
-## [Unreleased]
+## [v5.14.0] - 2026-10-24
 
-**Opt-in UML seccomp mode and quiet boot**
+**UML seccomp, SMP CPUs, and ext4 mount options**
 
 - Add `--seccomp=off|auto|on` to the UML supervisor. The default stays
   `off`, which is the kernel's ptrace mode; `auto` uses seccomp when the host
   allows it and `on` requires it. Two syscall-heavy device A/B runs measured
   43-61 s with ptrace versus 4.2-5.1 s with seccomp; one-shot startup improved
-  much less (827 to 751 ms) because kernel boot dominates.
+  much less (roughly 0.8–1.1 s with ptrace vs 0.7–0.8 s with seccomp)
+  because kernel boot dominates.
 - seccomp mode is not a security boundary: the kernel documentation says its
   filter does not stop guest userspace from reading or writing all physical
   memory. The option is opt-in and the help text says so.
@@ -24,8 +25,10 @@
   to one CPU, and requires seccomp for more than one CPU because ptrace
   userspace can only drive one CPU thread.
 - Add `--rootflags=OPTS` for extra ext4 mount options (for example
-  `commit=60,data=writeback`). Read-only runs keep
-  `noload` first and append caller options; hostfs rejects the option.
+  `commit=60,data=writeback`). Read-only runs keep `noload` first and append
+  caller options; hostfs rejects the option.
+- Mount cgroup2 at `/sys/fs/cgroup` in the reference ext4 init so container
+  runtimes see the expected hierarchy when the kernel provides cgroups.
 
 ## [v5.13.1] - 2026-10-18
 
