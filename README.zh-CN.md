@@ -260,8 +260,10 @@ SIGINT/SIGTERM/SIGHUP/SIGQUIT，用同一信号通知 UML 进程组，清理该�
   内核并传 `--cpus=N`，`--cpus` 大于 1 时还必须启用 seccomp。
 - guest 只运行 aarch64 用户态：内核构建时关闭 `CONFIG_COMPAT`，32 位 ARM
   程序不能运行。
-- 内核、stub、`um-init`、`umnet` 必须来自配套的
+- 内核、stub、`umnet` 必须来自配套的
   [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) 构建；
+  guest 的 `/um-init` 必须实现 session-v1/init-protocol-2 契约
+  （参考 [`tests/um-init-ext4.sh`](tests/um-init-ext4.sh)）。
   `passt-bionic` 是 [passt-android](https://github.com/Raymer8639/passt-android)
   构建的 companion。
 - ext4 根目前只在 64 MB、128 MB 和 256 MB 镜像上验证过，其他容量未测试。

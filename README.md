@@ -307,8 +307,10 @@ behind: the supervisor removes the directory once the kernel it names is gone.
   greater than 1 also requires seccomp.
 - The guest runs aarch64 userland only: the kernel is built with
   `CONFIG_COMPAT` off, so 32-bit ARM binaries do not run.
-- Kernel, stub, `um-init` and `umnet` must come from matching
+- Kernel, stub and `umnet` must come from matching
   [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) builds;
+  the guest `/um-init` must implement the session-v1/init-protocol-2 contract
+  (reference: [`tests/um-init-ext4.sh`](tests/um-init-ext4.sh)).
   `passt-bionic` is the companion built from
   [passt-android](https://github.com/Raymer8639/passt-android).
 - Ext4 roots have been exercised at 64 MB, 128 MB and 256 MB; other sizes are untested.

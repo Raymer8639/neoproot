@@ -291,8 +291,10 @@ Regular options
     must be built with ``build-bionic.sh`` from the
     https://github.com/Raymer8639/linux-um-arm64 tree (build-bionic.sh
     under tools/um-arm64/harness) and matched with the
-    ``um-init``, ``umnet`` and ``passt`` they are used with.  ``passt`` is the
-    companion from https://github.com/Raymer8639/passt-android.  Ext4 roots
+    ``um-init``, ``umnet`` and ``passt`` they are used with; the guest
+    ``/um-init`` must implement the session-v1/init-protocol-2 contract
+    (reference: tests/um-init-ext4.sh).  ``passt`` is the companion from
+    https://github.com/Raymer8639/passt-android.  Ext4 roots
     have been exercised at 64 MB, 128 MB and 256 MB.
 
     The UML kernel and ``stub_exe`` may be provided to the standalone
