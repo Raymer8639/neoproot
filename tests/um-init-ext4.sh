@@ -55,6 +55,19 @@ session_error() {
 	while :; do sleep 3600; done
 }
 
+# Busybox mount passes the hostfs source as the final -o argument
+# (hostfs_parse_monolithic); util-linux (Arch, Debian) instead expects
+# hostfs=<source> as a key=value option.  Support both without changing the
+# session protocol.
+hostfs_mount() {
+	hostfs_target=$1
+	hostfs_source=$2
+	if mount -t hostfs -o "$hostfs_source" none "$hostfs_target" 2>/dev/null; then
+		return 0
+	fi
+	mount -t hostfs -o "hostfs=$hostfs_source" none "$hostfs_target" 2>/dev/null
+}
+
 bind_error=
 protocol=
 session=
@@ -76,7 +89,7 @@ case "$session" in
 esac
 
 mkdir -p /run/neoproot || session_error
-mount none /run/neoproot -t hostfs -o "$session" || session_error
+hostfs_mount /run/neoproot "$session" || session_error
 
 # The declaration goes in before init.sh runs: init.sh checks it before it
 # executes the caller's command.
@@ -108,7 +121,7 @@ mount_bind_file() {
 		return 1
 	fi
 	mkdir -p "$bind_scratch" 2>/dev/null
-	if ! mount -t hostfs -o "$bind_source" none "$bind_scratch" 2>/dev/null; then
+	if ! hostfs_mount "$bind_scratch" "$bind_source"; then
 		bind_error="UM_BIND_ERROR=$bind_target:mount-failed"
 		return 1
 	fi
@@ -153,7 +166,7 @@ mount_binds() {
 				bind_error="UM_BIND_ERROR=$bind_target:missing-target"
 				return 1
 			fi
-			if ! mount -t hostfs -o "$bind_source" none "$bind_target" 2>/dev/null; then
+			if ! hostfs_mount "$bind_target" "$bind_source"; then
 				bind_error="UM_BIND_ERROR=$bind_target:mount-failed"
 				return 1
 			fi
