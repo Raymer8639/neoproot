@@ -1,153 +1,241 @@
 # neoproot — announcement drafts
 
-Ready-to-paste drafts for v5.10.10. Every benchmark number below is from
-`CHANGELOG.md` and was measured on a Termux aarch64 device with an Arch Linux ARM
-container. Nothing here is projected: if a number is not in the CHANGELOG, it is
-not in the drafts. The repair release also fixes GNU make 4.4 direct recursive
-spawns under `--stat-shim` by translating glibc `eaccess()` through `faccessat2`.
-Termux needs Linux 5.8+ for that syscall.
+Current public release: **v5.13.1** (2026-10-18). The post-release work on
+`master` — opt-in UML seccomp, `--cpus`, `--rootflags`, cgroup2,
+and the SMP/Docker kernel profile — is marked **unreleased** below. Do not
+describe those changes as part of v5.13.1 in a release announcement.
 
-## Where to post, in order of expected reach
+All numbers below are device measurements. Fast-path numbers are from the
+existing CHANGELOG benchmarks on a Termux aarch64 device with an Arch Linux ARM
+container. UML numbers were measured on the same phone with real UML kernels
+and the listed rootfs type. Do not round 2.32x up to “3x”, and do not claim a
+compile-time win: compilation is unchanged.
+
+## Where to post
 
 | Place | Why | Note |
 | --- | --- | --- |
-| [r/termux](https://www.reddit.com/r/termux/) | the largest Termux audience | post the English draft, flair it as a project |
-| [Hacker News](https://news.ycombinator.com/submit) | "2.3x faster PRoot" is a real story for this crowd | use the Show HN title, then post the first comment yourself |
+| [r/termux](https://www.reddit.com/r/termux/) | largest Termux audience | post the English draft, flair as a project |
+| [Hacker News](https://news.ycombinator.com/submit) | a faster PRoot plus a real-kernel backend is a concrete systems story | use the Show HN title, then post the first comment yourself |
 | [Lobsters](https://lobste.rs/story/new) | linux/BSD systems crowd | tag it `linux`, `mobile`, `performance` |
-| [V2EX](https://www.v2ex.com/new) / 少数派 / 酷安 | 中文开发者与 Android 玩机人群 | 用中文稿；少数派走投稿，酷安配一张 `du` 前后对比截图 |
-| X / Mastodon | 一条就够 | 用下面的一行版 + 基准图 |
-| a proot-distro discussion, only when someone asks about performance | it answers a real question there | do not open a standalone issue for this: it reads as spam |
-
-Rules that keep this from backfiring: say what was measured and on which device,
-say which flag is opt-in, and never claim a speedup for compilation (there is
-none).
+| [V2EX](https://www.v2ex.com/new) / 少数派 / 酷安 | 中文开发者与 Android 玩机人群 | 用中文稿；配基准图或 `du` 前后对比截图 |
+| X / Mastodon | one post is enough | use the one-line version plus a benchmark image |
+| a proot-distro discussion, only when someone asks | it answers a real question there | do not open a standalone issue; it reads as spam |
 
 ## English draft (Reddit / Lobsters)
 
-**Title:** neoproot — an ARM64 PRoot fork for Termux where stat-heavy work is ~2.3x faster
+**Title:** neoproot — a faster ARM64 PRoot fork for Termux, now with an optional real Linux kernel
 
 ---
 
 I run Debian/Arch userspaces on my phone with Termux, mostly for Node.js, pnpm,
-TypeScript and nvim. The bottleneck was never the CPU: it was the container paying a
-ptrace stop for every `stat`. So I forked PRoot (via proot-scicat) and moved the
-metadata path out of the tracer.
+TypeScript and nvim. The first bottleneck was PRoot paying a ptrace stop for
+metadata work. neoproot fixes that with an opt-in stat shim and seccomp
+USER_NOTIF. The second bottleneck is architectural: some workloads need a real
+kernel — namespaces, mounts, block devices, Docker — so neoproot also has an
+optional UML backend that boots a separate Linux kernel.
 
-Measured on a Termux aarch64 device, Arch Linux ARM container, identical output in
-every mode:
+### Fast path: less metadata work in the tracer
 
-- `du -As /usr` (whole-tree metadata walk): **33.3 s -> 14.4 s (2.32x)** with
-  `--stat-shim`; `--seccomp-notify` alone gives 31.2 s.
-- single `stat`: 288.7 -> **8.1 us** absolute, 308.5 -> **4.4 us** dirfd-relative.
-- raw `syscall(SYS_statx)` (what Node/libuv actually calls): 324.5 -> **10.4 us**.
-- Compilation is unchanged (80-file `cc -O0`: 18.2 / 18.5 / 18.3 s across modes) —
-  the win is process startup, parsing and header I/O, not codegen.
+Measured on a Termux aarch64 device, Arch Linux ARM container, identical output:
 
-How it works: `--stat-shim=<guest lib>` preloads a guest-ABI shim that resolves
-`stat`/`lstat`/`statx` in-process (bind translation plus fake_id0). The guest's cwd
-is virtual, so `AT_FDCWD`-relative names are deliberately handed back to the tracer
-through a `--seccomp-notify` channel instead of being guessed at; that path costs
-about what it did before (103 vs 111 us) and stays correct. Both flags are opt-in.
+- `du -As /usr`: **33.3 s → 14.4 s (2.32×)** with `--stat-shim`;
+  `--seccomp-notify` alone gives 31.2 s.
+- single `stat`: 288.7 → **8.1 µs** absolute, 308.5 → **4.4 µs** dirfd-relative.
+- raw `syscall(SYS_statx)` (what Node/libuv calls): 324.5 → **10.4 µs**.
+- compilation is unchanged (80-file `cc -O0`: 18.2 / 18.5 / 18.3 s across modes).
 
-Install (Termux builds from source, because the release binaries are glibc):
+The stat shim runs in the guest process and answers bind-translation and fake-id0
+metadata in-process. Names relative to the virtual cwd deliberately go back
+through `--seccomp-notify` instead of guessing; that path costs about what it
+did before (103 vs 111 µs) and stays correct. Both flags are opt-in.
+
+### UML backend: a real kernel when PRoot is the wrong tool
+
+`--backend=um` boots a separate UML kernel through the in-process
+`neoproot-um` supervisor. The guest uses a real ext4 root with a COW file,
+real ownership, real namespaces, and the kernel’s own syscall path. The
+dispatcher `--backend=auto` chooses per command/rootfs — it does not mix PRoot
+and UML per syscall.
+
+Two device A/B runs on the same ext4 image, kernel and syscall-heavy probe:
+
+| metric | UML ptrace | UML seccomp |
+|---|---:|---:|
+| whole probe | 43–61 s | **4.2–5.1 s** |
+| `getpid` | 158–221 µs | **12.5–13.0 µs** |
+| `open`+`close` | 501–503 µs | **14–50 µs** |
+| `read` | 209–222 µs | **5.9–13.7 µs** |
+
+One boot followed by five `/bin/true` commands took **1.1 s**, versus
+**4.5 s** for five separate UML boots. A one-shot command still pays about
+0.8–1.1 s of kernel boot; a persistent shell amortises it.
+
+Ext4 is the UML default because ownership is real: 64 MiB sequential write is
+295 MB/s vs 242 MB/s on hostfs; read is 1.1 GB/s vs 672 MB/s. `--net-auto`
+configures the guest side of the network (DHCP, then static fallback), and the
+supervisor restores the host terminal after the run.
+
+### Post-release master (unreleased)
+
+These are on `master`, not in the v5.13.1 tag:
+
+- `--seccomp=off|auto|on` and `--quiet` for the UML supervisor.
+  seccomp is faster but is **not** a security boundary: the UML kernel’s own
+  documentation says guest userspace can read/write all physical memory. It is
+  opt-in and only for trusted guests.
+- `--cpus=N` for an SMP kernel; more than one CPU requires seccomp.
+- `--rootflags=OPTS` for ext4 mount options, e.g.
+  `commit=60,data=writeback`; read-only runs always keep `noload` first.
+- cgroup2 mounted by the reference ext4 init, plus a separate SMP/Docker kernel
+  profile: 2/4 CPUs, `PID_NS`/`USER_NS`, `CGROUP_BPF`, overlayfs,
+  veth/bridge and netfilter. The default kernel stays the faster uniprocessor
+  profile; SMP is opt-in because TREE_RCU/SMP locks make a one-CPU syscall-heavy
+  workload slower.
+- Stripped kernel assets: UP 91M → **9.3M**, SMP/Docker 136M → **13M**. Startup
+  time is essentially unchanged; this is an asset-size win.
+
+### Install
+
+The public release is **v5.13.1**. Termux builds the bionic binary from source;
+the release binaries are ARM64 glibc builds:
 
 ```sh
 curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/install.sh | sh
 ```
 
-Also in there: link2symlink that survives pnpm/TypeScript real-path probing, a
-launcher that handles the Termux host setup (wake-lock, fd limits, `LD_*`), and
-fixes for VNC exit hangs and the misleading `signal 11` warning. v5.10.10 fixes
-raw stat syscalls under `--stat-shim` so Go programs such as `gh` work again, and
-makes the Meson build produce the embedded loader itself. It also keeps the
-glibc `eaccess()` fix from v5.10.9, so `$(MAKE)` recursive spawns no longer fail
-before a child is created. Meson and GNUmake builds are both available; Termux
-builds locally because release binaries are glibc. Earlier
-releases also keep `sudo` working under the shim: the tracer re-injects the shim
-environment into every guest `execve`.
+UML also needs a matching kernel and stub from
+[linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64), plus its
+`um-init`/`umnet` compatibility. The `passt-bionic` companion comes from
+[passt-android](https://github.com/Raymer8639/passt-android). The current
+`--seccomp`/`--cpus`/`--rootflags` work is not in a tagged release yet.
 
-ARM64 only, on purpose — x86_64 is not supported. Details, benchmarks and the exact
-commands: https://github.com/Raymer8639/neoproot
+ARM64 only: x86_64 is intentionally not supported. UML mode must start from an
+untraced host process; ext4 roots have been exercised at 64/128/256 MB.
+
+Details and exact commands: https://github.com/Raymer8639/neoproot
 
 ## Show HN
 
-**Title:** Show HN: neoproot – an ARM64 PRoot fork that makes Termux containers 2.3x faster
+**Title:** Show HN: neoproot – a faster ARM64 PRoot fork with an optional real-kernel backend
 
-**First comment (post it yourself right after submitting):**
+**First comment:**
 
-> neoproot is a fork of PRoot (via proot-scicat) for Android/Termux. Short version:
-> a container running `du`, `find`, pnpm or TypeScript spends most of its time paying
-> a ptrace stop per `stat`, so I moved that path in-process with a guest-ABI
-> `LD_PRELOAD` shim, and kept a seccomp USER_NOTIF channel for what the shim cannot
-> answer on its own (relative names against the virtual cwd, guest absolute
-> symlinks, link2symlink disguise).
+> neoproot is a PRoot fork for Android/Termux with two execution paths. The fast
+> path keeps PRoot and moves stat-heavy work in-process with a guest-ABI shim +
+> seccomp USER_NOTIF: `du -As /usr` went from 33.3 s to 14.4 s, while
+> compilation stayed unchanged. The optional UML path boots a real Linux kernel
+> for things PRoot cannot do — namespaces, mounts, block devices, Docker — with
+> an ext4 root and COW. Its seccomp userspace mode took a syscall-heavy probe
+> from 43–61 s to 4.2–5.1 s; a persistent shell amortises the ~0.9 s boot over
+> many commands.
 >
-> `du -As /usr`: 33.3 s -> 14.4 s. Single `stat`: 288.7 -> 8.1 us. Compilation:
-> unchanged. All numbers and the measurement commands are in the CHANGELOG; the
-> device is a phone, so treat them as a starting point rather than a promise.
->
-> Both flags are opt-in and the kernel requirements are documented. ARM64 only. I
-> would especially like feedback from people running bwrap or heavier packaging
-> workloads — that is where I had to chase the ugliest bugs.
+> The trade-off is deliberate: PRoot is not per-syscall mixed with UML. `--backend=auto`
+> chooses per command or rootfs image, because one process cannot live in two
+> kernels. UML seccomp is faster but not a security boundary, so it is opt-in
+> and for trusted guests. ARM64 only. I would especially like feedback from
+> people running bwrap, Docker/Podman or heavy packaging workloads.
 
 ## 中文稿（V2EX / 少数派 / 酷安）
 
-**标题：** neoproot —— 让 Termux 容器里 stat 密集的活儿快 2.3 倍的 ARM64 PRoot 分支
+**标题：** neoproot —— 让 Termux 的 PRoot 更快，并可选启动真实 Linux 内核
 
 ---
 
-我在手机上用 Termux 跑 Debian/Arch 用户空间，主要是 Node.js、pnpm、TypeScript 和
-nvim。瓶颈从来不是 CPU，而是容器为每一次 `stat` 付一次 ptrace 停靠。所以我把 PRoot
-（经 proot-scicat）fork 了一份，把元数据路径从 tracer 里搬了出来。
+我在手机上用 Termux 跑 Debian/Arch 用户空间，主要是 Node.js、pnpm、
+TypeScript 和 nvim。第一个瓶颈是 PRoot 为元数据操作付 ptrace 停靠；neoproot
+用可选的 stat shim + seccomp USER_NOTIF 把这条路径搬进 guest 进程。第二个瓶颈
+是架构限制：namespace、mount、块设备、Docker 这类负载需要真内核，所以 neoproot
+还有一个可选的 UML 后端，启动一个独立的 Linux 内核。
 
-Termux aarch64 真机 + Arch Linux ARM 容器实测，各模式输出完全一致：
+### fast 路径：减少 tracer 里的元数据停靠
 
-- `du -As /usr`（整树元数据遍历）：**33.3 s → 14.4 s（2.32×）**（`--stat-shim`）；只用
-  `--seccomp-notify` 是 31.2 s。
+Termux aarch64 真机 + Arch Linux ARM 容器，各模式输出一致：
+
+- `du -As /usr`：**33.3 s → 14.4 s（2.32×）**（`--stat-shim`）；
+  只用 `--seccomp-notify` 是 31.2 s。
 - 单次 `stat`：绝对路径 288.7 → **8.1 µs**，dirfd 相对 308.5 → **4.4 µs**。
-- 原生 `syscall(SYS_statx)`（Node/libuv 走的就是它）：324.5 → **10.4 µs**。
-- 编译不受影响（80 文件 `cc -O0`：三种模式 18.2 / 18.5 / 18.3 s）——收益在进程启动、
-  解析和头文件 I/O，不在代码生成。
+- 原生 `syscall(SYS_statx)`（Node/libuv 走的路径）：324.5 → **10.4 µs**。
+- 编译速度不变（80 文件 `cc -O0`：三种模式 18.2 / 18.5 / 18.3 s）。
 
-原理：`--stat-shim=<guest 库>` 预加载一个 guest ABI 的 shim，在进程内完成
-`stat`/`lstat`/`statx` 的绑定翻译与 fake_id0 伪装。guest 的当前目录是虚拟的，所以
-`AT_FDCWD` 相对名**故意**交回 tracer，经 `--seccomp-notify` 通道处理，而不是靠猜；
-这条路径的代价与原来基本持平（103 µs 对 111 µs），但语义正确。两个开关都是可选的。
+### UML 后端：PRoot 不适合时用真内核
 
-安装（Termux 从源码构建，因为 release 里的二进制是 glibc 的）：
+`--backend=um` 通过进程内的 `neoproot-um` supervisor 启动独立的 UML
+内核。guest 使用真实 ext4 根 + COW 文件，有真实属主、真实 namespace 和内核自己的
+syscall 路径。`--backend=auto` 按命令/rootfs 类型选择，不做 per-syscall 混合。
+
+同一 ext4 镜像、内核和 syscall 密集探针的两轮真机 A/B：
+
+| 指标 | UML ptrace | UML seccomp |
+|---|---:|---:|
+| 整轮探针 | 43–61 s | **4.2–5.1 s** |
+| `getpid` | 158–221 µs | **12.5–13.0 µs** |
+| `open`+`close` | 501–503 µs | **14–50 µs** |
+| `read` | 209–222 µs | **5.9–13.7 µs** |
+
+一次 boot 后连跑 5 条 `/bin/true` 用 **1.1 s**，5 次单独 boot 用 **4.5 s**。
+一次性命令仍要付约 0.8–1.1 s 的内核启动成本；常驻 shell 才能摊薄它。
+
+UML 默认用 ext4，因为属主语义是真的：64 MiB 顺序写 295 MB/s vs hostfs
+242 MB/s，读 1.1 GB/s vs 672 MB/s。`--net-auto` 会配好 guest 侧 DHCP/静态回退，
+supervisor 在退出时恢复宿主终端。
+
+### master 上尚未发版的内容
+
+这些在 `master`，不在 v5.13.1 tag 里：
+
+- UML 的 `--seccomp=off|auto|on` 与 `--quiet`。seccomp 更快，但**不是
+  安全边界**：UML 内核文档明确说 guest 用户态可以读写全部物理内存；只对可信
+  guest 显式打开。
+- `--cpus=N`：SMP 内核才能多 CPU；大于 1 时必须同时启用 seccomp。
+- `--rootflags=OPTS`：ext4 挂载选项，例如 `commit=60,data=writeback`；只读
+  运行始终先保留 `noload`。
+- ext4 init 挂载 cgroup2；另有 SMP/Docker 内核 profile：2/4 CPU、`PID_NS`/
+  `USER_NS`、`CGROUP_BPF`、overlayfs、veth/bridge、netfilter。默认仍是更快的
+  UP 内核；SMP 单 CPU 的 syscall 负载会因 TREE_RCU/SMP 锁变慢，所以按需开启。
+- strip 后内核资产：UP 91M → **9.3M**，SMP/Docker 136M → **13M**；启动时间基本不变，
+  主要收益是体积。
+
+### 安装
+
+公开版本是 **v5.13.1**。Termux 从源码构建 bionic 二进制，release 里的二进制是
+ARM64 glibc：
 
 ```sh
 curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/install.sh | sh
 ```
 
-此外还有：能在 pnpm/TypeScript 的真实路径探测下存活的 link2symlink、自动处理 Termux
-宿主环境（wake-lock、fd 上限、`LD_*`）的启动器，以及 VNC 退出挂起和误导性的
-`signal 11` 提示的修复。v5.10.7 还让 `sudo` 在 shim 下继续可用：tracer 会把 shim 环境
-重新注入每一次 guest `execve`，setuid 启动器再也删不掉路径翻译。
+UML 还需要 [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) 的
+kernel/stub 和配套的 `um-init`/`umnet`；`passt-bionic` 来自
+[passt-android](https://github.com/Raymer8639/passt-android)。当前的
+`--seccomp`/`--cpus`/`--rootflags` 还没有 tagged release。
 
-只支持 ARM64（这是刻意的），不宣称支持 x86_64。细节、基准和完整命令都在仓库里：
+只支持 ARM64，x86_64 刻意不支持；UML 必须从未被跟踪的宿主进程启动；ext4 根验证过
+64/128/256 MB。细节和完整命令：https://github.com/Raymer8639/neoproot
+
+## One-line version
+
+EN: neoproot — a faster ARM64 PRoot for Termux, now with an optional real-kernel
+UML backend. Fast path: `du -As /usr` 33.3→14.4 s, stat 289→8 µs. UML
+seccomp: syscall-heavy probe 43–61→4.2–5.1 s. ARM64 only; UML seccomp is opt-in.
 https://github.com/Raymer8639/neoproot
 
-## 一行版（X / Mastodon / 群里转发）
-
-EN: A PRoot fork for Termux where `stat` costs 8 us instead of 289: `du -As /usr`
-33.3 s -> 14.4 s, compilation unchanged. ARM64 only, both flags opt-in.
-https://github.com/Raymer8639/neoproot
-
-中文：Termux 容器里的 `du -As /usr` 从 33.3 s 降到 14.4 s（单次 stat 289 → 8 µs，
-编译速度不变）。只支持 ARM64，两个加速开关都是可选的。
+中文：neoproot —— 更快的 Termux ARM64 PRoot，并可选启动真实 Linux 内核。
+fast 路径 `du -As /usr` 33.3→14.4 s、stat 289→8 µs；UML seccomp 的
+syscall 密集探针 43–61→4.2–5.1 s。只支持 ARM64，UML seccomp 需显式开启。
 https://github.com/Raymer8639/neoproot
 
 ## Posting checklist
 
-- [ ] `curl ... | sh` runs clean on a phone that has never built the project — this
-      is the first thing anyone will try, and the `libtalloc` package-name bug in
-      v5.10.6 and earlier is exactly why this line exists.
-- [ ] `neoproot --version` prints the tag, and `--help` documents both perf flags.
-- [ ] The release page you link shows `install.sh` and puts the install block above
-      the auto-generated notes.
-- [ ] Name the device and the container in the post; do not round 2.32x up to "3x".
-- [ ] Do not claim a compile-time win and do not imply x86_64 works.
-- [ ] Stay in the thread for a day. The useful follow-ups are almost always about
-      bwrap, pnpm, or the fake-id0 uid/gid reporting (`pacman -Qkk` flags every file
-      because the host inodes belong to the Android uid — expected, not a bug).
+- [ ] The release page you link is **v5.13.1** (or a newer tag); do not put
+      post-release master features in that tag’s release notes.
+- [ ] If you mention UML seccomp/`--cpus`/`--rootflags`, mark them as
+      **master/unreleased**, and link the kernel assets separately.
+- [ ] Run the one-line installer on a clean Termux host before posting.
+- [ ] Name the device and rootfs; do not round 2.32× up to “3×”.
+- [ ] Do not claim a compile-time win, and do not imply x86_64 works.
+- [ ] For UML, state that seccomp is not a security boundary and is for trusted guests.
+- [ ] Do not claim Docker itself ships in the image: the Docker profile is a kernel
+      config, not a userspace Docker installation.
+- [ ] Stay in the thread for a day. Useful follow-ups are usually bwrap, pnpm,
+      ext4/COW, or fake-id0 uid/gid reporting.

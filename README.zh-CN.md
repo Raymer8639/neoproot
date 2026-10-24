@@ -268,10 +268,17 @@ SIGINT/SIGTERM/SIGHUP/SIGQUIT，用同一信号通知 UML 进程组，清理该�
   构建的 companion。
 - ext4 根目前只在 64 MB、128 MB 和 256 MB 镜像上验证过，其他容量未测试。
 
-真机稳定性矩阵 18/18 PASS，覆盖 hostfs 带/不带 `--net`、guest 退出码 7 和 125、
-ext4 带/不带 `--net`、ext4 `--readonly`、持久与临时 COW、读写/只读绑定、
-旧 init 被拒绝、绑定目标缺失、`--timeout`、SIGTERM。详见
+SMP 之前的一-shot 真机稳定性矩阵 18/18 PASS，覆盖 hostfs 带/不带 `--net`、
+guest 退出码 7 和 125、ext4 带/不带 `--net`、ext4 `--readonly`、持久与临时
+COW、读写/只读绑定、旧 init 被拒绝、绑定目标缺失、`--timeout`、SIGTERM。详见
 [tests/stability-um-backend.sh](tests/stability-um-backend.sh)。
+
+2026-10-24 的 SMP/Docker 增量另测：2/4 CPU 正常起来，cgroup2 暴露
+`cpu io memory pids`，`unshare -p -f` 与 USER_NS 探针成功，
+`--rootflags=commit=60,data=writeback` 出现在 `/proc/mounts`，
+`--seccomp=auto`/`--quiet` 的 argv 测试通过。新增测试见
+[tests/test-um-supervisor-seccomp-argv.sh](tests/test-um-supervisor-seccomp-argv.sh)
+与 [tests/test-um-supervisor-optimizations-argv.sh](tests/test-um-supervisor-optimizations-argv.sh)。
 
 ## 后端选择与 `--` 分隔符
 

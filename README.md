@@ -315,11 +315,18 @@ behind: the supervisor removes the directory once the kernel it names is gone.
   [passt-android](https://github.com/Raymer8639/passt-android).
 - Ext4 roots have been exercised at 64 MB, 128 MB and 256 MB; other sizes are untested.
 
-The on-device stability matrix is 18/18 PASS, covering hostfs with and without
-`--net`, guest exit status 7 and 125, ext4 with and without `--net`, ext4
-`--readonly`, persistent and temporary COW files, read-write and read-only
-binds, refusal of a legacy init, a missing bind target, `--timeout`, and SIGTERM.
-See [tests/stability-um-backend.sh](tests/stability-um-backend.sh).
+The pre-SMP on-device stability matrix is 18/18 PASS, covering hostfs with
+and without `--net`, guest exit status 7 and 125, ext4 with and without
+`--net`, ext4 `--readonly`, persistent and temporary COW files, read-write
+and read-only binds, refusal of a legacy init, a missing bind target,
+`--timeout`, and SIGTERM. See [tests/stability-um-backend.sh](tests/stability-um-backend.sh).
+
+The 2026-10-24 SMP/Docker add-on was verified separately: 2 and 4 CPUs came
+up, cgroup2 exposed `cpu io memory pids`, `unshare -p -f` and a USER_NS probe
+succeeded, `--rootflags=commit=60,data=writeback` appeared in `/proc/mounts`,
+and the `--seccomp=auto`/`--quiet` argv tests passed. The new argv/CLI tests
+are in [tests/test-um-supervisor-seccomp-argv.sh](tests/test-um-supervisor-seccomp-argv.sh)
+and [tests/test-um-supervisor-optimizations-argv.sh](tests/test-um-supervisor-optimizations-argv.sh).
 
 ## Backend selection and the command separator
 
