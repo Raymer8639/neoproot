@@ -67,8 +67,8 @@ Two device A/B runs on the same ext4 image, kernel and syscall-heavy probe:
 | `open`+`close` | 501–503 µs | **14–50 µs** |
 | `read` | 209–222 µs | **5.9–13.7 µs** |
 
-One boot followed by five `/bin/true` commands took **726 ms**, versus
-**4368 ms** for five separate UML boots. A one-shot command still pays about
+One boot followed by five `/bin/true` commands took **1.1 s**, versus
+**4.5 s** for five separate UML boots. A one-shot command still pays about
 0.8–1.1 s of kernel boot; a persistent shell amortises it.
 
 Ext4 is the UML default because ownership is real: 64 MiB sequential write is
@@ -173,7 +173,7 @@ syscall 路径。`--backend=auto` 按命令/rootfs 类型选择，不做 per-sys
 | `open`+`close` | 501–503 µs | **14–50 µs** |
 | `read` | 209–222 µs | **5.9–13.7 µs** |
 
-一次 boot 后连跑 5 条 `/bin/true` 用 **726 ms**，5 次单独 boot 用 **4368 ms**。
+一次 boot 后连跑 5 条 `/bin/true` 用 **1.1 s**，5 次单独 boot 用 **4.5 s**。
 一次性命令仍要付约 0.8–1.1 s 的内核启动成本；常驻 shell 才能摊薄它。
 
 UML 默认用 ext4，因为属主语义是真的：64 MiB 顺序写 295 MB/s vs hostfs
