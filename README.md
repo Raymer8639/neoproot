@@ -127,9 +127,14 @@ export NEOPROOT_UM_STUB=/path/to/stub_exe
 neoproot --backend=um -r /path/to/rootfs -- /bin/sh
 ```
 
-Build the kernel and stub with `build-bionic.sh` from the linux-um-arm64 tree,
-and keep them matched with the `um-init`, `umnet` and `passt` they are used
-with; a mismatched set is not supported.
+Build the kernel and stub with
+[`build-bionic.sh`](https://github.com/Raymer8639/linux-um-arm64/blob/um-arm64/tools/um-arm64/harness/build-bionic.sh)
+from [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64), and keep
+them matched with the `um-init`, `umnet` and `passt` they are used with; a
+mismatched set is not supported. `passt` is the companion built from
+[passt-android](https://github.com/Raymer8639/passt-android). The optional
+`config/smp.config` and `config/docker.config` fragments in that tree build
+the SMP/container kernel profile used by `--cpus`.
 
 ### Syscall mode and boot output
 
@@ -297,12 +302,16 @@ behind: the supervisor removes the directory once the kernel it names is gone.
 - Hostfs exposes host paths directly and is not a security isolation boundary.
 - Start UML mode from an untraced host process; it cannot be nested inside
   PRoot or another sandbox.
-- The guest kernel is uniprocessor (no SMP).
+- The default guest kernel profile is uniprocessor. A separate SMP kernel
+  (`CONFIG_SMP`) and `--cpus=N` are required for more than one CPU; `--cpus`
+  greater than 1 also requires seccomp.
 - The guest runs aarch64 userland only: the kernel is built with
   `CONFIG_COMPAT` off, so 32-bit ARM binaries do not run.
-- Kernel, stub, `um-init`, `umnet` and `passt` must come from matching
-  linux-um-arm64 builds.
-- Ext4 roots have been exercised at 64 MB and 256 MB; other sizes are untested.
+- Kernel, stub, `um-init` and `umnet` must come from matching
+  [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) builds;
+  `passt-bionic` is the companion built from
+  [passt-android](https://github.com/Raymer8639/passt-android).
+- Ext4 roots have been exercised at 64 MB, 128 MB and 256 MB; other sizes are untested.
 
 The on-device stability matrix is 18/18 PASS, covering hostfs with and without
 `--net`, guest exit status 7 and 125, ext4 with and without `--net`, ext4
@@ -469,6 +478,12 @@ When reporting a result, include the device/SoC, Android and Termux versions, ex
 - Portable releases use `-march=armv8-a -mtune=generic`; this relaxes CPU instructions but does not promise libc or kernel compatibility.
 - Link options include ThinLTO, section garbage collection, identical-code folding, RELRO/NOW, and stripping.
 - The build depends on `libtalloc` (Termux package: `talloc`). `upx` is optional.
+
+## Related repositories
+
+- [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) — UML/arm64 kernel, `stub_exe`, `um-init`, `umnet` and the `passt-bionic` companion used by the UM backend. Its `config/smp.config` and `config/docker.config` fragments are the supported way to build the SMP/container kernel profile.
+- [passt-android](https://github.com/Raymer8639/passt-android) — the Android/bionic `passt` source used by `umnet`.
+- [termux/proot](https://github.com/termux/proot) — upstream PRoot fixes tracked by the fast backend.
 
 ## Project lineage
 

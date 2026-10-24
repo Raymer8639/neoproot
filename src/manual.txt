@@ -284,12 +284,16 @@ Regular options
     ``~/.uml/<umid>`` directory of a killed or panicking kernel once that
     kernel is gone.
 
-    The guest kernel is uniprocessor, and the guest runs aarch64 userland
-    only: the kernel is built with ``CONFIG_COMPAT`` off, so 32-bit ARM
-    binaries do not run.  Kernel and stub must be built with
-    ``build-bionic.sh`` from the linux-um-arm64 tree and matched with the
-    ``um-init``, ``umnet`` and ``passt`` they are used with.  Ext4 roots
-    have been exercised at 64 MB and 256 MB.
+    The default guest kernel profile is uniprocessor; an SMP kernel can be
+    selected with ``--cpus=N`` and must be built with ``CONFIG_SMP``.  The
+    guest runs aarch64 userland only: the kernel is built with
+    ``CONFIG_COMPAT`` off, so 32-bit ARM binaries do not run.  Kernel and stub
+    must be built with ``build-bionic.sh`` from the
+    https://github.com/Raymer8639/linux-um-arm64 tree (build-bionic.sh
+    under tools/um-arm64/harness) and matched with the
+    ``um-init``, ``umnet`` and ``passt`` they are used with.  ``passt`` is the
+    companion from https://github.com/Raymer8639/passt-android.  Ext4 roots
+    have been exercised at 64 MB, 128 MB and 256 MB.
 
     The UML kernel and ``stub_exe`` may be provided to the standalone
     ``neoproot-um`` backend with ``--kernel=path`` and ``--stub=path``, or

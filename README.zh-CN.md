@@ -112,8 +112,12 @@ neoproot --backend=um --rootfs=/path/to/rootfs -- /bin/sh
 neoproot --backend=um --rootfs=/path/to/rootfs.ext4 --readonly -- /bin/true
 ```
 
-内核和 stub 必须用 linux-um-arm64 仓库的 `build-bionic.sh` 构建，并与配套的
-`um-init`、`umnet`、`passt` 一起使用；不匹配的组合不受支持。
+内核和 stub 必须用 [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) 仓库的
+[`build-bionic.sh`](https://github.com/Raymer8639/linux-um-arm64/blob/um-arm64/tools/um-arm64/harness/build-bionic.sh)
+构建，并与配套的 `um-init`、`umnet`、`passt` 一起使用；不匹配的组合不受支持。
+`passt` 是 [passt-android](https://github.com/Raymer8639/passt-android) 构建的
+companion。该仓库的 `config/smp.config` 和 `config/docker.config` 是构建
+`--cpus` 所需 SMP/容器内核 profile 的受支持方式。
 
 ### 系统调用模式与启动日志
 
@@ -252,12 +256,15 @@ SIGINT/SIGTERM/SIGHUP/SIGQUIT，用同一信号通知 UML 进程组，清理该�
 
 - hostfs 直接暴露宿主路径，不是安全隔离边界。
 - UML 模式必须从未被跟踪的宿主进程启动，不能嵌套在 PRoot 或其他 sandbox 中。
-- guest 内核是单核（uniprocessor），没有 SMP。
+- 默认 guest 内核是单核（uniprocessor）；多 CPU 需要单独的 `CONFIG_SMP`
+  内核并传 `--cpus=N`，`--cpus` 大于 1 时还必须启用 seccomp。
 - guest 只运行 aarch64 用户态：内核构建时关闭 `CONFIG_COMPAT`，32 位 ARM
   程序不能运行。
-- 内核、stub、`um-init`、`umnet`、`passt` 必须来自配套的 linux-um-arm64
-  构建。
-- ext4 根目前只在 64 MB 和 256 MB 镜像上验证过，其他容量未测试。
+- 内核、stub、`um-init`、`umnet` 必须来自配套的
+  [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) 构建；
+  `passt-bionic` 是 [passt-android](https://github.com/Raymer8639/passt-android)
+  构建的 companion。
+- ext4 根目前只在 64 MB、128 MB 和 256 MB 镜像上验证过，其他容量未测试。
 
 真机稳定性矩阵 18/18 PASS，覆盖 hostfs 带/不带 `--net`、guest 退出码 7 和 125、
 ext4 带/不带 `--net`、ext4 `--readonly`、持久与临时 COW、读写/只读绑定、
@@ -406,6 +413,12 @@ neoproot 的范围。
 - 便携版发布包使用 `-march=armv8-a -mtune=generic`；它只放宽 CPU 指令要求，不保证所有 libc 或内核兼容。
 - 链接选项包含 ThinLTO、段垃圾回收、相同代码折叠、RELRO/NOW 和去符号。
 - 构建依赖 `libtalloc`（Termux 包名：`talloc`），`upx` 为可选依赖。
+
+## 相关仓库
+
+- [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) —— UM 后端使用的 UML/arm64 内核、`stub_exe`、`um-init`、`umnet` 和 `passt-bionic` companion；`config/smp.config` 与 `config/docker.config` 是构建 SMP/容器内核 profile 的受支持方式。
+- [passt-android](https://github.com/Raymer8639/passt-android) —— `umnet` 使用的 Android/bionic `passt` 源码。
+- [termux/proot](https://github.com/termux/proot) —— fast 后端跟进的上游 PRoot 修复。
 
 ## 项目沿革
 
