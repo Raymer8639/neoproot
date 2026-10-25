@@ -236,6 +236,17 @@ endif
 UM_OBJECTS = backend/um_supervisor.o backend/um_session.o backend/um_main.o
 UM_LINK = $($(quiet)LD) -o $@ $^ $(LDFLAGS)
 
+# The guest's command loop is a shell script, not a C string: it runs inside
+# the guest as init.sh, so it has to be readable, testable with sh -n, and
+# runnable on its own by tests/test-um-session-loop.sh.  It is embedded at
+# build time so the binary still carries everything it needs.
+backend/um_session_loop.h: $(SRC)backend/um_session_loop.sh
+	@echo "  GEN	$@"
+	@EMBED_SOURCE=backend/um_session_loop.sh \
+		sh $(SRC)../scripts/embed-shell.sh um_session_loop_text $< > $@
+
+backend/um_session.o: backend/um_session_loop.h
+
 neoproot-um: $(UM_OBJECTS)
 	$(UM_LINK)
 	$(STRIP) --strip-all $@
