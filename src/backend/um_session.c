@@ -1000,10 +1000,20 @@ static int um_session_command_start(int argc, char *const argv[],
             return 0;
         }
         if (um_now() >= deadline) {
+            /*
+             * Leave the session up long enough to be looked at, and say what
+             * is there: the daemon's log is the only record of why the guest
+             * never reached its loop, and deleting it as part of giving up
+             * makes the failure unexplainable.
+             */
             fprintf(stderr,
-                    "neoproot-um: the guest did not become ready within %.0f s"
-                    "; see %s\n",
-                    UM_SESSION_READY_SECONDS, log_path);
+                    "neoproot-um: the guest did not become ready within %.0f s\n",
+                    UM_SESSION_READY_SECONDS);
+            fprintf(stderr, "neoproot-um: daemon log: %s\n", log_path);
+            fprintf(stderr,
+                    "neoproot-um: stop it with 'session --session-name=%s stop'"
+                    " (the state directory is kept)\n",
+                    name);
             return 1;
         }
         usleep(20000);

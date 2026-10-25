@@ -1841,7 +1841,36 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
     } else if (um_write_text(fd, "#!/bin/sh\n"
                               "um_fail() { printf '%s\\n' \"$1\" > ") < 0 ||
                um_write_shell_word(fd, status_path) < 0 ||
-               um_write_text(fd, "; sync; poweroff -f; while :; do sleep 3600; done; }\n"
+               um_write_text(fd,
+                              "; um_stop; }\n"
+                              /* A guest that cannot power off must still end: */
+                              /* a run that hangs is worse than one that fails. */
+                              /*
+                               * Stop the guest, in the order that loses the
+                               * least.  poweroff/reboot are what a normal
+                               * rootfs has; a rootfs with neither (a bare
+                               * busybox root, for instance) still has to end
+                               * the run rather than sink into a sleep loop,
+                               * and the kernel's "b" sysrq is the one thing
+                               * that works with no tooling at all.  It is
+                               * only reached when the polite paths failed.
+                               */
+                              "um_stop() {\n"
+                              "    sync 2>/dev/null\n"
+                              "    poweroff -f 2>/dev/null\n"
+                              "    reboot -f 2>/dev/null\n"
+                              "    printf b > /proc/sysrq-trigger 2>/dev/null\n"
+                              /*
+                               * Nothing below can end the guest, so do not end
+                               * init: a PID 1 that exits panics the kernel, and
+                               * a panic loses the guest's own error message.  A
+                               * process that has just been told to stop is
+                               * better parked than killed -- the supervisor
+                               * sees its deadline and shuts the machine down
+                               * from the host side.
+                               */
+                              "    while :; do sleep 3600; done\n"
+                              "}\n"
                               "mount -t proc proc /proc 2>/dev/null || "
                               "test -r /proc/self/status || um_fail 125\n"
                               "mount -t sysfs sysfs /sys 2>/dev/null || "
@@ -2078,7 +2107,7 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
                              "\num_session_leader \"$@\"\nrc=$?\n"
                              "printf '%s\\n' \"$rc\" > ") < 0 ||
                um_write_shell_word(fd, status_path) < 0 ||
-               um_write_text(fd, "\nsync\npoweroff -f\nwhile :; do sleep 3600; done\n") < 0)
+               um_write_text(fd, "\num_stop\n") < 0)
         goto failed;
     if (fsync(fd) < 0)
         goto failed;

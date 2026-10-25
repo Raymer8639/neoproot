@@ -89,8 +89,10 @@ um_poll=$um_poll_fast
 # with a stopwatch.
 um_busy_poll=$um_poll_slow
 # How many fast passes after a command before settling to the slow interval.
-um_fast_passes=50
+um_fast_passes=150
 um_passes=0
+# How many grace periods a TERM gets before KILL (40 x um_kill_sleep seconds).
+um_kill_wait=40
 
 # Publish NAME=value atomically: a reader must never see a half-written file.
 #
