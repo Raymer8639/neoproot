@@ -142,7 +142,8 @@ OBJECTS += \
 	extension/sysvipc/sysvipc_shm.o \
 	extension/link2symlink/link2symlink.o \
 	extension/fix_symlink_size/fix_symlink_size.o \
-	backend/um_supervisor.o
+	backend/um_supervisor.o \
+	backend/um_session.o
 
 # 仅 arm64：彻底移除 32bit loader 探测
 define define_from_arch.h
@@ -232,7 +233,7 @@ else
 	# 注意：UPX 压缩后不能再 strip（二进制已无节表，GNU strip 会报 "has no sections" 导致 CI 失败）
 endif
 
-UM_OBJECTS = backend/um_supervisor.o backend/um_main.o
+UM_OBJECTS = backend/um_supervisor.o backend/um_session.o backend/um_main.o
 UM_LINK = $($(quiet)LD) -o $@ $^ $(LDFLAGS)
 
 neoproot-um: $(UM_OBJECTS)

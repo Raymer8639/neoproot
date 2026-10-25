@@ -50,6 +50,7 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-um-supervisor-optimizations-argv.sh \
 	test-um-supervisor-cow-file-cli.sh \
 	test-um-supervisor-ext4-binds-cli.sh \
+	test-um-session-loop.sh test-um-session-daemon.sh \
 	test-auto-commands.sh
 
 # 默认目标
