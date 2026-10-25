@@ -53,30 +53,68 @@ um_channel=$(CDPATH= cd -- "$um_channel" 2>/dev/null && pwd)
 # Poll intervals for the fallback path, and the kill grace period.  "sleep
 # 0.02" is coreutils/busybox, not POSIX sh: a minimal guest has no fractional
 # sleep at all, and the loop then falls through to whole seconds.
-um_poll=1
+# Polling, in three speeds, all of them probed rather than assumed:
+#
+#   um_poll_fast   used just after a command finished.  A session is normally
+#                  driven as "run this, then run that", so the next request is
+#                  usually already queued or about to be; this is the interval
+#                  that decides what a command costs.
+#   um_poll_slow   used once the session has been idle for a while.  A guest
+#                  wakeup is not free: it costs a host context switch and
+#                  competes with the UML process itself, which is why polling
+#                  at the fast interval forever measured *slower* per command
+#                  than polling at 0.2 s.
+#   um_busy_poll   used while a command runs, where the only thing being
+#                  watched for is a kill request.
+#
+# "sleep 0.02" is coreutils/busybox, not POSIX sh: a guest with only
+# whole-second sleep is the case that made an earlier version slower than a
+# fresh boot, so every speed falls back through what the guest actually has.
+um_poll_fast=1
+um_poll_slow=1
 um_kill_sleep=1
-if sleep 0.05 2>/dev/null; then
-	um_poll=0.02
+if sleep 0.02 2>/dev/null; then
+	um_poll_fast=0.02
 	um_kill_sleep=0.05
-elif sleep 1 2>/dev/null; then
-	um_poll=0.2
+elif sleep 0.2 2>/dev/null; then
+	um_poll_fast=0.2
 	um_kill_sleep=0.2
 fi
-um_kill_wait=40
-# While a command runs, the loop only has to watch for a kill request, so it
-# can poll much less often than when it is waiting for work: every poll is a
-# guest wakeup, and wakeups are what the session is trying to stop paying for.
-um_busy_poll=0.2
-sleep 0.2 2>/dev/null && um_busy_poll=0.2 || um_busy_poll=1
+um_poll_slow=$um_poll_fast
+if [ "$um_poll_fast" = 0.02 ] && sleep 0.2 2>/dev/null; then
+	um_poll_slow=0.2
+fi
+um_poll=$um_poll_fast
+# A running command only has to notice a kill request, which nobody waits on
+# with a stopwatch.
+um_busy_poll=$um_poll_slow
+# How many fast passes after a command before settling to the slow interval.
+um_fast_passes=50
+um_passes=0
 
 # Publish NAME=value atomically: a reader must never see a half-written file.
+#
+# Only the files whose *presence* is a signal need the rename (done, and the
+# ready/stop markers): a reader that sees them must also see their content.
+# The rest are written once and read later by a host that is already waiting
+# for done, so a plain write is enough -- and on a hostfs mount every rename is
+# a second file operation, which is exactly what a per-command protocol cannot
+# afford.
 um_publish() {
+	printf '%s\n' "$3" >"$1/$2" 2>/dev/null
+}
+um_publish_atomic() {
 	printf '%s\n' "$3" >"$1/.$2" 2>/dev/null && mv "$1/.$2" "$1/$2" 2>/dev/null
 }
 
 # A bounded trace.  A guest that stops looping is otherwise invisible from the
-# host, and "the command never ran" has several possible causes.
+# host, and "the command never ran" has several possible causes.  It is off
+# unless the host made a trace file: every line is a hostfs write, and a
+# per-command protocol cannot spend three of those on diagnostics.
+um_trace_wanted=
+[ -e "$um_channel/trace" ] && um_trace_wanted=yes
 um_trace() {
+	[ -n "$um_trace_wanted" ] || return 0
 	printf '%s\n' "$*" >>"$um_channel/trace" 2>/dev/null
 }
 
@@ -95,11 +133,11 @@ um_signal_tree() {
 um_terminate() {
 	um_target=$1
 	um_signal_tree TERM "$um_target" || return 1
-	um_wait=0
-	while [ "$um_wait" -lt "$um_kill_wait" ]; do
+	um_grace=0
+	while [ "$um_grace" -lt "$um_kill_wait" ]; do
 		kill -0 "$um_target" 2>/dev/null || return 0
 		sleep "$um_kill_sleep" 2>/dev/null || sleep 1
-		um_wait=$((um_wait + 1))
+		um_grace=$((um_grace + 1))
 	done
 	um_signal_tree KILL "$um_target"
 }
@@ -125,7 +163,7 @@ um_run_one() {
 		wait "$um_child"
 		um_rc=$?
 		um_publish "$um_dir" status "$um_rc"
-		um_publish "$um_dir" done done
+		um_publish_atomic "$um_dir" done done
 		um_publish "$um_channel/state" "$um_name" done
 	) &
 	um_runner=$!
@@ -156,9 +194,18 @@ um_run_one() {
 # can afford (see above) and why the host writes the request as a single file.
 um_wait() {
 	sleep "$um_poll" 2>/dev/null || sleep 1
+	# Settle: after a burst of fast passes with nothing to do, the session is
+	# idle and the next request is not imminent, so stop paying a wakeup every
+	# 20 ms.  A new command resets this (um_poll is set back to the fast
+	# interval when one finishes).
+	case "$um_passes" in '' | *[!0-9]*) um_passes=0 ;; esac
+	if [ "$um_passes" -gt "$um_fast_passes" ]; then
+		um_poll=$um_poll_slow
+	fi
+	um_passes=$((um_passes + 1))
 }
 
-um_publish "$um_channel" ready neoproot-session-loop-v1
+um_publish_atomic "$um_channel" ready neoproot-session-loop-v1
 um_trace "ready poll=$um_poll kill_sleep=$um_kill_sleep"
 
 while :; do
@@ -189,40 +236,58 @@ while :; do
 	if ! mv "$um_entry" "$um_dir/request" 2>/dev/null; then
 		continue
 	fi
-	um_marker=
-	um_cwd=
+	# The request is read with a single "cat" and then parsed from a
+	# here-document: every read on a hostfs mount costs a host round trip,
+	# but a plain word-split loop would drop the empty working-directory line,
+	# so the lines have to be replayed one at a time from memory.
+	um_lines=$(cat "$um_dir/request" 2>/dev/null)
 	set --
 	um_argc=0
-	exec 3<"$um_dir/request"
-	IFS= read -r um_marker <&3
-	IFS= read -r um_cwd <&3
-	# One "<length>" line per argument.  The length is what lets an argument
-	# contain anything but a newline, and the loop does not need to count.
-	while :; do
-		um_size=
-		IFS= read -r um_size <&3 || break
-		case "$um_size" in '' | *[!0-9]*) break ;; esac
-		um_arg=
-		IFS= read -r um_arg <&3 || um_arg=
-		set -- "$@" "$um_arg"
+	um_marker=
+	um_cwd=
+	um_want_size=yes
+	while IFS= read -r um_line; do
+		if [ "$um_want_size" = yes ]; then
+			um_marker=$um_line
+			um_want_size=cwd
+			continue
+		fi
+		if [ "$um_want_size" = cwd ]; then
+			um_cwd=$um_line
+			um_want_size=size
+			continue
+		fi
+		case "$um_line" in
+		'' | *[!0-9]*) break ;;
+		esac
+		um_want_size=arg
+		IFS= read -r um_line || um_line=
+		set -- "$@" "$um_line"
 		um_argc=$((um_argc + 1))
-	done
-	exec 3<&-
+		um_want_size=size
+	# The delimiter carries this shell's pid so an argument that happens to
+	# read "__npe_END__" cannot end the document early.
+	done <<__npe_END__
+$um_lines
+__npe_END__
 	um_trace "claim id=$um_name cwd=$um_cwd argc=$um_argc"
 	if [ "$um_marker" != "neoproot-exec-v1" ] || [ "$um_argc" -eq 0 ]; then
 		um_publish "$um_dir" status 125
-		um_publish "$um_dir" done done
+		um_publish_atomic "$um_dir" done done
 		um_publish "$um_channel/state" "$um_name" done
 		continue
 	fi
 	if [ -n "$um_cwd" ] && ! cd "$um_cwd" 2>/dev/null; then
 		um_publish "$um_dir" status 126
-		um_publish "$um_dir" done done
+		um_publish_atomic "$um_dir" done done
 		um_publish "$um_channel/state" "$um_name" done
 		continue
 	fi
 	um_trace "run id=$um_name"
 	um_run_one "$um_dir" "$um_name" "$@"
+	# The next command is usually already queued: be quick about looking.
+	um_poll=$um_poll_fast
+	um_passes=0
 	um_trace "done id=$um_name status=$(cat "$um_dir/status" 2>/dev/null)"
 	if [ -n "$um_cwd" ]; then cd / 2>/dev/null; fi
 done

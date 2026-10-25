@@ -35,7 +35,11 @@ if awk '$1 == "TracerPid:" { exit ($2 != 0 ? 0 : 1) }' /proc/self/status; then
 	exit 125
 fi
 
-temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/neoproot-um-session.XXXXXX")
+# The state directory ends up as <TMPDIR>/neoproot-um-sessions/<name>/ctl.sock,
+# and a unix socket path is capped at 108 bytes.  Termux already spends 41 on
+# $PREFIX/tmp, so the work directory here keeps its own name short instead of
+# following the long "neoproot-um-session.XXXXXX" spelling.
+temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/nus.XXXXXX")
 runtime="$temporary_directory/state"
 rootfs="$temporary_directory/rootfs"
 mkdir -p "$runtime" "$rootfs/bin"
@@ -93,11 +97,18 @@ run_session start --rootfs="$rootfs" --hostfs --timeout=60 -- /bin/true \
 	fail "session start failed: $(cat "$temporary_directory/start.err")"
 grep -q 'started' "$temporary_directory/start.out" ||
 	fail "session start did not say the session started"
-[ -S "$state_path/ctl.sock" ] || fail "no control socket was created"
-[ -O "$state_path" ] || fail "the state directory is not ours"
-case "$(stat -c '%a' "$state_path")" in
-700) ;;
-*) fail "the state directory is $(stat -c '%a' "$state_path"), not 700" ;;
+[ -S "$state_path/ctl.sock" ] || {
+	ls -la "$state_path" >&2 2>/dev/null || echo "state dir missing: $state_path" >&2
+	fail "no control socket was created"
+}
+# POSIX test has no -O, and stat's mode flag is not portable either: read the
+# mode out of ls, whose first field is the same everywhere.  GNU ls appends a
+# trailing "." or "+" when an SELinux/ACL marker is present (every Termux path
+# has one), and that marker is not part of the mode.
+state_mode=$(ls -ld "$state_path" | awk '{ print $1 }' | sed 's/[.+]$//')
+case "$state_mode" in
+drwx------) ;;
+*) fail "the state directory is $state_mode, not drwx------" ;;
 esac
 daemon_pid=$(cat "$state_path/pid")
 kill -0 "$daemon_pid" 2>/dev/null || fail "the recorded daemon pid is not running"

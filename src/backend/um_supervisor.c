@@ -3415,7 +3415,7 @@ static void um_remove_session_channel(const char *channel_path)
         ".status", ".done", ".pid", NULL
     };
     static const char *const top_files[] = {
-        "ready", "stop", "trace", NULL
+        "ready", "stop", "trace", "wake", NULL
     };
     char path[PATH_MAX];
     DIR *directory;

@@ -1666,6 +1666,21 @@ static int um_daemon_listen(UmDaemon *daemon)
         snprintf(ready_path, sizeof(ready_path), "%s/ready",
                  daemon->state_path) >= (int)sizeof(ready_path))
         return 1;
+    /*
+     * The control socket lives at <state>/ctl.sock and connect() uses the same
+     * path.  A sun_path is 108 bytes on Linux, and a truncated path silently
+     * binds a *different*, shorter name (the symptom is a socket called "ct"),
+     * so a state directory that deep is refused here with the length in the
+     * message rather than producing a session nothing can connect to.
+     */
+    if (strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        fprintf(stderr,
+                "neoproot-um: session state path is too long for a unix "
+                "socket (%zu bytes, max %zu): %s\n",
+                strlen(path),
+                sizeof(((struct sockaddr_un *)0)->sun_path) - 1, path);
+        return 1;
+    }
     (void)unlink(path);
     listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (listen_fd < 0) {
