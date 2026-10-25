@@ -34,6 +34,7 @@
  * it to $@" with no quoting rules to get wrong.
  */
 
+#include "backend/um_session_loop.h"
 #include "backend/um_supervisor.h"
 
 #include <errno.h>
@@ -61,6 +62,8 @@
 #define UM_SESSION_STOP_SECONDS 30.0
 #define UM_SESSION_READY_SECONDS 300.0
 #define UM_SESSION_CLIENT_MS 50
+/* How long a queued request may sit before the guest is declared stuck. */
+#define UM_SESSION_CLAIM_SECONDS 30.0
 
 /*
  * A session name becomes a path component, so it is narrowed to what cannot
@@ -307,156 +310,11 @@ void um_session_remove_state(const char *state_path)
 /* --- the guest loop ---------------------------------------------------- */
 
 /*
- * The loop is written into the session's init.sh, so it runs with whatever
- * shell the guest has as PID 1 (or under /um-init).  It is deliberately POSIX
- * sh with no utilities beyond mkdir/mv/cat/rm/sleep/kill/setsid, because the
- * guest may be a minimal rootfs.
+ * Append the guest's command loop to the wrapper being generated.
  *
- * Ordering rules the host relies on:
- *   - a request is claimed by moving it out of queue/, so a second claim
- *     cannot happen even if the host retries,
- *   - status is published before done, and done last, so a host that sees
- *     done can read status without racing the guest,
- *   - ready is published only after queue/ and results/ exist.
- *
- * The command runs inside a subshell that waits for it, so the loop keeps
- * polling while it runs: a kill request from the host has to be seen while
- * the command is still running, and a blocking wait in the loop would not
- * see it.
- */
-static const char um_session_loop_text[] =
-    "case \"$0\" in\n"
-    "    */*) um_channel=${0%/*}/channel ;;\n"
-    "    *) um_channel=channel ;;\n"
-    "esac\n"
-    "um_poll=0.02\n"
-    "um_kill_wait=40\n"
-    "um_kill_sleep=0.05\n"
-    "um_publish() { printf '%s\\n' \"$3\" > \"$1/.$2\" 2>/dev/null &&"
-    " mv \"$1/.$2\" \"$1/$2\" 2>/dev/null; }\n"
-    "um_signal_tree() {\n"
-    "    um_sig=$1\n"
-    "    um_target=$2\n"
-    "    case \"$um_target\" in ''|*[!0-9]*) return 1 ;; esac\n"
-    "    if kill -s \"$um_sig\" -- \"-$um_target\" 2>/dev/null; then"
-    " return 0; fi\n"
-    "    if kill -\"$um_sig\" \"-$um_target\" 2>/dev/null; then return 0; fi\n"
-    "    if kill -s \"$um_sig\" \"$um_target\" 2>/dev/null; then return 0; fi\n"
-    "    kill -\"$um_sig\" \"$um_target\" 2>/dev/null\n"
-    "}\n"
-    "um_terminate() {\n"
-    "    um_target=$1\n"
-    "    um_signal_tree TERM \"$um_target\" || return 1\n"
-    "    um_wait=0\n"
-    "    while [ \"$um_wait\" -lt \"$um_kill_wait\" ]; do\n"
-    "        kill -0 \"$um_target\" 2>/dev/null || return 0\n"
-    "        sleep \"$um_kill_sleep\" 2>/dev/null || sleep 1\n"
-    "        um_wait=$((um_wait + 1))\n"
-    "    done\n"
-    "    um_signal_tree KILL \"$um_target\"\n"
-    "}\n"
-    "um_run_one() {\n"
-    "    um_dir=$1\n"
-    "    shift\n"
-    "    (\n"
-    "        if command -v setsid >/dev/null 2>&1; then\n"
-    "            setsid \"$@\" </dev/null >\"$um_dir/stdout\""
-    " 2>\"$um_dir/stderr\" &\n"
-    "        else\n"
-    "            \"$@\" </dev/null >\"$um_dir/stdout\" 2>\"$um_dir/stderr\" &\n"
-    "        fi\n"
-    "        um_child=$!\n"
-    "        um_publish \"$um_dir\" pid \"$um_child\"\n"
-    "        wait \"$um_child\"\n"
-    "        um_rc=$?\n"
-    "        um_publish \"$um_dir\" status \"$um_rc\"\n"
-    "        um_publish \"$um_dir\" done done\n"
-    "    ) &\n"
-    "    um_runner=$!\n"
-    "    while :; do\n"
-    "        [ -e \"$um_dir/done\" ] && break\n"
-    "        if [ -e \"$um_dir/kill\" ]; then\n"
-    "            um_terminate \"$(cat \"$um_dir/pid\" 2>/dev/null)\"\n"
-    "            while :; do\n"
-    "                [ -e \"$um_dir/done\" ] && break\n"
-    "                sleep \"$um_kill_sleep\" 2>/dev/null || sleep 1\n"
-    "            done\n"
-    "            break\n"
-    "        fi\n"
-    "        sleep \"$um_poll\" 2>/dev/null || sleep 1\n"
-    "    done\n"
-    "    wait \"$um_runner\" 2>/dev/null\n"
-    "}\n"
-    "mkdir -p \"$um_channel/queue\" \"$um_channel/results\" 2>/dev/null\n"
-    "um_channel=$(CDPATH= cd -- \"$um_channel\" 2>/dev/null && pwd)\n"
-    "[ -n \"$um_channel\" ] || exit 1\n"
-    "um_publish \"$um_channel\" ready " UM_SESSION_LOOP_MARKER "\n"
-    "while :; do\n"
-    "    if [ -e \"$um_channel/stop\" ]; then\n"
-    "        sync 2>/dev/null\n"
-    "        poweroff -f 2>/dev/null\n"
-    "        exit 0\n"
-    "    fi\n"
-    "    um_entry=\n"
-    "    for um_candidate in \"$um_channel\"/queue/*; do\n"
-    "        [ -e \"$um_candidate\" ] || continue\n"
-    "        um_entry=$um_candidate\n"
-    "        break\n"
-    "    done\n"
-    "    if [ -z \"$um_entry\" ]; then\n"
-    "        sleep \"$um_poll\" 2>/dev/null || sleep 1\n"
-    "        continue\n"
-    "    fi\n"
-    "    um_id=${um_entry##*/}\n"
-    "    case \"$um_id\" in ''|*[!0-9]*) rm -f \"$um_entry\"; continue ;; esac\n"
-    "    um_dir=$um_channel/results/$um_id\n"
-    "    if ! mkdir -p \"$um_dir\" 2>/dev/null; then\n"
-    "        sleep \"$um_kill_sleep\" 2>/dev/null || sleep 1\n"
-    "        continue\n"
-    "    fi\n"
-    "    if ! mv \"$um_entry\" \"$um_dir/request\" 2>/dev/null; then\n"
-    "        continue\n"
-    "    fi\n"
-    "    um_marker=\n"
-    "    um_cwd=\n"
-    "    set --\n"
-    "    um_argc=0\n"
-    "    exec 3< \"$um_dir/request\"\n"
-    "    IFS= read -r um_marker <&3\n"
-    "    IFS= read -r um_cwd <&3\n"
-    "    while :; do\n"
-    "        um_size=\n"
-    "        IFS= read -r um_size <&3 || break\n"
-    "        case \"$um_size\" in ''|*[!0-9]*) break ;; esac\n"
-    "        um_arg=\n"
-    "        IFS= read -r um_arg <&3 || um_arg=\n"
-    "        set -- \"$@\" \"$um_arg\"\n"
-    "        um_argc=$((um_argc + 1))\n"
-    "    done\n"
-    "    exec 3<&-\n"
-    "    if [ \"$um_marker\" != " UM_SESSION_REQUEST_MARKER " ] ||"
-    " [ \"$um_argc\" -eq 0 ]; then\n"
-    "        um_publish \"$um_dir\" status 125\n"
-    "        um_publish \"$um_dir\" done done\n"
-    "        continue\n"
-    "    fi\n"
-    "    if [ -n \"$um_cwd\" ] && ! cd \"$um_cwd\" 2>/dev/null; then\n"
-    "        um_publish \"$um_dir\" status 126\n"
-    "        um_publish \"$um_dir\" done done\n"
-    "        continue\n"
-    "    fi\n"
-    "    um_run_one \"$um_dir\" \"$@\"\n"
-    "    if [ -n \"$um_cwd\" ]; then cd / 2>/dev/null; fi\n"
-    "done\n";
-
-/*
- * The loop is appended to the session's init.sh, and finds its channel
- * relative to the script itself: the guest reaches init.sh at
- * /<session>/init.sh (hostfs) or /run/neoproot/init.sh (ext4), and the
- * channel is the channel/ directory next to it in both cases.  Deriving it
- * from $0 rather than being told means the host does not have to know what
- * the guest's path will be, and a copy of the script run by hand in a test
- * still finds its own channel.
+ * The loop is a shell script (backend/um_session_loop.sh) embedded at build
+ * time: it runs inside the guest, so it is written as shell and tested as
+ * shell, not as a C string literal that has to escape every quote.
  */
 int um_session_write_loop(int fd)
 {
@@ -1246,6 +1104,8 @@ typedef struct {
     int id;
     int client;
     int watchdog_ticks;
+    bool claimed;
+    double queued_at;
     UmLineReader reader;
     double deadline;
     bool timed_out;
@@ -1283,6 +1143,36 @@ static void um_daemon_publish(const char *directory, const char *name,
         return;
     }
     (void)rename(temporary, final);
+}
+
+/*
+ * Wake the guest loop.
+ *
+ * The loop blocks on a FIFO in the channel instead of polling it, so anything
+ * that changes what the loop should look at has to leave a byte there.  The
+ * FIFO is opened non-blocking for writing: with no reader (a guest that has
+ * not reached the loop yet, or one whose channel cannot hold a FIFO) the open
+ * fails with ENXIO and there is simply nothing to wake -- the loop will see
+ * the work when it starts or on its next poll.
+ */
+static void um_daemon_wake(const char *channel_host)
+{
+    char path[PATH_MAX];
+    int fd;
+
+    if (channel_host == NULL || channel_host[0] == '\0')
+        return;
+    if (snprintf(path, sizeof(path), "%s/wake", channel_host) >=
+        (int)sizeof(path))
+        return;
+    fd = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+        return;
+    /* A newline, not a bare byte: the loop reads the FIFO with a plain line
+     * read (portable sh has no reliable "-n 1"), and a line read returns when
+     * it sees the terminator. */
+    (void)write(fd, "w\n", 2);
+    close(fd);
 }
 
 /* A small file the guest wrote; -1 when it is not there (yet). */
@@ -1500,7 +1390,16 @@ static int um_daemon_poll_job(UmDaemon *daemon)
         um_daemon_stream(daemon, "ERR", daemon->stderr_fd,
                          &daemon->stderr_offset);
 
+    if (!daemon->claimed && access(daemon->directory, F_OK) == 0) {
+        daemon->claimed = true;
+        if (getenv("NEOPROOT_UM_SESSION_TRACE") != NULL)
+            fprintf(stderr, "trace: claimed %d after %.0f ms\n", daemon->id,
+                    (um_now() - daemon->queued_at) * 1000.0);
+    }
     if (um_daemon_job_done(daemon, &status)) {
+        if (getenv("NEOPROOT_UM_SESSION_TRACE") != NULL)
+            fprintf(stderr, "trace: done %d after %.0f ms\n", daemon->id,
+                    (um_now() - daemon->queued_at) * 1000.0);
         /* Whatever was written after done is still part of the output. */
         if (daemon->stdout_fd >= 0)
             um_daemon_stream(daemon, "OUT", daemon->stdout_fd,
@@ -1516,6 +1415,20 @@ static int um_daemon_poll_job(UmDaemon *daemon)
         daemon->timed_out = true;
         daemon->kill_sent = true;
         um_daemon_publish(daemon->directory, "kill", "timeout");
+        um_daemon_wake(daemon->channel_host);
+    }
+    /*
+     * A request the guest never claimed is a guest that is not looping: no
+     * amount of waiting turns that into output, and the caller is blocked on
+     * a socket that will never see EXIT.
+     */
+    if (!daemon->claimed &&
+        um_now() > daemon->queued_at + UM_SESSION_CLAIM_SECONDS) {
+        fprintf(stderr,
+                "neoproot-um: the guest did not claim request %d\n",
+                daemon->id);
+        um_daemon_end_job(daemon, 125);
+        return 0;
     }
     if (daemon->kill_sent && daemon->deadline > 0.0 &&
         um_now() > daemon->deadline + 15.0) {
@@ -1568,6 +1481,8 @@ static int um_daemon_start_job(UmDaemon *daemon, int client, char *payload,
     daemon->deadline = timeout_ms > 0
                            ? um_now() + (double)timeout_ms / 1000.0
                            : 0.0;
+    daemon->claimed = false;
+    daemon->queued_at = um_now();
     if (um_daemon_queue(daemon, payload, length) < 0) {
         (void)um_session_send_line(client, "BAD cannot queue the request");
         close(client);
@@ -1576,6 +1491,10 @@ static int um_daemon_start_job(UmDaemon *daemon, int client, char *payload,
         return 0;
     }
     daemon->state = UM_JOB_RUNNING;
+    um_daemon_wake(daemon->channel_host);
+    if (getenv("NEOPROOT_UM_SESSION_TRACE") != NULL)
+        fprintf(stderr, "trace: queued %d at %.3f\n", daemon->id,
+                daemon->queued_at);
     return 0;
 }
 
@@ -1784,7 +1703,9 @@ static int um_daemon_listen(UmDaemon *daemon)
         descriptors[1].fd = job ? daemon->client : -1;
         descriptors[1].events = POLLIN;
         descriptors[1].revents = 0;
-        ready = poll(descriptors, 2, 20);
+        /* A running job is polled by the guest's own loop interval; idling
+         * costs one wakeup per 100 ms and only has to notice STOP. */
+        ready = poll(descriptors, 2, job ? 5 : 100);
         if (ready < 0 && errno != EINTR)
             break;
 
@@ -1866,8 +1787,10 @@ static void um_daemon_shutdown(UmDaemon *daemon)
 {
     double deadline;
 
-    if (daemon->channel_host[0] != '\0')
+    if (daemon->channel_host[0] != '\0') {
         um_daemon_publish(daemon->channel_host, "stop", "stop");
+        um_daemon_wake(daemon->channel_host);
+    }
     deadline = um_now() + UM_SESSION_STOP_SECONDS;
     while (um_now() < deadline) {
         int status;

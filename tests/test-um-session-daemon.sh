@@ -35,7 +35,7 @@ if awk '$1 == "TracerPid:" { exit ($2 != 0 ? 0 : 1) }' /proc/self/status; then
 	exit 125
 fi
 
-temporary_directory=$(mktemp -d "$TMPDIR:-/tmp}/neoproot-um-session.XXXXXX")
+temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/neoproot-um-session.XXXXXX")
 runtime="$temporary_directory/state"
 rootfs="$temporary_directory/rootfs"
 mkdir -p "$runtime" "$rootfs/bin"
@@ -61,8 +61,8 @@ root=
 init=
 for argument do
 	case "$argument" in
-	rootflags=*) root=$argument#rootflags=} ;;
-	init=*) init=$argument#init=} ;;
+	rootflags=*) root=${argument#rootflags=} ;;
+	init=*) init=${argument#init=} ;;
 	esac
 done
 [ -n "$root" ] && [ -n "$init" ] || {
@@ -70,7 +70,7 @@ done
 	exit 1
 }
 case "$init" in
-/*/init.sh) session_directory=$init%/init.sh} ;;
+/*/init.sh) session_directory=${init%/init.sh} ;;
 *) echo "mock kernel: unexpected init $init" >&2; exit 1 ;;
 esac
 # The guest sees its rootfs as /, so the session directory is found under it.
@@ -161,7 +161,7 @@ run_session run -- /bin/sh -c 'echo alive' >"$temporary_directory/alive.out" \
 # The client forwards INT/TERM to the guest and reports 128+n.
 run_session run --timeout=30 -- /bin/sh -c 'sleep 20' \
 	>"$temporary_directory/signal.out" 2>"$temporary_directory/signal.err" &
-client_pid=$!}
+client_pid=$!
 attempt=0
 while [ "$attempt" -lt 100 ]; do
 	attempt=$((attempt + 1))

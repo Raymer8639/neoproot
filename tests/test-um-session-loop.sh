@@ -75,6 +75,9 @@ send() {
 			printf '%s\n' "$request_arg"
 		done
 	} >"$channel/queue/$request_id"
+	# The loop blocks on the wake FIFO instead of polling the queue, so a
+	# request has to be announced the way the daemon announces it.
+	wake
 	wait_for "$channel/results/$request_id/done" || {
 		echo "FAIL: request $request_id never finished" >&2
 		exit 1
@@ -83,6 +86,18 @@ send() {
 
 status_of() {
 	cat "$channel/results/$1/status"
+}
+
+# wake: announce that the channel changed, exactly as the daemon does.  The
+# open is non-blocking on purpose: the loop holds the FIFO open read-write, so
+# a reader exists, but a blocking open would hang the caller if it did not.
+wake() {
+	[ -p "$channel/wake" ] || return 0
+	python3 -c 'import os,sys
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_NONBLOCK)
+try: os.write(fd, b"w\n")
+finally: os.close(fd)' "$channel/wake" 2>/dev/null ||
+		( exec 7>"$channel/wake"; printf "w\n" >&7 ) 2>/dev/null || true
 }
 
 # The loop reads its channel from its own path, so it must be started as the
@@ -131,6 +146,7 @@ wait_for "$channel/results/5/pid" || fail "the running request has no pid"
 command_pid=$(cat "$channel/results/5/pid")
 kill -0 "$command_pid" 2>/dev/null || fail "the recorded pid is not running"
 : >"$channel/results/5/kill"
+wake
 wait_for "$channel/results/5/done" || fail "kill did not end the command"
 kill_status=$(status_of 5)
 # 128+SIGTERM is what a shell reports for a command it terminated.
@@ -150,6 +166,7 @@ done
 
 # --- stop ends the loop --------------------------------------------------
 : >"$channel/stop"
+wake
 attempt=0
 while kill -0 "$loop_pid" 2>/dev/null; do
 	attempt=$((attempt + 1))

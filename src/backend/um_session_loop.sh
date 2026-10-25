@@ -25,13 +25,49 @@
 #   ready                 written once the loop is polling
 #   stop                  written by the host to shut the guest down
 
+#   state/<id>            the loop's own "this id finished" marker, which the
+#                         host must not touch (it deletes results/<id> as soon
+#                         as it has the status, and a marker in there would be
+#                         gone before this side could look)
+#   ready                 written once the loop is polling
+#   stop                  written by the host to shut the guest down
+#
+# Why a FIFO and not a poll: a 20 ms poll looks free but is not.  Every
+# wakeup of a UML guest costs a host context switch, and on a phone one was
+# measured at roughly 15 ms.  The host knows when it queued something, so it
+# says so once: opening the FIFO for writing leaves a byte in it until the
+# loop reads it, and the loop blocks on that read instead of spinning.  A
+# guest whose channel cannot hold a FIFO falls back to polling, with an
+# interval chosen so a guest that only has whole-second sleep is not slowed
+# to a second per command.
+
 case "$0" in
 */*) um_channel=${0%/*}/channel ;;
 *) um_channel=channel ;;
 esac
-um_poll=0.02
+mkdir -p "$um_channel/queue" "$um_channel/results" "$um_channel/state" 2>/dev/null
+# An absolute path is what keeps every later "cd" out of the picture.
+um_channel=$(CDPATH= cd -- "$um_channel" 2>/dev/null && pwd)
+[ -n "$um_channel" ] || exit 1
+
+# Poll intervals for the fallback path, and the kill grace period.  "sleep
+# 0.02" is coreutils/busybox, not POSIX sh: a minimal guest has no fractional
+# sleep at all, and the loop then falls through to whole seconds.
+um_poll=1
+um_kill_sleep=1
+if sleep 0.05 2>/dev/null; then
+	um_poll=0.02
+	um_kill_sleep=0.05
+elif sleep 1 2>/dev/null; then
+	um_poll=0.2
+	um_kill_sleep=0.2
+fi
 um_kill_wait=40
-um_kill_sleep=0.05
+# While a command runs, the loop only has to watch for a kill request, so it
+# can poll much less often than when it is waiting for work: every poll is a
+# guest wakeup, and wakeups are what the session is trying to stop paying for.
+um_busy_poll=0.2
+sleep 0.2 2>/dev/null && um_busy_poll=0.2 || um_busy_poll=1
 
 # Publish NAME=value atomically: a reader must never see a half-written file.
 um_publish() {
@@ -103,17 +139,27 @@ um_run_one() {
 			done
 			break
 		fi
-		sleep "$um_poll" 2>/dev/null || sleep 1
+		sleep "$um_busy_poll" 2>/dev/null || sleep 1
 	done
 	wait "$um_runner" 2>/dev/null
 	rm -f "$um_finished" 2>/dev/null
 }
 
-mkdir -p "$um_channel/queue" "$um_channel/results" "$um_channel/state" 2>/dev/null
-# An absolute path is what keeps every later "cd" out of the picture.
-um_channel=$(CDPATH= cd -- "$um_channel" 2>/dev/null && pwd)
-[ -n "$um_channel" ] || exit 1
+# um_wait: one idle pass.
+#
+# This is a poll, not a blocking read, on purpose.  A FIFO in the channel looks
+# like the obvious way to wake the loop -- the host knows exactly when it
+# queued something -- but a hostfs mount does not carry FIFO semantics between
+# the host and the guest: the host's open() of a FIFO the guest created
+# answers ENXIO, so the wake byte can never be delivered.  A poll costs one
+# guest wakeup per interval, which is why the interval is as long as the guest
+# can afford (see above) and why the host writes the request as a single file.
+um_wait() {
+	sleep "$um_poll" 2>/dev/null || sleep 1
+}
+
 um_publish "$um_channel" ready neoproot-session-loop-v1
+um_trace "ready poll=$um_poll kill_sleep=$um_kill_sleep"
 
 while :; do
 	if [ -e "$um_channel/stop" ]; then
@@ -128,7 +174,7 @@ while :; do
 		break
 	done
 	if [ -z "$um_entry" ]; then
-		sleep "$um_poll" 2>/dev/null || sleep 1
+		um_wait
 		continue
 	fi
 	um_name=${um_entry##*/}

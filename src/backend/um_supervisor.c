@@ -3414,6 +3414,9 @@ static void um_remove_session_channel(const char *channel_path)
         "request", "pid", "kill", "status", "done", "stdout", "stderr",
         ".status", ".done", ".pid", NULL
     };
+    static const char *const top_files[] = {
+        "ready", "stop", "trace", NULL
+    };
     char path[PATH_MAX];
     DIR *directory;
     struct dirent *entry;
@@ -3447,6 +3450,30 @@ static void um_remove_session_channel(const char *channel_path)
             closedir(directory);
         }
         (void)rmdir(path);
+    }
+    /* channel/state/<id>: the loop's own finished markers. */
+    if (snprintf(path, sizeof(path), "%s/state", channel_path) <
+        (int)sizeof(path)) {
+        directory = opendir(path);
+        if (directory != NULL) {
+            while ((entry = readdir(directory)) != NULL) {
+                char entry_path[PATH_MAX];
+
+                if (entry->d_name[0] == '.')
+                    continue;
+                if (snprintf(entry_path, sizeof(entry_path), "%s/%s", path,
+                             entry->d_name) < (int)sizeof(entry_path))
+                    (void)unlink(entry_path);
+            }
+            closedir(directory);
+        }
+        (void)rmdir(path);
+    }
+    /* channel/ready, channel/stop, channel/trace */
+    for (size_t index = 0; top_files[index] != NULL; index++) {
+        if (snprintf(path, sizeof(path), "%s/%s", channel_path,
+                     top_files[index]) < (int)sizeof(path))
+            (void)unlink(path);
     }
     /* channel/queue/<id> */
     if (snprintf(path, sizeof(path), "%s/queue", channel_path) <
