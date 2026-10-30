@@ -16,8 +16,13 @@
 #   --shim-rootfs=DIR   also put the shim in this container rootfs (repeatable)
 #   --um-kernel=FILE    kernel to install as libexec/neoproot/um/linux-bionic
 #   --um-stub=FILE      stub_exe for it
-#   --um-net=FILE       umnet (optional, needed by --net)
-#   --um-passt=FILE     passt-bionic (optional, needed by --net)
+#   --um-net=FILE       umnet, the --net runner
+#   --um-passt=FILE     passt-bionic, the DHCP server --net needs
+#
+#   umnet and passt are not built by this repository (passt comes from
+#   passt-android), so the installer cannot fetch them. It asks for both by
+#   default, installs them beside the kernel, and says plainly when they are
+#   missing -- without them --net cannot work at all.
 #   --interactive       ask even when stdin is not a terminal
 #   --non-interactive   never ask; use the flags and defaults
 #   --help              show this text
@@ -55,8 +60,8 @@ Run without options on a terminal for the guided install.
                       /opt/neoproot/libstatfast.so (repeatable)
   --um-kernel=FILE    kernel to install at libexec/neoproot/um/linux-bionic
   --um-stub=FILE      stub_exe that goes with that kernel
-  --um-net=FILE       umnet, needed by --net (optional)
-  --um-passt=FILE     passt-bionic, needed by --net (optional)
+  --um-net=FILE       umnet, the --net runner (asked for by default)
+  --um-passt=FILE     passt-bionic, the DHCP server --net needs
   --interactive       ask even when stdin is not a terminal
   --non-interactive   never ask; use the flags and defaults
   --help              show this text
@@ -191,6 +196,25 @@ else
 		fi
 	fi
 
+	# --net is the reason most people want the um backend at all, so the two
+	# programs it needs are asked for by default rather than treated as extras.
+	if [ "$WITH_UM" = 1 ] && [ -z "$UM_NET" ]; then
+		say ""
+		say "  --net 需要 umnet 和 passt 两个程序（不在本仓库里）。"
+		UM_NET=$(ask_text "umnet 路径（留空则不装网络）" "")
+		if [ -n "$UM_NET" ] && [ -z "$UM_PASST" ]; then
+			UM_PASST=$(ask_text "passt-bionic 路径" "")
+		fi
+		if [ -n "$UM_NET" ] && [ ! -f "$UM_NET" ]; then
+			say "  注意: $UM_NET 不存在，跳过网络运行时"
+			UM_NET=
+			UM_PASST=
+		fi
+		if [ -n "$UM_NET" ] && [ -z "$UM_PASST" ]; then
+			say "  注意: 没有 passt，--net 仍会失败。用 --um-passt=FILE 补上"
+		fi
+	fi
+
 	if [ -z "$WITH_SHIM" ]; then
 		_choice=$(ask_choice "要不要 stat shim（加速 stat 系列系统调用）" 1 \
 			"要" \
@@ -215,6 +239,12 @@ else
 			say "  stub       : ${UM_STUB:-（无）}"
 		else
 			say "  内核       : 未提供（--backend=um 暂时不可用）"
+		fi
+		if [ -n "$UM_NET" ]; then
+			say "  umnet      : $UM_NET"
+			say "  passt      : ${UM_PASST:-（未提供，--net 不可用）}"
+		else
+			say "  umnet/passt: 未提供（--net 不可用）"
 		fi
 	else
 		say "  UML 后端   : 不安装"
@@ -310,11 +340,16 @@ if [ "$WITH_UM" = 1 ]; then
 			cp -f "$UM_NET" "$UM_DIR/umnet"
 			chmod 755 "$UM_DIR/umnet"
 			echo "==> umnet 已安装: $UM_DIR/umnet"
+		else
+			echo "==> 注意: 没有 umnet，--net 不可用。" >&2
+			echo "    补装: sh install.sh --um-net=umnet --um-passt=passt-bionic" >&2
 		fi
 		if [ -n "$UM_PASST" ] && [ -f "$UM_PASST" ]; then
 			cp -f "$UM_PASST" "$UM_DIR/passt-bionic"
 			chmod 755 "$UM_DIR/passt-bionic"
 			echo "==> passt 已安装: $UM_DIR/passt-bionic"
+		elif [ -n "$UM_NET" ]; then
+			echo "==> 注意: 没有 passt，--net 会失败。用 --um-passt=FILE 补上" >&2
 		fi
 	else
 		echo "==> 注意: 已安装 um 后端，但没有装内核。" >&2

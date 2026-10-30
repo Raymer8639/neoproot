@@ -49,6 +49,10 @@ The installer places `neoproot` in `$PREFIX/bin`.
 | `--with-shim` | The default: installs `libstatfast.so` to `$PREFIX/libexec/neoproot/`. |
 | `--without-shim` | Do not install the stat shim. |
 | `--shim-rootfs=DIR` | Also copy the shim into that container rootfs at `/opt/neoproot/libstatfast.so`. Repeatable. |
+| `--um-kernel=FILE` | Kernel to install at `libexec/neoproot/um/linux-bionic`. |
+| `--um-stub=FILE` | `stub_exe` that goes with that kernel. |
+| `--um-net=FILE` | `umnet`, the `--net` runner. |
+| `--um-passt=FILE` | `passt-bionic`, the DHCP server `--net` needs. |
 
 ```sh
 sh install.sh                                   # host install, UML + shim
@@ -56,6 +60,30 @@ sh install.sh --without-um                      # smallest neoproot
 sh install.sh --shim-rootfs=/data/.../alarm     # shim into the container too
 sh build.sh --without-um                        # build only, no install
 ```
+
+### The kernel and the network tools are separate files
+
+`neoproot` does not contain a UML kernel -- it `exec`s one -- and it does not
+contain `umnet` or `passt` either. Without them `--backend=um` cannot boot and
+`--net` cannot give the guest an address, so the installer asks for all four and
+puts them where `neoproot` looks for them:
+
+```
+<prefix>/libexec/neoproot/um/
+    linux-bionic     the kernel            (--um-kernel)
+    stub_exe         its boot stub         (--um-stub)
+    umnet            run a command with a  (--um-net)
+                     real IPv4 network
+    passt-bionic     the DHCP server       (--um-passt)
+```
+
+`neoproot` resolves its own prefix from `argv[0]` and adopts whatever it finds
+there, so none of them need to be exported. Anything set in the environment
+still wins.
+
+The kernel has to be **built from source** -- this repository does not ship one.
+`umnet` is the companion built alongside it; `passt` comes from
+[passt-android](https://github.com/Raymer8639/passt-android).
 
 ### The stat shim configures itself
 
