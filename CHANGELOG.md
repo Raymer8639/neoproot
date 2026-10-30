@@ -3,6 +3,41 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.16.0] - 2026-10-31
+
+**Out-of-the-box install: optional UML backend, options everywhere, shim wired up**
+
+The UML backend used to be something you had to know about: a second binary
+nobody built, a shim you had to pass by hand, and an install script with one
+argument. It is now a build option and an install option, and the shim
+configures itself.
+
+- Add `WITH_UM=1|0` to the build (`make WITH_UM=0`, `sh build.sh
+  --without-um`, `meson setup -Dum=false`). The default keeps the UML
+  backend, so nothing changes for existing users; `WITH_UM=0` leaves the
+  supervisor and the session daemon out of `neoproot` (402 K instead of
+  468 K) and does not build `neoproot-um` at all.
+- A build without the UML backend still explains itself: `--backend=um` says
+  the build has no um backend and points at `WITH_UM=1`, and `--backend=auto`
+  never selects a backend that is not there.
+- The switch reaches make's dependency graph through a generated
+  `um-config.h`. Carrying it only in `CPPFLAGS` was wrong: make does not
+  track variable changes, so switching `WITH_UM` reused objects compiled with
+  the other setting and the link failed on `neoproot_um_supervisor_main`.
+- `install.sh` takes options: `--prefix=DIR`, `--with-um`/`--without-um`,
+  `--with-shim`/`--without-shim`, `--shim-rootfs=DIR` (repeatable) and
+  `--help`. It builds with the same choice it installs, so the flag cannot
+  disagree with the binary. With `--without-um` an older `neoproot-um` is
+  renamed rather than left behind claiming a backend that is not there.
+- `--shim-rootfs=DIR` copies the stat shim into that container rootfs at
+  `/opt/neoproot/libstatfast.so`. The shim is a guest-ABI library, so
+  installing it on the host does nothing for the guest.
+- neoproot now finds the shim by itself: with `--seccomp-notify` on and
+  `/opt/neoproot/libstatfast.so` present in the rootfs, stat is served
+  in-process without anyone passing `--stat-shim`. `NEOPROOT_NO_STAT_SHIM=1`
+  opts out.
+- `build.sh` gained the matching `--with-um`/`--without-um`/`--help`.
+
 ## [v5.15.0] - 2026-10-30
 
 **Persistent UML session daemon**

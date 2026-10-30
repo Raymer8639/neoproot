@@ -103,8 +103,7 @@ c_sources = files('src/cli/neoproot.c',
   'src/extension/sysvipc/sysvipc_sem.c',
   'src/extension/sysvipc/sysvipc_shm.c',
   'src/extension/link2symlink/link2symlink.c',
-  'src/extension/fix_symlink_size/fix_symlink_size.c',
-  'src/backend/um_supervisor.c')
+  'src/extension/fix_symlink_size/fix_symlink_size.c')
 cpp_sources = files('src/tracee/mem.cpp',
   'src/tracee/reg.cpp')
 objcopy = find_program('objcopy', required: true)
@@ -133,7 +132,30 @@ endif
 # _binary_loader_exe_start/_end) rather than passing an absolute path.
 loader_cmd = ' '.join(cxx.cmd_array()) + ' ' + ' '.join(loader_cpp_args) + ' -c "' + srcdir + '/loader/loader.cpp" -o "' + loader_obj + '" && ' + ' '.join(cc.cmd_array()) + ' ' + ' '.join(loader_c_args) + ' -c "' + srcdir + '/loader/assembly.S" -o "' + assembly_obj + '" && ' + ' '.join(cc.cmd_array()) + ' -o "' + loader_exe + '" "' + loader_obj + '" "' + assembly_obj + '" -static -nostdlib ' + ' '.join(loader_ldflags) + ' && ' + strip.full_path() + ' "' + loader_exe + '" && cd "' + builddir + '" && ' + objcopy.full_path() + ' --input-target=binary --output-target=elf64-littleaarch64 --binary-architecture=aarch64 loader.exe "' + wrapped_obj + '"'
 loader = custom_target('loader-wrapped', output: 'loader-wrapped.o', depend_files: files('src/loader/loader.cpp', 'src/loader/assembly.S', 'src/loader/assembly-arm64.h', 'src/loader/script.h', 'src/arch.h', 'src/compat.h'), command: [run, '-c', loader_cmd], build_by_default: true, console: true)
+# The UML backend is optional, exactly as in GNUmake (make WITH_UM=0):
+#   meson setup build -Dum=false
+# Without it neoproot cannot run --backend=um and the dispatcher says so; the
+# standalone neoproot-um is not built at all.
+um_enabled = get_option('um')
+um_sources = []
+um_args = []
+um_targets = []
+if um_enabled
+  # The guest loop is real shell embedded as a C string, so it can be read and
+  # tested as shell.  Same generator the GNUmake build uses.
+  um_loop_header = custom_target('um-session-loop-header',
+    input: files('src/backend/um_session_loop.sh'),
+    output: 'um_session_loop.h',
+    command: [find_program('sh'), files('scripts/embed-shell.sh'), 'um_session_loop_text', '@INPUT@'],
+    capture: true)
+  um_sources = [files('src/backend/um_supervisor.c', 'src/backend/um_session.c'), um_loop_header]
+  um_args = ['-DNEOPROOT_WITH_UM', '-I' + meson.current_build_dir()]
+  um_targets = executable('neoproot-um',
+    files('src/backend/um_supervisor.c', 'src/backend/um_session.c', 'src/backend/um_main.c'),
+    dependencies: dep, c_args: c_args + um_args, link_args: link_args,
+    install: true, install_dir: get_option('bindir'))
+endif
+
 link_args = ['-flto=thin', '-fuse-ld=lld', '-Wl,--icf=all', '-Wl,-z,noexecstack', '-Wl,--gc-sections', '-Wl,-z,relro', '-Wl,-z,now', '-Wl,--strip-all', '-lpthread', '-s']
-executable('neoproot', c_sources + cpp_sources + loader, dependencies: dep, c_args: c_args, cpp_args: cpp_args, link_args: link_args, install: true, install_dir: get_option('bindir'))
-um_sources = files('src/backend/um_supervisor.c', 'src/backend/um_main.c')
-executable('neoproot-um', um_sources, dependencies: dep, c_args: c_args, link_args: link_args, install: true, install_dir: get_option('bindir'))
+executable('neoproot', c_sources + um_sources + cpp_sources + loader, dependencies: dep, c_args: c_args + um_args, cpp_args: cpp_args, link_args: link_args, install: true, install_dir: get_option('bindir'))
+

@@ -38,6 +38,45 @@ meson install -C builddir
 
 The installer places `neoproot` in `$PREFIX/bin`.
 
+### Install options
+
+`sh install.sh --help` lists them; the ones that change what you get:
+
+| Option | What it does |
+| --- | --- |
+| `--without-um` | Fast backend only. Leaves the UML supervisor and session daemon out of `neoproot` (402 K instead of 468 K) and does not install `neoproot-um`. `--backend=um` then says the build has no um backend. |
+| `--with-um` | The default: `neoproot` can boot a filesystem image with `--backend=um`, and `neoproot-um` is installed. |
+| `--with-shim` | The default: installs `libstatfast.so` to `$PREFIX/libexec/neoproot/`. |
+| `--without-shim` | Do not install the stat shim. |
+| `--shim-rootfs=DIR` | Also copy the shim into that container rootfs at `/opt/neoproot/libstatfast.so`. Repeatable. |
+
+```sh
+sh install.sh                                   # host install, UML + shim
+sh install.sh --without-um                      # smallest neoproot
+sh install.sh --shim-rootfs=/data/.../alarm     # shim into the container too
+sh build.sh --without-um                        # build only, no install
+```
+
+### The stat shim configures itself
+
+The shim is a **guest-ABI** library: installing it on the host does nothing for
+the guest. Put it in the container with `--shim-rootfs` (or copy it to
+`/opt/neoproot/libstatfast.so` yourself) and neoproot finds it on its own --
+no `--stat-shim` needed -- as long as `--seccomp-notify` is on, which is
+where its guest-side channel comes from. `NEOPROOT_NO_STAT_SHIM=1` turns the
+automatic use off.
+
+```sh
+# before: remember two flags and a guest path
+neoproot --seccomp-notify --stat-shim=/opt/neoproot/libstatfast.so -r rootfs -- cmd
+
+# after: install once
+sh install.sh --shim-rootfs=rootfs
+
+# then just
+neoproot --seccomp-notify -r rootfs -- cmd
+```
+
 On **ARM64 Linux** (not Termux), download `neoproot` or the lower-instruction-set `neoproot-portable` from [Releases](https://github.com/Raymer8639/neoproot/releases), verify its SHA256, and install it in your `PATH`.
 
 ## Why neoproot

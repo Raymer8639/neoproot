@@ -6,12 +6,21 @@
 #include <string.h>
 #include <stdbool.h>
 
+#include "um-config.h"
+
 #include "cli/auto_backend.h"
 #include "cli/backend.h"
 
 // 声明cli.c中的核心函数
 extern int proot_main(int argc, char *const argv[]);
+/*
+ * The UML backend is optional at build time (make WITH_UM=0).  A build
+ * without it keeps the dispatcher and the messages -- only the supervisor
+ * itself is missing, and the branch below says so instead of failing to link.
+ */
+#ifdef NEOPROOT_WITH_UM
 extern int neoproot_um_supervisor_main(int argc, char *const argv[]);
+#endif
 
 /* 优先使用 Android 的 /system/bin/sh；
  * 在嵌入式 Linux / 其他环境回退到 /bin/sh，避免 execve 直接失败 */
@@ -113,7 +122,12 @@ int main(int argc, char *const argv[])
                                            effective_argc, effective_argv),
                                        rootfs_kind,
                                        message, sizeof(message))
+#ifdef NEOPROOT_WITH_UM
                      ? BACKEND_UM : BACKEND_DEFAULT;
+#else
+                     /* Nothing to select: this build has no supervisor. */
+                     ? BACKEND_DEFAULT : BACKEND_DEFAULT;
+#endif
         fprintf(stderr, "%s\n", message);
     }
 
@@ -140,6 +154,7 @@ int main(int argc, char *const argv[])
     }
 
     if (backend == BACKEND_UM) {
+#ifdef NEOPROOT_WITH_UM
         int status;
 
         /*
@@ -160,6 +175,14 @@ int main(int argc, char *const argv[])
         status = neoproot_um_supervisor_main(effective_argc, effective_argv);
         free(effective_argv);
         return status;
+#else
+        fprintf(stderr,
+                "neoproot: this build has no um backend (built with WITH_UM=0).\n"
+                "neoproot: rebuild with 'make WITH_UM=1', or use --backend=fast for a\n"
+                "neoproot: directory rootfs.\n");
+        free(effective_argv);
+        return EXIT_FAILURE;
+#endif
     }
 
     // 要传递给termux的命令

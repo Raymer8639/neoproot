@@ -33,6 +33,17 @@ HAVE_UPX := $(shell command -v $(UPX) 2>/dev/null)
 # 默认针对 ARMv8.2（覆盖绝大多数 64 位 Android 设备）
 MARCH ?= -march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto -mtune=generic
 
+# Whether the UML backend is compiled into neoproot.
+#
+#   make                # default: WITH_UM=1, neoproot can run --backend=um
+#   make WITH_UM=0      # fast backend only: no UML objects, no neoproot-um
+#
+# The UML backend pulls in the supervisor (a few hundred KB of code that only
+# ever runs when --backend=um is asked for) and the session daemon.  A build
+# for a device that will never boot a filesystem image can leave it out and
+# get a smaller binary and a faster build.
+WITH_UM ?= 1
+
 CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH)
 
 CFLAGS   += -std=c23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
@@ -141,9 +152,12 @@ OBJECTS += \
 	extension/sysvipc/sysvipc_sem.o \
 	extension/sysvipc/sysvipc_shm.o \
 	extension/link2symlink/link2symlink.o \
-	extension/fix_symlink_size/fix_symlink_size.o \
+	extension/fix_symlink_size/fix_symlink_size.o
+ifeq ($(WITH_UM),1)
+OBJECTS += \
 	backend/um_supervisor.o \
 	backend/um_session.o
+endif
 
 # 仅 arm64：彻底移除 32bit loader 探测
 define define_from_arch.h
@@ -158,7 +172,11 @@ else
 endif
 
 .DEFAULT_GOAL = all
+ifeq ($(WITH_UM),1)
 all: neoproot neoproot-um
+else
+all: neoproot
+endif
 
 ######################################################################
 # Beautified output
@@ -317,15 +335,40 @@ DEPS = $(OBJECTS:.o=.d) $(UM_OBJECTS:.o=.d) $(LOADER_OBJECTS:.o=.d)
 # PHONY targets
 
 PREFIX ?= /usr/local
+# The UML switch has to reach both the compiler and make's dependency graph.
+# Carrying it only in CPPFLAGS was wrong: make does not track variable changes,
+# so switching WITH_UM reused objects compiled with the other setting and the
+# link failed with an undefined neoproot_um_supervisor_main.  A generated
+# header is what makes the change visible to make.
+UM_CONFIG_HEADER = um-config.h
+$(UM_CONFIG_HEADER): FORCE
+	@if [ "$(WITH_UM)" = "1" ]; then \
+		printf '%s\n' '/* Generated: this build has the UML backend. */' '#define NEOPROOT_WITH_UM 1' > $@.tmp; \
+	else \
+		printf '%s\n' '/* Generated: this build has no UML backend. */' > $@.tmp; \
+	fi
+	@cmp -s $@.tmp $@ 2>/dev/null || mv -f $@.tmp $@
+	@rm -f $@.tmp
+FORCE:
+
+# Only the dispatcher needs the flag; everything else is unaffected.
+cli/neoproot.o: $(UM_CONFIG_HEADER)
+
 BINDIR ?= $(PREFIX)/bin
 
 .PHONY: clean distclean install uninstall
 clean distclean:
-	-$(RM) -f $(OBJECTS) $(UM_OBJECTS) $(LOADER_OBJECTS) neoproot neoproot-um loader/loader $(DEPS) licenses build.h
+	-$(RM) -f $(OBJECTS) $(UM_OBJECTS) $(LOADER_OBJECTS) neoproot neoproot-um loader/loader $(DEPS) licenses build.h $(UM_CONFIG_HEADER)
 
+ifeq ($(WITH_UM),1)
 install: neoproot neoproot-um
+else
+install: neoproot
+endif
 	$($(quiet)INSTALL) -D neoproot $(DESTDIR)$(BINDIR)/neoproot
+ifeq ($(WITH_UM),1)
 	$($(quiet)INSTALL) -D neoproot-um $(DESTDIR)$(BINDIR)/neoproot-um
+endif
 ifdef PROOT_UNBUNDLE_LOADER
 	$(INSTALL) -D loader/loader $(PROOT_UNBUNDLE_LOADER)/loader
 endif

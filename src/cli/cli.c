@@ -348,6 +348,30 @@ int proot_main(int argc, char *const argv[]) {
     }
     status = parse_config(tracee, (size_t)argc, argv);
     if (UNLIKELY(status < 0)) goto error;
+    /*
+     * Use the stat shim without being told to.
+     *
+     * The shim is a guest-ABI library, so it only helps when it is present
+     * *inside* the container -- install.sh puts it at /opt/neoproot in the
+     * rootfs for exactly this.  Looking for it here is what makes a plain
+     * "neoproot -r <rootfs> -- cmd" fast without anyone remembering a flag.
+     *
+     * Two conditions, both deliberate: --seccomp-notify must be on (without
+     * its USER_NOTIF channel the shim cannot be correct, and the block below
+     * would print a warning and disable it), and the caller must not have
+     * opted out with NEOPROOT_NO_STAT_SHIM=1.
+     */
+    if (tracee->stat_shim_lib == NULL && tracee->seccomp_notify &&
+        tracee->rootfs != NULL && getenv("NEOPROOT_NO_STAT_SHIM") == NULL) {
+        static const char guest_shim[] = "/opt/neoproot/libstatfast.so";
+        char host_shim[PATH_MAX];
+        int length = snprintf(host_shim, sizeof(host_shim), "%s%s",
+                              tracee->rootfs, guest_shim);
+
+        if (length > 0 && (size_t)length < sizeof(host_shim) &&
+            access(host_shim, R_OK) == 0)
+            tracee->stat_shim_lib = talloc_strdup(tracee->life_context, guest_shim);
+    }
     if (tracee->stat_shim_lib != NULL && !tracee->seccomp_notify) {
         /* The in-process shim cannot reproduce three things by itself:
          * relative names at AT_FDCWD (the tracee's cwd is virtual), a path
