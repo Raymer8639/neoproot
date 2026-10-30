@@ -1,0 +1,96 @@
+# Build the UML runtime and attach it to the release.
+#
+# neoproot is a supervisor: it execs a kernel, and --net runs umnet + passt.
+# None of those are built here -- the kernel, stub_exe, umnet and passt-bionic
+# all come from linux-um-arm64 (passt from passt-android) -- so without this job
+# "curl | sh" installs a neoproot that cannot boot a guest or reach the network,
+# and the user has to build a kernel before anything works.
+#
+# Kept as its own workflow on purpose.  It builds someone else's tree with a
+# pinned ref, so a change over there must not be able to fail a neoproot
+# release: if this job breaks, the binaries are still published and the
+# installer falls back to asking for the four files by path.
+name: um runtime
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      um_ref:
+        description: linux-um-arm64 ref to build
+        required: false
+        default: um-arm64
+
+permissions:
+  contents: write
+
+env:
+  # Bump both together; a kernel is only supported with the um-init, umnet and
+  # passt of the same tree.
+  UM_REPO: Raymer8639/linux-um-arm64
+  UM_REF: ${{ github.event.inputs.um_ref || 'um-arm64' }}
+  NDK_VERSION: 29.0.14206865
+
+jobs:
+  runtime:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Check out linux-um-arm64
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UM_REPO }}
+          ref: ${{ env.UM_REF }}
+          path: um
+
+      - name: Install the Android NDK
+        run: |
+          set -eu
+          url="https://dl.google.com/android/repository/android-ndk-r${NDK_VERSION%-*}-linux.zip"
+          curl -fsSL -o /tmp/ndk.zip "$url"
+          unzip -q /tmp/ndk.zip -d /opt
+          echo "ANDROID_NDK_HOME=/opt/android-ndk-r${NDK_VERSION%-*}" >> "$GITHUB_ENV"
+
+      - name: Build the kernel, stub, umnet and passt
+        run: |
+          set -eu
+          cd um
+          ls tools/um-arm64/harness/
+          # The harness is the supported entry point; it builds with the NDK
+          # above and leaves its output in the tree.
+          sh tools/um-arm64/harness/build-bionic.sh
+
+      - name: Collect the runtime
+        run: |
+          set -eu
+          mkdir -p dist
+          # The harness writes next to the tree; find the four files by name so a
+          # layout change upstream is a clear "missing file", not a silent skip.
+          for name in linux-bionic stub_exe umnet passt-bionic; do
+            path=$(find um -name "$name" -type f -perm -u+x | head -1)
+            if [ -z "$path" ]; then
+              echo "::error::build did not produce $name"
+              exit 1
+            fi
+            cp "$path" "dist/$name"
+            chmod 755 "dist/$name"
+            echo "$name <- $path"
+          done
+          ls -lh dist
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          # The binaries job creates the release; this one only adds files, so it
+          # must not overwrite the notes the other job writes.
+          append_body: false
+          generate_release_notes: false
+
+      - name: Keep the runtime as an artifact too
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-runtime
+          path: dist/*
+          if-no-files-found: error

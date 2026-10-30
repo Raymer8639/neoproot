@@ -118,6 +118,46 @@ install_binary() { # install_binary NEW_BINARY PREFIX
 	"$bin_target" --version 2>/dev/null || warn "installed binary did not report a version"
 }
 
+# Install the UML runtime beside the binary.
+#
+# neoproot is a supervisor: it execs a kernel, and --net runs umnet + passt.
+# Those are built by linux-um-arm64 (an older release may not publish them), so
+# a missing asset is a note, not a failure -- but it has to be said, because a
+# neoproot with no kernel answers its first --backend=um with
+# "set --kernel/--stub", which reads like a broken install.
+install_um_runtime() {
+	_tag=$1
+	_base=$2
+	_prefix=$3
+	_um_dir=$_prefix/libexec/neoproot/um
+	_found=0
+	_missing=
+
+	mkdir -p "$_um_dir" 2>/dev/null || true
+	for _name in linux-bionic stub_exe umnet passt-bionic; do
+		if fetch "$_base/$_name" "$_um_dir/$_name" 2>/dev/null; then
+			chmod 755 "$_um_dir/$_name"
+			_found=$((_found + 1))
+		else
+			_missing="$_missing $_name"
+		fi
+	done
+
+	if [ "$_found" -eq 4 ]; then
+		log "UML runtime installed($_um_dir)"
+		return 0
+	fi
+	if [ "$_found" -eq 0 ]; then
+		warn "this release does not publish the UML runtime (kernel, stub_exe, umnet, passt)"
+		warn "--backend=um needs them; build linux-um-arm64 or sh install.sh --um-kernel=..."
+		rmdir "$_um_dir" 2>/dev/null || true
+		return 0
+	fi
+	warn "UML runtime is incomplete, missing:$_missing"
+	warn "put them in $_um_dir (see the README section on the kernel and network tools)"
+	return 0
+}
+
 next_steps() {
 	cat <<'NEXT'
 
@@ -203,6 +243,7 @@ else
 		|| die "checksum verification failed"
 	[ -n "$PREFIX_DIR" ] || PREFIX_DIR=${HOME:?}/.local
 	install_binary "$workdir/$asset" "$PREFIX_DIR"
+	install_um_runtime "$tag" "$base" "$PREFIX_DIR"
 fi
 
 next_steps
