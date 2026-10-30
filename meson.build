@@ -139,7 +139,6 @@ loader = custom_target('loader-wrapped', output: 'loader-wrapped.o', depend_file
 um_enabled = get_option('um')
 um_sources = []
 um_args = []
-um_targets = []
 if um_enabled
   # The guest loop is real shell embedded as a C string, so it can be read and
   # tested as shell.  Same generator the GNUmake build uses.
@@ -150,10 +149,11 @@ if um_enabled
     capture: true)
   um_sources = [files('src/backend/um_supervisor.c', 'src/backend/um_session.c'), um_loop_header]
   um_args = ['-DNEOPROOT_WITH_UM', '-I' + meson.current_build_dir()]
-  um_targets = executable('neoproot-um',
-    files('src/backend/um_supervisor.c', 'src/backend/um_session.c', 'src/backend/um_main.c'),
-    dependencies: dep, c_args: c_args + um_args, link_args: link_args,
-    install: true, install_dir: get_option('bindir'))
+  # neoproot contains the supervisor already, so the second name is a link to
+  # it; which name it was called by selects the command line.
+  install_symlink('neoproot-um',
+    install_dir: get_option('bindir'),
+    pointing_to: 'neoproot')
 endif
 
 link_args = ['-flto=thin', '-fuse-ld=lld', '-Wl,--icf=all', '-Wl,-z,noexecstack', '-Wl,--gc-sections', '-Wl,-z,relro', '-Wl,-z,now', '-Wl,--strip-all', '-lpthread', '-s']

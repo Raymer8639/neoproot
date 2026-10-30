@@ -251,7 +251,7 @@ else
 	# 注意：UPX 压缩后不能再 strip（二进制已无节表，GNU strip 会报 "has no sections" 导致 CI 失败）
 endif
 
-UM_OBJECTS = backend/um_supervisor.o backend/um_session.o backend/um_main.o
+UM_OBJECTS = backend/um_supervisor.o backend/um_session.o
 UM_LINK = $($(quiet)LD) -o $@ $^ $(LDFLAGS)
 
 # The guest's command loop is a shell script, not a C string: it runs inside
@@ -265,9 +265,14 @@ backend/um_session_loop.h: $(SRC)backend/um_session_loop.sh
 
 backend/um_session.o: backend/um_session_loop.h
 
-neoproot-um: $(UM_OBJECTS)
-	$(UM_LINK)
-	$(STRIP) --strip-all $@
+# neoproot already contains the UML supervisor, so the second name is a link to
+# it rather than a second copy of the same code (about 90 KB on device).  Which
+# name it was called by selects the command line; see cli/neoproot.c.
+ifeq ($(WITH_UM),1)
+neoproot-um: neoproot
+	@echo "  LN	$@"
+	@ln -sf neoproot $@
+endif
 
 %.o: $(SRC)%.c
 	@mkdir -p $(dir $@)
@@ -367,7 +372,8 @@ install: neoproot
 endif
 	$($(quiet)INSTALL) -D neoproot $(DESTDIR)$(BINDIR)/neoproot
 ifeq ($(WITH_UM),1)
-	$($(quiet)INSTALL) -D neoproot-um $(DESTDIR)$(BINDIR)/neoproot-um
+	$(INSTALL) -d $(DESTDIR)$(BINDIR)
+	ln -sf neoproot $(DESTDIR)$(BINDIR)/neoproot-um
 endif
 ifdef PROOT_UNBUNDLE_LOADER
 	$(INSTALL) -D loader/loader $(PROOT_UNBUNDLE_LOADER)/loader

@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <errno.h>
@@ -70,6 +71,81 @@ static int reject_traced_startup(void)
     return 0;
 }
 
+#ifdef NEOPROOT_WITH_UM
+/*
+ * Find the UML kernel that install.sh put beside this binary.
+ *
+ * neoproot does not contain a kernel -- it execs one -- so an install with the
+ * um backend is only usable if a kernel came with it.  Rather than make every
+ * caller export NEOPROOT_UM_KERNEL, look where the installer puts it:
+ *
+ *     <prefix>/bin/neoproot        this binary
+ *     <prefix>/libexec/neoproot/um/linux-bionic
+ *     <prefix>/libexec/neoproot/um/stub_exe
+ *
+ * argv[0] is resolved through realpath first because neoproot-um is a link to
+ * neoproot, and without it the search would start in the wrong directory.
+ * Anything the caller already set wins: the environment is read, never
+ * overwritten.
+ */
+static void adopt_installed_um_files(const char *argv0)
+{
+    static const struct {
+        const char *variable;
+        const char *name;
+    } files[] = {
+        { "NEOPROOT_UM_KERNEL", "linux-bionic" },
+        { "NEOPROOT_UM_STUB", "stub_exe" },
+        { "NEOPROOT_UM_NET", "umnet" },
+        { "NEOPROOT_UM_PASST", "passt-bionic" },
+    };
+    char resolved[PATH_MAX];
+    char bindir[PATH_MAX];
+    char prefix[PATH_MAX];
+    char directory[PATH_MAX];
+    const char *slash;
+    size_t index;
+
+    if (argv0 == NULL || argv0[0] == '\0')
+        return;
+    /* neoproot-um is a link to neoproot, so argv[0] alone points at the link. */
+    if (realpath(argv0, resolved) == NULL)
+        return;
+    slash = strrchr(resolved, '/');
+    if (slash == NULL)
+        return;
+
+    /* <prefix>/bin/neoproot -> <prefix>/bin */
+    memcpy(bindir, resolved, (size_t)(slash - resolved));
+    bindir[slash - resolved] = '\0';
+    /* ... and up one, resolved so the result has no ".." component: the
+     * supervisor refuses a kernel path that contains one. */
+    slash = strrchr(bindir, '/');
+    if (slash == NULL)
+        return;
+    memcpy(prefix, bindir, (size_t)(slash - bindir));
+    prefix[slash - bindir] = '\0';
+    if (prefix[0] == '\0')
+        strcpy(prefix, "/");
+
+    if (snprintf(directory, sizeof(directory), "%s/libexec/neoproot/um", prefix) >=
+        (int)sizeof(directory))
+        return;
+
+    for (index = 0; index < sizeof(files) / sizeof(files[0]); index++) {
+        char path[PATH_MAX];
+        const char *existing = getenv(files[index].variable);
+
+        if (existing != NULL && existing[0] != '\0')
+            continue;
+        if (snprintf(path, sizeof(path), "%s/%s", directory,
+                     files[index].name) >= (int)sizeof(path))
+            continue;
+        if (access(path, R_OK) == 0)
+            setenv(files[index].variable, path, 1);
+    }
+}
+
 int main(int argc, char *const argv[])
 {
     char **effective_argv;
@@ -80,6 +156,28 @@ int main(int argc, char *const argv[])
     enum neoproot_rootfs_kind rootfs_kind;
     bool cow_file;
 
+
+    /*
+     * One binary, two names.
+     *
+     * neoproot already contains the UML supervisor, so "neoproot-um" is
+     * installed as a link to it rather than as a second copy of the same
+     * backend.  Which name it was called by decides which command line is
+     * parsed: "neoproot-um session start ..." has to reach the supervisor
+     * before neoproot's own option parser reads "session" as a guest command.
+     */
+    adopt_installed_um_files(argc > 0 ? argv[0] : NULL);
+    {
+        const char *invoked_as =
+            (argv[0] != NULL) ? strrchr(argv[0], '/') : NULL;
+
+        invoked_as = (invoked_as != NULL) ? invoked_as + 1 : argv[0];
+        if (invoked_as != NULL &&
+            (strcmp(invoked_as, "neoproot-um") == 0 ||
+             strcmp(invoked_as, "uproot") == 0))
+            return neoproot_um_supervisor_main(argc, argv);
+    }
+#endif
     if (reject_traced_startup())
         return EXIT_FAILURE;
     if (neoproot_prepare_backend_argv(argc, argv, &effective_argv,
