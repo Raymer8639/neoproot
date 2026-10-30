@@ -142,6 +142,12 @@ jobs:
           seccomp_status=$?
           TMPDIR=/tmp/neoproot-um-cli-ci sh test-um-supervisor-optimizations-argv.sh
           optim_status=$?
+          # Persistent sessions: the guest loop (plain sh, no kernel) and the
+          # daemon (a mock kernel stands in for the boot).
+          TMPDIR=/tmp/neoproot-um-cli-ci sh test-um-session-loop.sh
+          loop_status=$?
+          TMPDIR=/tmp/neoproot-um-cli-ci sh test-um-session-daemon.sh
+          session_status=$?
           set -e
           test "$um_status" -eq 0 || test "$um_status" -eq 125
           test "$cow_status" -eq 0 || test "$cow_status" -eq 125
@@ -149,6 +155,8 @@ jobs:
           test "$net_status" -eq 0 || test "$net_status" -eq 125
           test "$seccomp_status" -eq 0 || test "$seccomp_status" -eq 125
           test "$optim_status" -eq 0 || test "$optim_status" -eq 125
+          test "$loop_status" -eq 0 || test "$loop_status" -eq 125
+          test "$session_status" -eq 0 || test "$session_status" -eq 125
 
       - name: Test internal binding mountinfo
         run: |

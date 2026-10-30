@@ -43,6 +43,8 @@ extern char **environ;
 #define UM_SIGNAL_GRACE_SECONDS 2.0
 #define UM_DRAIN_SECONDS 2.0
 #define UM_MAX_BINDS 64
+#define UM_SESSION_NAME_LIMIT 64
+#define UM_SESSION_CHANNEL "/.neoproot-um-session"
 
 /*
  * Files the supervisor and a session-aware guest init exchange through the
@@ -108,6 +110,18 @@ typedef struct {
     const char *kernel;
     const char *stub;
     const char *rootfs;
+    /*
+     * Session mode: instead of running one command and shutting the guest
+     * down, the generated init.sh runs a request loop, and this process stays
+     * alive as the session's daemon with a control socket.  The command line
+     * after -- is empty in that case.
+     */
+    bool session;
+    /* Host-only session state directory, from --session-state. */
+    const char *session_state;
+    /* Host and guest paths of the loop's channel directory. */
+    char session_channel_host[PATH_MAX];
+    char session_channel_guest[PATH_MAX];
     const char *cow_file;
     const char *cwd;
     double timeout;
@@ -210,7 +224,7 @@ static void um_apply_window_size(int master_fd)
  * since um_set_nonblocking() owns stdin's flags later in startup.
  */
 
-static double um_now(void)
+double um_now(void)
 {
     struct timespec value;
 
@@ -219,7 +233,7 @@ static double um_now(void)
     return (double)value.tv_sec + (double)value.tv_nsec / 1000000000.0;
 }
 
-static int um_write_all(int fd, const void *data, size_t length)
+int um_write_all(int fd, const void *data, size_t length)
 {
     const unsigned char *cursor = data;
 
@@ -1412,6 +1426,16 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
             if (config->quiet)
                 goto invalid;
             config->quiet = true;
+        } else if (strcmp(argument, "--session") == 0) {
+            /* Internal: the guest runs the request loop, not a command. */
+            if (config->session)
+                goto invalid;
+            config->session = true;
+        } else if (strncmp(argument, "--session-state=", 16) == 0) {
+            /* Internal: where the daemon's meta/ready/stop files go. */
+            if (config->session_state != NULL || argument[16] == '\0')
+                goto invalid;
+            config->session_state = argument + 16;
         } else if (strcmp(argument, "-w") == 0 ||
                    strcmp(argument, "--pwd") == 0) {
             if (++index >= argc || cwd_set)
@@ -1452,11 +1476,19 @@ static int um_parse_args(int argc, char *const argv[], UmConfig *config,
             goto invalid;
         }
     }
-    if (!config->saw_delimiter || index >= argc) {
-        fprintf(stderr, "neoproot-um: use -- before the guest command\n");
-        return -1;
+    /*
+     * In session mode the command line after -- is empty by design: commands
+     * arrive over the control socket instead.  Every other option means the
+     * same thing, which is what lets a session reuse the one-shot machinery
+     * (kernel vector, COW, binds, timeout, seccomp) rather than a copy of it.
+     */
+    if (!config->session) {
+        if (!config->saw_delimiter || index >= argc) {
+            fprintf(stderr, "neoproot-um: use -- before the guest command\n");
+            return -1;
+        }
     }
-    *guest_index = index;
+    *guest_index = config->session ? argc : index;
 
     if (!rootfs_set) {
         fprintf(stderr, "neoproot-um: --rootfs is required\n");
@@ -1809,7 +1841,36 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
     } else if (um_write_text(fd, "#!/bin/sh\n"
                               "um_fail() { printf '%s\\n' \"$1\" > ") < 0 ||
                um_write_shell_word(fd, status_path) < 0 ||
-               um_write_text(fd, "; sync; poweroff -f; while :; do sleep 3600; done; }\n"
+               um_write_text(fd,
+                              "; um_stop; }\n"
+                              /* A guest that cannot power off must still end: */
+                              /* a run that hangs is worse than one that fails. */
+                              /*
+                               * Stop the guest, in the order that loses the
+                               * least.  poweroff/reboot are what a normal
+                               * rootfs has; a rootfs with neither (a bare
+                               * busybox root, for instance) still has to end
+                               * the run rather than sink into a sleep loop,
+                               * and the kernel's "b" sysrq is the one thing
+                               * that works with no tooling at all.  It is
+                               * only reached when the polite paths failed.
+                               */
+                              "um_stop() {\n"
+                              "    sync 2>/dev/null\n"
+                              "    poweroff -f 2>/dev/null\n"
+                              "    reboot -f 2>/dev/null\n"
+                              "    printf b > /proc/sysrq-trigger 2>/dev/null\n"
+                              /*
+                               * Nothing below can end the guest, so do not end
+                               * init: a PID 1 that exits panics the kernel, and
+                               * a panic loses the guest's own error message.  A
+                               * process that has just been told to stop is
+                               * better parked than killed -- the supervisor
+                               * sees its deadline and shuts the machine down
+                               * from the host side.
+                               */
+                              "    while :; do sleep 3600; done\n"
+                              "}\n"
                               "mount -t proc proc /proc 2>/dev/null || "
                               "test -r /proc/self/status || um_fail 125\n"
                               "mount -t sysfs sysfs /sys 2>/dev/null || "
@@ -1974,6 +2035,25 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
             goto failed;
     }
 
+    /*
+     * Session mode: the guest runs the request loop instead of a command, so
+     * the wrapper stops here.  Everything above -- mounts, binds, loopback,
+     * the exported environment -- is exactly what each command in the session
+     * inherits, which is why the same generation path is reused rather than a
+     * second wrapper being written for sessions.
+     */
+    if (config->session) {
+        if (um_session_write_loop(fd) < 0)
+            goto failed;
+        if (fsync(fd) < 0)
+            goto failed;
+        if (close(fd) < 0) {
+            unlink(wrapper_path);
+            return -1;
+        }
+        return 0;
+    }
+
     if (um_write_text(fd, "cd ") < 0 ||
         um_write_shell_word(fd, cwd) < 0 ||
         um_write_text(fd, " || exit 126\n") < 0)
@@ -2027,7 +2107,7 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
                              "\num_session_leader \"$@\"\nrc=$?\n"
                              "printf '%s\\n' \"$rc\" > ") < 0 ||
                um_write_shell_word(fd, status_path) < 0 ||
-               um_write_text(fd, "\nsync\npoweroff -f\nwhile :; do sleep 3600; done\n") < 0)
+               um_write_text(fd, "\num_stop\n") < 0)
         goto failed;
     if (fsync(fd) < 0)
         goto failed;
@@ -2421,6 +2501,10 @@ static void um_print_usage(void)
     puts("  --net-ipv6-dns=ADDR IPv6 nameserver ('none' omits it, default: host resolver)");
     puts("Environment defaults: NEOPROOT_UM_KERNEL, NEOPROOT_UM_STUB,");
     puts("  NEOPROOT_UM_NET, NEOPROOT_UM_PASST");
+    puts("Sessions (one boot, many commands):");
+    puts("  neoproot-um session start --rootfs=PATH [options]");
+    puts("  neoproot-um session run -- command [args...]");
+    puts("  neoproot-um session stop | status");
 }
 
 static int um_wait_for_process(pid_t pid, int *status)
@@ -3251,7 +3335,7 @@ cleanup:
     return result;
 }
 
-static int um_make_session(const UmConfig *config, char **session_path,
+static int um_make_session(UmConfig *config, char **session_path,
                            char **wrapper_path, char **init_path,
                            char **status_path)
 {
@@ -3286,6 +3370,32 @@ static int um_make_session(const UmConfig *config, char **session_path,
         return -1;
     }
     session_name = strrchr(session, '/') + 1;
+    /*
+     * The guest-visible channel is a directory inside the session directory,
+     * which the guest already mounts; the host side is the same directory by
+     * its host path.  Both are made here so the loop claims nothing it did not
+     * find, and so a failure names the path that failed.
+     */
+    if (config->session) {
+        char host[PATH_MAX];
+
+        if (snprintf(config->session_channel_guest,
+                     sizeof(config->session_channel_guest), "/%s/%s",
+                     session_name, UM_SESSION_CHANNEL_NAME) >=
+                (int)sizeof(config->session_channel_guest) ||
+            snprintf(host, sizeof(host), "%s/%s", session,
+                     UM_SESSION_CHANNEL_NAME) >= (int)sizeof(host) ||
+            snprintf(config->session_channel_host,
+                     sizeof(config->session_channel_host), "%s", host) >=
+                (int)sizeof(config->session_channel_host))
+            return -1;
+        if (mkdir(host, 0700) < 0) {
+            fprintf(stderr,
+                    "neoproot-um: cannot create session channel '%s': %s\n",
+                    host, strerror(errno));
+            return -1;
+        }
+    }
     if (snprintf(wrapper, sizeof(wrapper), "%s/%s", session,
                  UM_WRAPPER_NAME) >= (int)sizeof(wrapper) ||
         snprintf(init, sizeof(init), "/%s/%s", session_name,
@@ -3316,6 +3426,106 @@ failed:
     return -1;
 }
 
+/*
+ * Remove the request channel a session kept inside its session directory.
+ *
+ * The one-shot path removes the session directory with rmdir(), which only
+ * works when it is empty.  A session's channel is a directory tree inside it
+ * (channel/queue, channel/results/<id>), so without this the directory -- and
+ * the guest-visible half of the protocol with it -- survives every run that
+ * ends while the tree still has content.  Only entries this protocol creates
+ * are removed, and only two levels below the channel, so a path that is not
+ * ours cannot turn this into a recursive delete.
+ */
+static void um_remove_session_channel(const char *channel_path)
+{
+    static const char *const files[] = {
+        "request", "pid", "kill", "status", "done", "stdout", "stderr",
+        ".status", ".done", ".pid", NULL
+    };
+    static const char *const top_files[] = {
+        "ready", "stop", "trace", "wake", NULL
+    };
+    char path[PATH_MAX];
+    DIR *directory;
+    struct dirent *entry;
+
+    if (channel_path == NULL || channel_path[0] != '/')
+        return;
+    /* channel/results/<id>/<file> */
+    if (snprintf(path, sizeof(path), "%s/results", channel_path) <
+        (int)sizeof(path)) {
+        directory = opendir(path);
+        if (directory != NULL) {
+            while ((entry = readdir(directory)) != NULL) {
+                char directory_path[PATH_MAX];
+
+                if (entry->d_name[0] == '.')
+                    continue;
+                if (snprintf(directory_path, sizeof(directory_path), "%s/%s",
+                             path, entry->d_name) >=
+                    (int)sizeof(directory_path))
+                    continue;
+                for (size_t index = 0; files[index] != NULL; index++) {
+                    char file_path[PATH_MAX];
+
+                    if (snprintf(file_path, sizeof(file_path), "%s/%s",
+                                 directory_path, files[index]) <
+                        (int)sizeof(file_path))
+                        (void)unlink(file_path);
+                }
+                (void)rmdir(directory_path);
+            }
+            closedir(directory);
+        }
+        (void)rmdir(path);
+    }
+    /* channel/state/<id>: the loop's own finished markers. */
+    if (snprintf(path, sizeof(path), "%s/state", channel_path) <
+        (int)sizeof(path)) {
+        directory = opendir(path);
+        if (directory != NULL) {
+            while ((entry = readdir(directory)) != NULL) {
+                char entry_path[PATH_MAX];
+
+                if (entry->d_name[0] == '.')
+                    continue;
+                if (snprintf(entry_path, sizeof(entry_path), "%s/%s", path,
+                             entry->d_name) < (int)sizeof(entry_path))
+                    (void)unlink(entry_path);
+            }
+            closedir(directory);
+        }
+        (void)rmdir(path);
+    }
+    /* channel/ready, channel/stop, channel/trace */
+    for (size_t index = 0; top_files[index] != NULL; index++) {
+        if (snprintf(path, sizeof(path), "%s/%s", channel_path,
+                     top_files[index]) < (int)sizeof(path))
+            (void)unlink(path);
+    }
+    /* channel/queue/<id> */
+    if (snprintf(path, sizeof(path), "%s/queue", channel_path) <
+        (int)sizeof(path)) {
+        directory = opendir(path);
+        if (directory != NULL) {
+            while ((entry = readdir(directory)) != NULL) {
+                char entry_path[PATH_MAX];
+
+                if (entry->d_name[0] == '.')
+                    continue;
+                if (snprintf(entry_path, sizeof(entry_path), "%s/%s", path,
+                             entry->d_name) < (int)sizeof(entry_path))
+                    (void)unlink(entry_path);
+            }
+            closedir(directory);
+        }
+        (void)rmdir(path);
+    }
+    (void)unlink(channel_path);
+    (void)rmdir(channel_path);
+}
+
 static void um_unlink_session_file(const char *session_path, const char *name)
 {
     char path[PATH_MAX];
@@ -3323,6 +3533,47 @@ static void um_unlink_session_file(const char *session_path, const char *name)
     if (snprintf(path, sizeof(path), "%s/%s", session_path, name) <
         (int)sizeof(path))
         (void)unlink(path);
+}
+
+/*
+ * Tell the daemon where the session directory and the guest channel are.
+ *
+ * Written before the kernel starts, so a daemon that reads it knows the
+ * channel exists; the guest's ready file, not this, is what says the loop is
+ * polling.
+ */
+static int um_write_session_meta(const UmConfig *config,
+                                 const char *session_path)
+{
+    char path[PATH_MAX];
+    char line[PATH_MAX + 8];
+    int fd;
+    int written;
+
+    if (!config->session)
+        return 0;
+    if (config->session_state == NULL || config->session_state[0] != '/') {
+        fprintf(stderr, "neoproot-um: --session-state is required in session mode\n");
+        return -1;
+    }
+    if (snprintf(path, sizeof(path), "%s/meta", config->session_state) >=
+        (int)sizeof(path))
+        return -1;
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+              0600);
+    if (fd < 0) {
+        fprintf(stderr, "neoproot-um: cannot write %s: %s\n", path,
+                strerror(errno));
+        return -1;
+    }
+    written = snprintf(line, sizeof(line), "%s\n%s\n", session_path,
+                       config->session_channel_guest);
+    if (written < 0 || (size_t)written >= sizeof(line) ||
+        um_write_all(fd, line, (size_t)written) < 0 || close(fd) < 0) {
+        (void)unlink(path);
+        return -1;
+    }
+    return 0;
 }
 
 /*
@@ -3425,6 +3676,13 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
         um_print_usage();
         return EXIT_FAILURE;
     }
+    /*
+     * "session" is a front end, not a mode of the one-shot command line: it
+     * decides whether this process becomes a daemon or a client, and only the
+     * daemon reaches the supervisor proper (with --session added).
+     */
+    if (strcmp(argv[1], "session") == 0)
+        return neoproot_um_session_client_main(argc - 2, &argv[2]);
     if (um_check_untraced() < 0)
         return EXIT_FAILURE;
     if (um_parse_args(argc, argv, &config, &guest_index) < 0) {
@@ -3451,6 +3709,8 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
                          config.bind_count > 0,
                          argc - guest_index,
                          &argv[guest_index]) < 0)
+        goto failed;
+    if (um_write_session_meta(&config, session_path) < 0)
         goto failed;
     result = um_run_kernel(&config, init_path, session_path, status_path,
                            &group_gone);
@@ -3498,6 +3758,8 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
     um_unlink_session_file(session_path, UM_PROTOCOL_ERROR_NAME);
     unlink(wrapper_path);
     unlink(status_path);
+    if (config.session)
+        um_remove_session_channel(config.session_channel_host);
     if (config.rootfs_kind == UM_ROOTFS_EXT4) {
         if (rmdir(session_path) == 0) {
             (void)um_cleanup_runtime_root(config.resolved_hostfs);
@@ -3518,6 +3780,8 @@ int neoproot_um_supervisor_main(int argc, char *const argv[])
     return result;
 
 failed:
+    if (config.session)
+        um_remove_session_channel(config.session_channel_host);
     if (wrapper_path != NULL)
         unlink(wrapper_path);
     if (status_path != NULL)

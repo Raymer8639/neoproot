@@ -9,6 +9,7 @@
 /src/uproot
 /src/neoproot
 /src/neoproot-um
+/src/backend/um_session_loop.h
 /src/loader.exe
 /tests/test_argv
 /tests/test_echo
