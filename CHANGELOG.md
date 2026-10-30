@@ -3,6 +3,46 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.15.0] - 2026-10-30
+
+**Persistent UML session daemon**
+
+Boot a UML guest once and run commands in it, instead of paying a boot per
+command. The end-to-end path runs on a real kernel with an ext4 root.
+
+- Add `neoproot-um session start|run|stop|status`. `start` forks a daemon that
+  holds the UML process and a control socket in a 0700 state directory;
+  `run` passes one command to the live guest and returns its stdout, stderr
+  and exit status; `stop` shuts the guest down and removes the state.
+- The guest side is a real shell file, `src/backend/um_session_loop.sh`, which
+  the build embeds as a C string. It can be checked with `sh -n` and run
+  directly, which is why `tests/test-um-session-loop.sh` needs no kernel.
+- Exchanges are files in the session directory that the guest already mounts:
+  `channel/queue/<id>` in, `channel/results/<id>/` out, with `status`
+  published before `done` so a reader never sees a half-written result. The
+  request is claimed by rename, so it cannot be started twice.
+- Exit codes follow the shell convention: 124 on timeout, 126 when the working
+  directory cannot be entered, 127 when the command is not found, 128+n when
+  the caller is interrupted. A session stays usable after a timeout.
+- One session per name; a second `start` exits 125 with BUSY rather than
+  queueing. The daemon ignores SIGHUP and SIGPIPE so it outlives the shell
+  that started it.
+- Measured on a phone, ext4 root, one vCPU: 15.3 s to start a session and
+  0.54–0.68 s per command afterwards, against 10.1–13.7 s for a one-shot boot
+  per command. The break-even is about three commands; a fifteen-command
+  batch drops from roughly 178 s to 28 s.
+- The guest loop polls rather than blocking on a FIFO. A FIFO created on a
+  hostfs mount belongs to the guest kernel, so the host cannot write to it:
+  `open` fails with ENXIO and a guest waiting on it waits forever. The
+  intervals are adaptive (50 ms just after a command, 200 ms once idle)
+  because waking a UML guest costs a host context switch and polling flat out
+  measured slower per command than polling slowly.
+- `session` is a front end of `neoproot-um`, not a mode of the one-shot
+  command line: it decides whether this process becomes a daemon or a client,
+  and only the daemon reaches the supervisor with `--session`.
+- Known limits: one command at a time, no output cap, and the guest needs
+  `setsid` for a kill to reach the whole process group.
+
 ## [v5.14.0] - 2026-10-24
 
 **UML seccomp, SMP CPUs, and ext4 mount options**
