@@ -154,9 +154,12 @@ um_args = []
 if um_enabled
   # The guest loop is real shell embedded as a C string, so it can be read and
   # tested as shell.  Same generator the GNUmake build uses.
+  # um_session.c includes "backend/um_session_loop.h", so the generated header
+  # has to land in a backend/ directory the compiler searches.  output: with a
+  # path is allowed; the directory is created by Meson.
   um_loop_header = custom_target('um-session-loop-header',
     input: files('src/backend/um_session_loop.sh'),
-    output: 'um_session_loop.h',
+    output: 'backend/um_session_loop.h',
     command: [find_program('sh'), files('scripts/embed-shell.sh'), 'um_session_loop_text', '@INPUT@'],
     capture: true)
   um_sources = [files('src/backend/um_supervisor.c', 'src/backend/um_session.c'), um_loop_header]
