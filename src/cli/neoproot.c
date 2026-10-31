@@ -7,7 +7,7 @@
 #include <string.h>
 #include <stdbool.h>
 
-#include "build.h"
+#include "cli/cli.h"
 
 /*
  * Both build systems generate this: GNUmake writes src/um-config.h, Meson
@@ -259,31 +259,31 @@ int main(int argc, char *const argv[])
                 wants_help = true;
         }
         if (wants_version) {
-            /* The same three lines the backend prints, from the same macros:
-             * a caller asking neoproot what it is should not need a Tracee. */
-            printf("neoproot %s\n\n", VERSION);
-            printf("built-in accelerators: process_vm = %s, seccomp_filter = %s\n",
-#if defined(HAVE_PROCESS_VM)
-                   "yes",
-#else
-                   "no",
-#endif
-#if defined(HAVE_SECCOMP_FILTER)
-                   "yes"
-#else
-                   "no"
-#endif
-            );
-#ifdef NEOPROOT_WITH_UM
-            printf("backends: fast, um\n");
-#else
-            printf("backends: fast\n");
-#endif
-            return EXIT_SUCCESS;
+            /* Print what the backend would print, through the backend's own
+             * function: the logo, the version, the colophon and the accelerator
+             * line are the same everywhere, and duplicating them here would
+             * drift the moment one of them changed.
+             *
+             * get_proot_cli() wants a talloc context; a temporary one is
+             * enough because the CLI description lives for the whole process.
+             */
+            TALLOC_CTX *context = talloc_new(NULL);
+
+            if (context != NULL) {
+                const Cli *cli = get_proot_cli(context);
+
+                if (cli != NULL) {
+                    print_version(cli);
+                    printf("\n%s\n", cli->colophon);
+                }
+                talloc_free(context);
+                return EXIT_SUCCESS;
+            }
+            return EXIT_FAILURE;
         }
         if (wants_help) {
-            /* Hand it to the backend's own help: it knows the option list, and
-             * duplicating it here would drift. */
+            /* The backend owns the option list; duplicating it here would
+             * drift.  Fall through and let it answer. */
             wants_help = false;
         }
     }
