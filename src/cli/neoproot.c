@@ -334,7 +334,10 @@ int main(int argc, char *const argv[])
     // 要传递给termux的命令
     char *shell_cmd = 
         "termux-wake-lock >/dev/null 2>&1 & "
-        "ulimit -n 16384; "
+        // -S, not a bare number: a hard limit below 16384 made the shell print
+        // "exceeds allowable nofiles(descriptors) limit" on every run.  -S sets
+        // the soft limit as high as allowed and leaves the hard one alone.
+        "ulimit -S -n 16384 2>/dev/null; "
         "unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW ; "
         "export PROOT_MEMFD_LOADER=1; "
         "export PROOT_UNSET_DONE=1; "

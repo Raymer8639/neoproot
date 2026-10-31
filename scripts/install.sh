@@ -24,6 +24,85 @@ ACTION=install  # install | update
 FORCE_UPDATE=0
 LOG=""
 
+LANG_CHOICE=""   # en | zh   (asked first, or from --lang / NEOPROOT_LANG)
+ASSUME_YES=0
+SHIM_ROOTFS=""
+UM_KERNEL_OVERRIDE=""
+WITH_UM=""
+WITH_SHIM=""
+INTERACTIVE=auto
+
+# Every message the script prints to a person goes through t(), so the language
+# question at the start actually changes what follows.  Two languages are worth
+# having: the project's own documentation is written in both, and a Chinese
+# user reading English prompts is the case that prompted this.
+t() { # t KEY  -- prints the message for $LANG_CHOICE
+	_key=$1
+	case "$LANG_CHOICE:$_key" in
+	zh:lang_q)        printf '%s' "选择语言 / Choose language" ;;
+	zh:lang_1)        printf '%s' "中文" ;;
+	zh:lang_2)        printf '%s' "English" ;;
+	zh:welcome)       printf '%s' "neoproot 安装" ;;
+	zh:each_default)  printf '%s' "每个问题直接回车即用默认值。" ;;
+	zh:q_prefix)      printf '%s' "安装到哪里" ;;
+	zh:q_um)          printf '%s' "要不要 UML 后端" ;;
+	zh:um_yes)        printf '%s' "要（可用 --backend=um 启动文件系统镜像）" ;;
+	zh:um_no)         printf '%s' "不要（只留 fast 后端，更小）" ;;
+	zh:q_kernel)      printf '%s' "UML 内核路径（留空则跳过，之后可补）" ;;
+	zh:q_shim)        printf '%s' "要不要 stat shim（加速 stat 系列系统调用）" ;;
+	zh:shim_yes)      printf '%s' "要" ;;
+	zh:shim_no)       printf '%s' "不要" ;;
+	zh:q_rootfs)      printf '%s' "把 shim 放进哪个容器 rootfs（留空跳过）" ;;
+	zh:summary)       printf '%s' "即将执行" ;;
+	zh:s_prefix)      printf '%s' "安装前缀" ;;
+	zh:s_um)          printf '%s' "UML 后端" ;;
+	zh:s_shim)        printf '%s' "stat shim" ;;
+	zh:s_lang)        printf '%s' "语言" ;;
+	zh:q_confirm)     printf '%s' "继续？(y/N)" ;;
+	zh:cancelled)     printf '%s' "已取消" ;;
+	zh:choose)        printf '%s' "选择" ;;
+	zh:default)       printf '%s' "默认" ;;
+	zh:um_note)       printf '%s' "neoproot 本身不含内核，--backend=um 需要另外的内核文件。" ;;
+	zh:shim_note)     printf '%s' "shim 是 guest 侧的库，装在宿主机上对容器没用。" ;;
+	zh:need_number)   printf '%s' "请输入编号" ;;
+	zh:not_current)   printf '%s' "没有任何安装记录" ;;
+	zh:already)       printf '%s' "已是最新版本" ;;
+	zh:updating)      printf '%s' "正在更新" ;;
+	zh:runtime_only)  printf '%s' "只更新运行时" ;;
+	en:lang_q)        printf '%s' "Choose language" ;;
+	en:lang_1)        printf '%s' "中文" ;;
+	en:lang_2)        printf '%s' "English" ;;
+	en:welcome)       printf '%s' "neoproot install" ;;
+	en:each_default)  printf '%s' "Press Enter to accept the default for every question." ;;
+	en:q_prefix)      printf '%s' "Install where" ;;
+	en:q_um)          printf '%s' "Include the UML backend" ;;
+	en:um_yes)        printf '%s' "yes (--backend=um can boot a filesystem image)" ;;
+	en:um_no)         printf '%s' "no (fast backend only, smaller)" ;;
+	en:q_kernel)      printf '%s' "UML kernel path (blank to skip and add later)" ;;
+	en:q_shim)        printf '%s' "Include the stat shim (faster stat syscalls)" ;;
+	en:shim_yes)      printf '%s' "yes" ;;
+	en:shim_no)       printf '%s' "no" ;;
+	en:q_rootfs)      printf '%s' "Copy the shim into which container rootfs (blank to skip)" ;;
+	en:summary)       printf '%s' "About to install" ;;
+	en:s_prefix)      printf '%s' "prefix" ;;
+	en:s_um)          printf '%s' "UML backend" ;;
+	en:s_shim)        printf '%s' "stat shim" ;;
+	en:s_lang)        printf '%s' "language" ;;
+	en:q_confirm)     printf '%s' "Continue? (y/N)" ;;
+	en:cancelled)     printf '%s' "cancelled" ;;
+	en:choose)        printf '%s' "choose" ;;
+	en:default)       printf '%s' "default" ;;
+	en:um_note)       printf '%s' "neoproot does not contain a kernel; --backend=um needs one." ;;
+	en:shim_note)     printf '%s' "the shim is a guest-side library; the host copy does nothing for a container." ;;
+	en:need_number)   printf '%s' "enter a number" ;;
+	en:not_current)   printf '%s' "no record of a previous install" ;;
+	en:already)       printf '%s' "already at" ;;
+	en:updating)      printf '%s' "updating" ;;
+	en:runtime_only)  printf '%s' "runtime only" ;;
+	*)                printf '%s' "$_key" ;;
+	esac
+}
+
 # Where the choices of the last install are kept, so --update can reuse them
 # instead of asking again.  Written by a normal install, read by --update.
 state_file() {
@@ -50,6 +129,12 @@ Options:
                   the UML runtime, keep every option you chose before, and do
                   nothing if you are already current
   --mode MODE     force the install mode: auto (default), termux or linux
+  --lang LANG     en or zh; asked first when not given
+  --with-um / --without-um      include the UML backend (default: ask)
+  --with-shim / --without-shim  include the stat shim (default: ask)
+  --shim-rootfs DIR             copy the shim into this container rootfs
+  -y, --yes       accept every default, ask nothing
+  --interactive / --non-interactive  force or suppress the questions
                   (also settable with NEOPROOT_INSTALL_MODE)
   -h, --help      show this help
 
@@ -74,6 +159,15 @@ while [ $# -gt 0 ]; do
 		--update) ACTION=update; shift ;;
 		--force) FORCE_UPDATE=1; shift ;;
 		--mode) [ $# -ge 2 ] || die "--mode needs an argument"; MODE=$2; shift 2 ;;
+		--lang) [ $# -ge 2 ] || die "--lang needs an argument"; LANG_CHOICE=$2; shift 2 ;;
+		--shim-rootfs) [ $# -ge 2 ] || die "--shim-rootfs needs an argument"; SHIM_ROOTFS=$2; shift 2 ;;
+		--with-um) WITH_UM=1; shift ;;
+		--without-um) WITH_UM=0; shift ;;
+		--with-shim) WITH_SHIM=1; shift ;;
+		--without-shim) WITH_SHIM=0; shift ;;
+		-y|--yes) ASSUME_YES=1; shift ;;
+		--interactive) INTERACTIVE=yes; shift ;;
+		--non-interactive) INTERACTIVE=no; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) die "unknown option: $1 (try --help)" ;;
 	esac
@@ -161,6 +255,7 @@ write_state() { # write_state PREFIX TAG PORTABLE
 	_ws_file=$_ws_dir/install-state
 	_ws_with_um=1
 	[ "${FORCE_NO_UM:-0}" = 1 ] && _ws_with_um=0
+	[ "${WITH_UM:-1}" = 1 ] || _ws_with_um=0
 	mkdir -p "$_ws_dir" 2>/dev/null || return 0
 	{
 		printf 'version=%s\n' "$_ws_tag"
@@ -174,6 +269,40 @@ write_state() { # write_state PREFIX TAG PORTABLE
 	return 0
 }
 
+# Put the shim into a container rootfs, which is the only place it can work.
+_install_shim_into() { # _install_shim_into ROOTFS
+	_si_rootfs=$1
+	case "$_si_rootfs" in
+	/*) ;;
+	*) warn "--shim-rootfs needs an absolute path: $_si_rootfs"; return 0 ;;
+	esac
+	[ -d "$_si_rootfs" ] || { warn "no such rootfs: $_si_rootfs"; return 0; }
+	_si_src=
+	for _si_candidate in \
+		"$_si_rootfs/opt/neoproot/libstatfast.so" \
+		"${PREFIX:-/nonexistent}/libexec/neoproot/libstatfast.so"; do
+		[ -r "$_si_candidate" ] && _si_src=$_si_candidate && break
+	done
+	if [ -z "$_si_src" ]; then
+		# The shim ships as a release asset, so fetch it rather than requiring
+		# a source tree next to the installer.
+		_si_tmp=$(mktemp "${TMPDIR:-/tmp}/libstatfast.XXXXXX") || return 0
+		_si_tag=$(resolve_tag)
+		if fetch "https://github.com/$REPO/releases/download/$_si_tag/libstatfast.so" "$_si_tmp" 2>/dev/null; then
+			_si_src=$_si_tmp
+		else
+			rm -f "$_si_tmp"
+			warn "could not fetch libstatfast.so; the shim was not installed into $_si_rootfs"
+			return 0
+		fi
+	fi
+	mkdir -p "$_si_rootfs/opt/neoproot" 2>/dev/null || return 0
+	cp -f "$_si_src" "$_si_rootfs/opt/neoproot/libstatfast.so" 2>/dev/null || return 0
+	chmod 755 "$_si_rootfs/opt/neoproot/libstatfast.so" 2>/dev/null
+	log "shim installed into $_si_rootfs/opt/neoproot/libstatfast.so"
+	return 0
+}
+
 install_um_runtime() {
 	_prefix=$1
 	_um_dir=$_prefix/libexec/neoproot/um
@@ -184,8 +313,18 @@ install_um_runtime() {
 	# linux-um-arm64 publishes the kernel, its SMP build, the stub, umnet and
 	# passt-bionic in one release; they are built together and only make sense
 	# together.
+	# A kernel the user pointed at wins over the published one: it is the only
+	# way to use a build for a device profile no release covers.
+	if [ -n "${UM_KERNEL_OVERRIDE:-}" ] && [ -f "${UM_KERNEL_OVERRIDE:-}" ]; then
+		cp -f "$UM_KERNEL_OVERRIDE" "$_um_dir/linux-bionic" &&
+			chmod 755 "$_um_dir/linux-bionic" &&
+			log "kernel from $UM_KERNEL_OVERRIDE"
+	fi
 	_kernel_base="https://github.com/$UM_KERNEL_REPO/releases/download/$UM_KERNEL_TAG"
 	for _name in linux-bionic stub_exe umnet passt-bionic; do
+		# Skip what the override already provided.
+		[ "$_name" = linux-bionic ] && [ -n "${UM_KERNEL_OVERRIDE:-}" ] &&
+			[ -f "${UM_KERNEL_OVERRIDE:-}" ] && continue
 		if fetch "$_kernel_base/$_name" "$_um_dir/$_name" 2>/dev/null; then
 			chmod 755 "$_um_dir/$_name"
 			log "UML runtime: $_name"
@@ -319,6 +458,118 @@ if [ "$ACTION" = "update" ]; then
 	ACTION=install-replace
 fi
 
+# ---------------------------------------------------------------------------
+# The questions
+#
+# Asked in the order that makes the answers useful: language first, because it
+# changes every later prompt; then what to install; then where.  A terminal is
+# required -- with stdin redirected (curl | sh) there is nobody to answer, so
+# the defaults are used and the script says so rather than hanging.
+# ---------------------------------------------------------------------------
+ask_text() { # ask_text PROMPT DEFAULT
+	_at_prompt=$1
+	_at_default=$2
+	if [ -n "$_at_default" ]; then
+		printf '? %s (%s): ' "$_at_prompt" "$_at_default" >&2
+	else
+		printf '? %s: ' "$_at_prompt" >&2
+	fi
+	IFS= read -r _at_answer || _at_answer=
+	[ -n "$_at_answer" ] || _at_answer=$_at_default
+	printf '%s\n' "$_at_answer"
+}
+
+ask_choice() { # ask_choice PROMPT DEFAULT OPTION...
+	_ac_prompt=$1
+	_ac_default=$2
+	shift 2
+	printf '? %s\n' "$_ac_prompt" >&2
+	_ac_n=0
+	for _ac_opt do
+		_ac_n=$((_ac_n + 1))
+		if [ "$_ac_n" = "$_ac_default" ]; then
+			printf '    %s) %s  [%s]\n' "$_ac_n" "$_ac_opt" "$(t default)" >&2
+		else
+			printf '    %s) %s\n' "$_ac_n" "$_ac_opt" >&2
+		fi
+	done
+	while :; do
+		printf '  %s [%s]: ' "$(t choose)" "$_ac_default" >&2
+		IFS= read -r _ac_answer || _ac_answer=
+		[ -n "$_ac_answer" ] || _ac_answer=$_ac_default
+		case "$_ac_answer" in
+		''|*[!0-9]*) printf '  %s\n' "$(t need_number)" >&2; continue ;;
+		esac
+		if [ "$_ac_answer" -ge 1 ] && [ "$_ac_answer" -le "$_ac_n" ]; then
+			printf '%s\n' "$_ac_answer"
+			return 0
+		fi
+		printf '  1-%s\n' "$_ac_n" >&2
+	done
+}
+
+if [ "$INTERACTIVE" = auto ]; then
+	if [ -t 0 ] && [ "$ASSUME_YES" = 0 ]; then INTERACTIVE=yes; else INTERACTIVE=no; fi
+fi
+
+if [ -z "$LANG_CHOICE" ]; then LANG_CHOICE=${NEOPROOT_LANG:-}; fi
+if [ -z "$LANG_CHOICE" ]; then
+	case "${LC_ALL:-}${LC_MESSAGES:-}${LANG:-}" in
+	*zh*|*ZH*) LANG_CHOICE=zh ;;
+	*) LANG_CHOICE=en ;;
+	esac
+fi
+
+if [ "$INTERACTIVE" = yes ] && [ "$ACTION" != "update" ]; then
+	if [ -z "${NEOPROOT_LANG:-}" ]; then
+		_lang_choice=$(ask_choice "$(t lang_q)" "$([ "$LANG_CHOICE" = zh ] && echo 1 || echo 2)" \
+			"$(t lang_1)" "$(t lang_2)")
+		[ "$_lang_choice" = 1 ] && LANG_CHOICE=zh || LANG_CHOICE=en
+	fi
+	printf '\n'
+	printf '%s\n' "$(t welcome)"
+	printf '  %s\n\n' "$(t each_default)"
+
+	if [ -z "$PREFIX_DIR" ]; then
+		PREFIX_DIR=$(ask_text "$(t q_prefix)" "${PREFIX:-/usr/local}")
+	fi
+
+	if [ -z "$WITH_UM" ]; then
+		_um_choice=$(ask_choice "$(t q_um)" 1 "$(t um_yes)" "$(t um_no)")
+		[ "$_um_choice" = 1 ] && WITH_UM=1 || WITH_UM=0
+	fi
+
+	if [ "$WITH_UM" = 1 ] && [ "$MODE" != "termux" ]; then
+		printf '\n  %s\n' "$(t um_note)"
+		_kernel=$(ask_text "$(t q_kernel)" "")
+		[ -n "$_kernel" ] && UM_KERNEL_OVERRIDE=$_kernel
+	fi
+
+	if [ -z "$WITH_SHIM" ]; then
+		_shim_choice=$(ask_choice "$(t q_shim)" 1 "$(t shim_yes)" "$(t shim_no)")
+		[ "$_shim_choice" = 1 ] && WITH_SHIM=1 || WITH_SHIM=0
+	fi
+	if [ "$WITH_SHIM" = 1 ] && [ -z "$SHIM_ROOTFS" ]; then
+		printf '\n  %s\n' "$(t shim_note)"
+		SHIM_ROOTFS=$(ask_text "$(t q_rootfs)" "")
+	fi
+
+	printf '\n%s\n' "$(t summary)"
+	printf '  %-14s %s\n' "$(t s_prefix)" "$PREFIX_DIR"
+	printf '  %-14s %s\n' "$(t s_lang)" "$LANG_CHOICE"
+	printf '  %-14s %s\n' "$(t s_um)" "$([ "$WITH_UM" = 0 ] && echo no || echo yes)"
+	printf '  %-14s %s\n' "$(t s_shim)" "$([ "$WITH_SHIM" = 0 ] && echo no || echo yes)"
+	printf '\n'
+	_confirm=$(ask_text "$(t q_confirm)" "n")
+	case "$_confirm" in
+	y|Y|yes|YES) ;;
+	*) printf '%s\n' "$(t cancelled)" >&2; exit 1 ;;
+	esac
+else
+	[ -n "$WITH_UM" ] || WITH_UM=1
+	[ -n "$WITH_SHIM" ] || WITH_SHIM=1
+fi
+
 if [ "$MODE" = "termux" ]; then
 	check_arch
 	[ -n "${PREFIX-}" ] || die "PREFIX is not set; this does not look like Termux"
@@ -344,11 +595,24 @@ if [ "$MODE" = "termux" ]; then
 	workdir=$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/neoproot-build.XXXXXX")
 	trap 'rm -rf "$workdir"' EXIT INT TERM
 	log "cloning $REPO at $tag"
-	git clone --quiet --depth 1 --branch "$tag" "https://github.com/$REPO.git" "$workdir/repo" \
-		|| die "git clone failed"
+	# An annotated tag is a tag object, not a commit: --branch accepts it but git
+	# then warns "refs/tags/... is not a commit" and checks out the peeled commit
+	# in detached HEAD, which reads like a failure to anyone watching.  Fetching
+	# the tag explicitly and checking out its commit avoids the warning and makes
+	# the intent obvious.
+	git init --quiet "$workdir/repo" || die "git init failed"
+	if ! ( cd "$workdir/repo" &&
+	       git remote add origin "https://github.com/$REPO.git" &&
+	       git fetch --quiet --depth 1 origin "refs/tags/$tag:refs/tags/$tag" &&
+	       git checkout --quiet "refs/tags/$tag" ); then
+		die "git fetch failed"
+	fi
 	LOG=${TMPDIR:-$PREFIX/tmp}/neoproot-build.log
 	log "compiling (a few minutes on a phone; log: $LOG)"
-	if ! ( cd "$workdir/repo" && sh build.sh ) >"$LOG" 2>&1; then
+	# WITH_UM from the questions decides whether the supervisor is compiled in.
+	_build_flag=
+	[ "${WITH_UM:-1}" = 1 ] || _build_flag=--without-um
+	if ! ( cd "$workdir/repo" && sh build.sh $_build_flag ) >"$LOG" 2>&1; then
 		tail -n 20 "$LOG" >&2
 		die "build failed, full log in $LOG"
 	fi
@@ -372,8 +636,13 @@ else
 		|| die "checksum verification failed"
 	[ -n "$PREFIX_DIR" ] || PREFIX_DIR=${HOME:?}/.local
 	install_binary "$workdir/$asset" "$PREFIX_DIR"
-	install_um_runtime "$PREFIX_DIR"
+	if [ "${WITH_UM:-1}" = 1 ]; then
+		install_um_runtime "$PREFIX_DIR"
+	fi
 	write_state "$PREFIX_DIR" "$tag" "$PORTABLE"
+	if [ "${WITH_SHIM:-1}" = 1 ] && [ -n "$SHIM_ROOTFS" ]; then
+		_install_shim_into "$SHIM_ROOTFS"
+	fi
 fi
 
 next_steps

@@ -3,6 +3,39 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.19.0] - 2026-10-31
+
+**The installer asks, in your language, and the binary runs on older CPUs**
+
+Three things a first install got wrong on a real second device:
+
+- **It died with SIGILL.** The build hard-coded `-march=armv8.2-a+dotprod+lse+crypto`,
+  which is an illegal instruction on a pre-8.2 CPU: the link succeeds and the
+  binary dies before printing anything. `build.sh` now reads
+  `/proc/cpuinfo` and falls back to `-march=armv8-a` when the features are
+  missing, saying which one it chose.
+- **Every run printed a ulimit error.** `ulimit -n 16384` raises both limits;
+  where the hard limit is lower, the shell refuses and says so. It is now
+  `ulimit -S -n 16384`: the soft limit goes as high as allowed and the hard
+  one is left alone.
+- **It cloned with a warning.** `git clone --branch <annotated tag>` prints
+  "refs/tags/... is not a commit" and lands in detached HEAD, which reads like
+  a failure. The tag is now fetched explicitly and checked out.
+
+And the installer is a guided setup rather than a single question:
+
+- **Language first.** `--lang en|zh`, or it follows `$LANG`, or it asks.
+  Every prompt and message goes through one lookup, so the choice actually
+  changes what follows rather than only the first line.
+- **Then what to install**: the um backend, the kernel path if you have one,
+  the stat shim, and which container rootfs to put the shim in. A summary and
+  a confirmation come before anything is written.
+- `--with-um` / `--without-um` / `--with-shim` / `--without-shim`,
+  `--shim-rootfs DIR`, `-y`, `--interactive` and `--non-interactive` skip the
+  questions for scripted use. With stdin redirected the defaults are used and
+  the script says so instead of hanging.
+- `--without-um` is recorded, so `--update` does not quietly put the
+  supervisor back.
 ## [v5.18.0] - 2026-10-31
 
 **`install.sh --update`: bring an install up to date without re-choosing**

@@ -49,12 +49,43 @@ if [ -n "$MISSING" ]; then
   exit 1
 fi
 if [ "$WITH_UM" = 1 ]; then
-  echo "==> neoproot 构建（不安装，含 UML 后端）"
+  # The default -march is armv8.2-a, which is fast on a recent phone and an
+# illegal instruction on an older one: the binary is linked fine, then dies with
+# SIGILL on the first atomics/crypto instruction it meets.  Ask the CPU what it
+# actually has and fall back rather than assume.
+#
+# /proc/cpuinfo "Features" is the authority; a missing file (some kernels hide
+# it from non-root) is treated as "unknown", and unknown keeps the fast default
+# only when the caller asked for it explicitly.
+cpu_has() { # cpu_has FEATURE_NAME
+	grep -qw "$1" /proc/cpuinfo 2>/dev/null
+}
+
+if [ -z "${MARCH:-}" ]; then
+	case "$(uname -m)" in
+	aarch64|arm64) ;;
+	*) : ;;
+	esac
+	if cpu_has asimd && cpu_has crc && cpu_has sha1 && cpu_has sha2 \
+		&& cpu_has aes && cpu_has atomics && cpu_has fphp && cpu_has asimdhp; then
+		MARCH="-march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto -mtune=generic"
+		echo "==> CPU supports armv8.2 features, using the fast instruction set"
+	elif cpu_has asimd; then
+		MARCH="-march=armv8-a -mtune=generic"
+		echo "==> CPU is pre-armv8.2, building a baseline binary (slower, but it runs)"
+	else
+		MARCH="-march=armv8-a -mtune=generic"
+		echo "==> CPU features unknown, building a baseline binary"
+	fi
+	export MARCH
+fi
+
+echo "==> neoproot 构建（不安装，含 UML 后端）"
 else
   echo "==> neoproot 构建（不安装，仅 fast 后端）"
 fi
 echo "    平台: $(uname -m) / $(uname -s)"
-make -C src $( [ "$WITH_UM" = 1 ] && echo all || echo neoproot ) WITH_UM="$WITH_UM" -j"$(nproc 2>/dev/null || echo 4)" V=1
+make -C src $( [ "$WITH_UM" = 1 ] && echo all || echo neoproot ) WITH_UM="$WITH_UM" MARCH="$MARCH" -j"$(nproc 2>/dev/null || echo 4)" V=1
 echo "==> 构建完成: $(pwd)/src/neoproot"
 ls -lh src/neoproot
 if [ "$WITH_UM" = 1 ]; then
