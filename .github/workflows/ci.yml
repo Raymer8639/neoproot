@@ -218,6 +218,7 @@ jobs:
           chmod +x dist/install.sh
           ls -lh dist
       - name: Generate checksums
+        run: (cd dist && sha256sum neoproot neoproot-portable neoproot-um neoproot-um-portable libstatfast.so > SHA256SUMS)
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
