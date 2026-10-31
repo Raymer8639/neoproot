@@ -61,6 +61,42 @@ sh install.sh --shim-rootfs=/data/.../alarm     # shim into the container too
 sh build.sh --without-um                        # build only, no install
 ```
 
+### Updating an install
+
+```sh
+sh install.sh --update              # newest release, same prefix and options
+sh install.sh --update --force      # reinstall even if the version matches
+sh install.sh --update --prefix DIR # when the prefix is not the default
+```
+
+`--update` replaces the binary and the UML runtime and keeps every choice the
+previous install made. A normal install writes those choices to
+`<prefix>/libexec/neoproot/install-state`:
+
+```
+version=v5.17.0
+prefix=/data/data/com.termux/files/usr
+portable=0
+with_um=1
+um_kernel_tag=um-arm64-v0.3.0
+um_passt_tag=v0.3.1
+installed_at=2026-10-31T04:58:29Z
+```
+
+What that buys:
+
+- **no questions.** The prefix, whether to keep the um backend, and whether
+  the build is portable all come from the record.
+- **nothing to do when current.** The version is compared against the record,
+  not the file timestamp, so a restored backup or a copy does not look new.
+- **the runtime can move on its own.** A kernel has its own tag; if only that
+  changed, the binary is left alone and the runtime is refreshed.
+- **a stale `neoproot-um` is not left behind.** If the um backend was not
+  installed, a leftover link from an earlier install is not resurrected.
+
+Running with no state file is not an error: the update says so and proceeds,
+because the file is a convenience, not the source of truth.
+
 ### Where the kernel and the network tools come from
 
 `neoproot` is a supervisor: it `exec`s a kernel, and `--net` runs `umnet` and `passt`.

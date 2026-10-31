@@ -3,6 +3,24 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v5.18.0] - 2026-10-31
+
+**`install.sh --update`: bring an install up to date without re-choosing**
+
+A normal install now records what it chose in
+`<prefix>/libexec/neoproot/install-state`, and `--update` replays it.
+
+- `sh install.sh --update` replaces the binary and the UML runtime, keeps the
+  prefix, the um-backend choice and the portable/release choice, and asks
+  nothing.
+- It is a no-op when the recorded version already matches the newest release.
+  The comparison uses the record, not the file timestamp, so a restored backup
+  does not look like a new install. `--force` reinstalls anyway.
+- The UML runtime has its own tags, so it can be behind while the binary is
+  current: then only the runtime is refreshed, and the state file is updated
+  to say so.
+- A prefix is required or deduced; `--update` with no record says so and
+  proceeds rather than failing, because the file is a convenience.
 ## [v5.17.0] - 2026-10-31
 
 **The installer asks, and fetches the runtime from where it is published**

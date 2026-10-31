@@ -20,7 +20,15 @@ VERSION="latest"
 PREFIX_DIR=""
 PORTABLE=0
 MODE="auto"   # auto | termux | linux  (NEOPROOT_INSTALL_MODE overrides auto)
+ACTION=install  # install | update
+FORCE_UPDATE=0
 LOG=""
+
+# Where the choices of the last install are kept, so --update can reuse them
+# instead of asking again.  Written by a normal install, read by --update.
+state_file() {
+	printf '%s/libexec/neoproot/install-state' "$1"
+}
 
 log()  { printf '==> %s\n' "$*"; }
 warn() { printf 'neoproot: %s\n' "$*" >&2; }
@@ -37,6 +45,10 @@ Options:
   --prefix DIR    install prefix; the binary goes to DIR/bin
                   (default: Termux $PREFIX, elsewhere $HOME/.local)
   --portable      ARM64 Linux only: use neoproot-portable (armv8-a baseline)
+  --force         with --update: reinstall even when the version is current
+  --update        bring an existing install up to date: replace the binary and
+                  the UML runtime, keep every option you chose before, and do
+                  nothing if you are already current
   --mode MODE     force the install mode: auto (default), termux or linux
                   (also settable with NEOPROOT_INSTALL_MODE)
   -h, --help      show this help
@@ -59,6 +71,8 @@ while [ $# -gt 0 ]; do
 		--version) [ $# -ge 2 ] || die "--version needs an argument"; VERSION=$2; shift 2 ;;
 		--prefix)  [ $# -ge 2 ] || die "--prefix needs an argument";  PREFIX_DIR=$2; shift 2 ;;
 		--portable) PORTABLE=1; shift ;;
+		--update) ACTION=update; shift ;;
+		--force) FORCE_UPDATE=1; shift ;;
 		--mode) [ $# -ge 2 ] || die "--mode needs an argument"; MODE=$2; shift 2 ;;
 		-h|--help) usage; exit 0 ;;
 		*) die "unknown option: $1 (try --help)" ;;
@@ -134,6 +148,31 @@ UM_KERNEL_REPO=Raymer8639/linux-um-arm64
 UM_KERNEL_TAG=${NEOPROOT_UM_KERNEL_TAG:-um-arm64-v0.3.0}
 PASST_REPO=Raymer8639/passt-android
 PASST_TAG=${NEOPROOT_UM_PASST_TAG:-v0.3.1}
+
+# Record what this install chose, for --update.
+#
+# Written after the files are in place: a state file that claims a version the
+# disk does not have would make the next --update think it was already current.
+write_state() { # write_state PREFIX TAG PORTABLE
+	_ws_prefix=$1
+	_ws_tag=$2
+	_ws_portable=$3
+	_ws_dir=$_ws_prefix/libexec/neoproot
+	_ws_file=$_ws_dir/install-state
+	_ws_with_um=1
+	[ "${FORCE_NO_UM:-0}" = 1 ] && _ws_with_um=0
+	mkdir -p "$_ws_dir" 2>/dev/null || return 0
+	{
+		printf 'version=%s\n' "$_ws_tag"
+		printf 'prefix=%s\n' "$_ws_prefix"
+		printf 'portable=%s\n' "$_ws_portable"
+		printf 'with_um=%s\n' "$_ws_with_um"
+		printf 'um_kernel_tag=%s\n' "$UM_KERNEL_TAG"
+		printf 'um_passt_tag=%s\n' "$PASST_TAG"
+		printf 'installed_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	} >"$_ws_file.tmp" 2>/dev/null && mv -f "$_ws_file.tmp" "$_ws_file"
+	return 0
+}
 
 install_um_runtime() {
 	_prefix=$1
@@ -211,6 +250,75 @@ if [ "$MODE" = "auto" ]; then
 fi
 [ "$MODE" = "termux" ] && ! is_termux && warn "forced termux mode outside Termux: the build may fail"
 
+# ---------------------------------------------------------------------------
+# --update: replace what this script owns, keep what the user chose
+#
+# The state file a previous install wrote says which prefix and which options
+# were used, so an update does not have to ask again -- and must not silently
+# switch someone from a portable build to a release one, or move their files.
+# ---------------------------------------------------------------------------
+read_state() { # read_state PREFIX -> prints saved key=value lines
+	_state=$(state_file "$1")
+	[ -r "$_state" ] && cat "$_state"
+	return 0
+}
+
+if [ "$ACTION" = "update" ]; then
+	# The prefix has to come from somewhere: the state file of the install we
+	# are updating, or an explicit --prefix.
+	if [ -z "$PREFIX_DIR" ]; then
+		for _candidate in "${PREFIX:-}" "${HOME:-}/.local" /usr/local; do
+			[ -n "$_candidate" ] || continue
+			[ -r "$(state_file "$_candidate")" ] && PREFIX_DIR=$_candidate && break
+		done
+	fi
+	[ -n "$PREFIX_DIR" ] ||
+		die "cannot tell which install to update; pass --prefix DIR"
+
+	_saved=$(read_state "$PREFIX_DIR")
+	if [ -z "$_saved" ]; then
+		warn "no record of a previous install in $PREFIX_DIR"
+		warn "an update replaces the binary and the runtime; run without --update to choose options"
+	fi
+
+	# Reuse the *choices* from the record -- portable, whether the um backend
+	# was installed.  The runtime tags are not taken from it: an update moves
+	# them forward to what this script knows, which is the whole point.  They
+	# are read only to decide whether the runtime on disk is behind.
+	for _line in $_saved; do
+		case "$_line" in
+		portable=1) [ "$PORTABLE" = 0 ] && PORTABLE=1 ;;
+		with_um=0) FORCE_NO_UM=1 ;;
+		esac
+	done
+
+	tag=$(resolve_tag)
+	# "Already current" is decided from the record, not from the file's mtime:
+	# a copy or a backup restores the old one with a fresh timestamp.
+	_installed_version=$(sed -n 's/^version=//p' "$(state_file "$PREFIX_DIR")" 2>/dev/null)
+	if [ "$_installed_version" = "$tag" ] && [ "$FORCE_UPDATE" != 1 ]; then
+		log "already at $tag (use --force to reinstall anyway)"
+		# The runtime has its own tags, so it can be behind even when the
+		# binary is current.  Only fetch it when the record says it differs.
+		_saved_kernel=$(sed -n 's/^um_kernel_tag=//p' "$(state_file "$PREFIX_DIR")" 2>/dev/null)
+		_saved_passt=$(sed -n 's/^um_passt_tag=//p' "$(state_file "$PREFIX_DIR")" 2>/dev/null)
+		if [ "$MODE" != "termux" ] &&
+		   { [ "$_saved_kernel" != "$UM_KERNEL_TAG" ] ||
+		     [ "$_saved_passt" != "$PASST_TAG" ] ||
+		     [ ! -e "$PREFIX_DIR/libexec/neoproot/um/linux-bionic" ]; }; then
+			log "runtime: ${_saved_kernel:-none} -> $UM_KERNEL_TAG"
+			install_um_runtime "$PREFIX_DIR"
+			write_state "$PREFIX_DIR" "$tag" "$PORTABLE"
+		else
+			log "runtime: already at $UM_KERNEL_TAG"
+		fi
+		exit 0
+	fi
+	log "updating ${_installed_version:-an older build} -> $tag in $PREFIX_DIR"
+	VERSION=$tag
+	ACTION=install-replace
+fi
+
 if [ "$MODE" = "termux" ]; then
 	check_arch
 	[ -n "${PREFIX-}" ] || die "PREFIX is not set; this does not look like Termux"
@@ -246,6 +354,7 @@ if [ "$MODE" = "termux" ]; then
 	fi
 	[ -n "$PREFIX_DIR" ] || PREFIX_DIR=${PREFIX:-}
 	install_binary "$workdir/repo/src/neoproot" "$PREFIX_DIR"
+	write_state "$PREFIX_DIR" "$tag" 0
 else
 	check_arch
 	tag=$(resolve_tag)
@@ -264,6 +373,7 @@ else
 	[ -n "$PREFIX_DIR" ] || PREFIX_DIR=${HOME:?}/.local
 	install_binary "$workdir/$asset" "$PREFIX_DIR"
 	install_um_runtime "$PREFIX_DIR"
+	write_state "$PREFIX_DIR" "$tag" "$PORTABLE"
 fi
 
 next_steps
