@@ -49,6 +49,23 @@ CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH)
 CFLAGS   += -std=c23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
 CXXFLAGS += -std=c++23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
 
+# STATIC_LINK=1 asks for a fully static binary, which is what the release
+# assets are: an ARM64 Linux build that does not depend on the host's glibc.
+# It needs static libtalloc as well, and not every distribution ships one --
+# Arch, for instance, does not -- so a request that cannot be honoured says so
+# and falls back rather than failing the link with a bare "cannot find
+# -ltalloc".
+ifeq ($(STATIC_LINK),1)
+HAVE_STATIC_TALLOC := $(shell $(CC) -static -ltalloc -o /dev/null -xc /dev/null \
+	>/dev/null 2>&1 && echo yes)
+ifeq ($(HAVE_STATIC_TALLOC),yes)
+LDFLAGS += -static
+else
+$(warning STATIC_LINK=1 was asked for but no static libtalloc is installed;)
+$(warning linking dynamically.  Install the static talloc package for a portable build.)
+endif
+endif
+
 LDFLAGS += -ltalloc -lm -ldl -lc -lstdc++ -flto=thin -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--icf=all,-z,relro,-z,now -Wl,--strip-all -lpthread -s
 
 # --icf=all 仅 lld 支持：有 ld.lld 时显式启用 lld；否则自动移除该选项。
