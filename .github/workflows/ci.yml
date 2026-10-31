@@ -53,12 +53,16 @@ jobs:
           CC=clang CXX=clang++ meson setup meson-build /tmp/neoproot-meson-src --buildtype=release
           meson compile -C meson-build
           test -x meson-build/neoproot
-          test -x meson-build/neoproot-um
+          # neoproot-um is installed as a link to neoproot, not built as a
+          # second binary, so it only exists after "meson install".
+          DESTDIR=/tmp/neoproot-meson-root meson install -C meson-build >/dev/null
+          test -x /tmp/neoproot-meson-root/usr/local/bin/neoproot
+          test -L /tmp/neoproot-meson-root/usr/local/bin/neoproot-um
           meson-build/neoproot --version | tee /tmp/neoproot-meson-version
           grep -q "process_vm = yes" /tmp/neoproot-meson-version
           grep -q "seccomp_filter = yes" /tmp/neoproot-meson-version
           meson-build/neoproot --help >/dev/null
-          meson-build/neoproot-um --help >/dev/null
+          /tmp/neoproot-meson-root/usr/local/bin/neoproot-um --help >/dev/null
           ! meson-build/neoproot --definitely-invalid >/dev/null 2>&1
 
       - name: Check binary
