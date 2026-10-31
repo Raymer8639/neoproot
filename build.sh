@@ -48,8 +48,7 @@ if [ -n "$MISSING" ]; then
   echo "    Debian/Ubuntu: install clang make llvm binutils pkg-config libtalloc-dev" >&2
   exit 1
 fi
-if [ "$WITH_UM" = 1 ]; then
-  # The default -march is armv8.2-a, which is fast on a recent phone and an
+# The default -march is armv8.2-a, which is fast on a recent phone and an
 # illegal instruction on an older one: the binary is linked fine, then dies with
 # SIGILL on the first atomics/crypto instruction it meets.  Ask the CPU what it
 # actually has and fall back rather than assume.
@@ -66,7 +65,9 @@ if [ -z "${MARCH:-}" ]; then
 	aarch64|arm64) ;;
 	*) : ;;
 	esac
-	if cpu_has asimd && cpu_has crc && cpu_has sha1 && cpu_has sha2 \
+	# crc32, not crc: that is the name in /proc/cpuinfo, and grep -w does not
+	# match a whole word against it.
+	if cpu_has asimd && cpu_has crc32 && cpu_has sha1 && cpu_has sha2 \
 		&& cpu_has aes && cpu_has atomics && cpu_has fphp && cpu_has asimdhp; then
 		MARCH="-march=armv8.2-a+fp16+dotprod+lse+rcpc+simd+crc+crypto -mtune=generic"
 		echo "==> CPU supports armv8.2 features, using the fast instruction set"
@@ -79,6 +80,8 @@ if [ -z "${MARCH:-}" ]; then
 	fi
 	export MARCH
 fi
+
+if [ "$WITH_UM" = 1 ]; then
 
 echo "==> neoproot 构建（不安装，含 UML 后端）"
 else
