@@ -228,6 +228,9 @@ int main(int argc, char *const argv[])
             return neoproot_um_supervisor_main(argc, argv);
     }
 #endif
+    if (reject_traced_startup())
+        return EXIT_FAILURE;
+
 #ifdef NEOPROOT_WITH_UM
     /*
      * --version and --help are neoproot's own, not the guest's.
@@ -288,8 +291,7 @@ int main(int argc, char *const argv[])
         }
     }
 #endif
-    if (reject_traced_startup())
-        return EXIT_FAILURE;
+
     if (neoproot_prepare_backend_argv(argc, argv, &effective_argv,
                                       &effective_argc, &backend,
                                       &command_index,
