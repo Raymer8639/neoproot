@@ -44,6 +44,17 @@ jobs:
           # makefile builds that variable up from the compiler, the sanitizer
           # flags and lld, and replacing it wholesale loses the lld selection
           # and the link fails.
+          # The static talloc package is named differently per distribution; the
+          # dev package on Debian ships libtalloc.a, so check before building
+          # rather than discovering it when the release binary turns out to be
+          # dynamic and unusable on Termux.
+          if ! ls /usr/lib/*/libtalloc.a /usr/lib/libtalloc.a >/dev/null 2>&1; then
+            sudo apt-get install -y -qq libtalloc-dev
+          fi
+          ls -l /usr/lib/*/libtalloc.a 2>/dev/null || {
+            echo "::error::no static libtalloc; the release binary would be dynamic"
+            exit 1
+          }
           if [ "$MODE" = "release" ]; then
             # 默认 ARMv8.2 满血优化（与作者默认一致），makefile 自动选用 lld
             make -C src all CC=clang CXX=clang++ STATIC_LINK=1

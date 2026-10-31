@@ -61,8 +61,10 @@ HAVE_STATIC_TALLOC := $(shell $(CC) -static -ltalloc -o /dev/null -xc /dev/null 
 ifeq ($(HAVE_STATIC_TALLOC),yes)
 LDFLAGS += -static
 else
-$(warning STATIC_LINK=1 was asked for but no static libtalloc is installed;)
-$(warning linking dynamically.  Install the static talloc package for a portable build.)
+# Not a warning: a caller that asked for a static binary needs one.  A release
+# built here without it cannot start on Termux at all (no ld-linux-aarch64.so.1),
+# and finding that out at the end of a release is worse than failing now.
+$(error STATIC_LINK=1 needs a static libtalloc; install the static talloc package, or drop STATIC_LINK to link dynamically on purpose)
 endif
 endif
 
