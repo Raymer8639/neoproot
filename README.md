@@ -61,29 +61,41 @@ sh install.sh --shim-rootfs=/data/.../alarm     # shim into the container too
 sh build.sh --without-um                        # build only, no install
 ```
 
-### The kernel and the network tools are separate files
+### Where the kernel and the network tools come from
 
-`neoproot` does not contain a UML kernel -- it `exec`s one -- and it does not
-contain `umnet` or `passt` either. Without them `--backend=um` cannot boot and
-`--net` cannot give the guest an address, so the installer asks for all four and
-puts them where `neoproot` looks for them:
+`neoproot` is a supervisor: it `exec`s a kernel, and `--net` runs `umnet` and `passt`.
+None of those are built or published here, because they are not this project:
+
+| Artifact | Published by | Release |
+| --- | --- | --- |
+| `linux-bionic`, `linux-bionic-smp` | [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) | `um-arm64-v0.3.0` |
+| `stub_exe` | same release | |
+| `umnet` | same release | |
+| `passt-bionic` | same release (matched with the kernel) | |
+| `passt-android-arm64` | [passt-android](https://github.com/Raymer8639/passt-android) | `v0.3.1` |
+
+Each project releases its own build. That is deliberate: compiling a kernel on
+every neoproot commit would make this CI slow, and it would put the version of
+one project inside the release notes of another.
+
+`install.sh` fetches them into `<prefix>/libexec/neoproot/um/` and `neoproot` finds
+them from its own path, so nothing needs exporting:
 
 ```
 <prefix>/libexec/neoproot/um/
-    linux-bionic     the kernel            (--um-kernel)
-    stub_exe         its boot stub         (--um-stub)
-    umnet            run a command with a  (--um-net)
-                     real IPv4 network
-    passt-bionic     the DHCP server       (--um-passt)
+    linux-bionic     from linux-um-arm64
+    stub_exe         from linux-um-arm64
+    umnet            from linux-um-arm64
+    passt-bionic     from linux-um-arm64 (matched with the kernel)
 ```
 
-`neoproot` resolves its own prefix from `argv[0]` and adopts whatever it finds
-there, so none of them need to be exported. Anything set in the environment
-still wins.
+The versions are pinned to the pair this neoproot was tested against. A kernel
+has to agree with the `um-init`, `umnet` and `passt` it runs with, so
+"latest" is not the right default; override with `NEOPROOT_UM_KERNEL_TAG` or
+`NEOPROOT_UM_PASST_TAG` if you know the set you want.
 
-The kernel has to be **built from source** -- this repository does not ship one.
-`umnet` is the companion built alongside it; `passt` comes from
-[passt-android](https://github.com/Raymer8639/passt-android).
+The kernel has to be **built from source** -- no project ships one ready-made
+for a new device profile. See the README of linux-um-arm64 for that.
 
 ### The stat shim configures itself
 

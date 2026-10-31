@@ -120,45 +120,61 @@ install_binary() { # install_binary NEW_BINARY PREFIX
 
 # Install the UML runtime beside the binary.
 #
-# neoproot is a supervisor: it execs a kernel, and --net runs umnet + passt.
-# Those are built by linux-um-arm64 (an older release may not publish them), so
-# a missing asset is a note, not a failure -- but it has to be said, because a
-# neoproot with no kernel answers its first --backend=um with
-# "set --kernel/--stub", which reads like a broken install.
+# The runtime is not built here and it is not published here: a kernel belongs
+# to linux-um-arm64 and passt belongs to passt-android, so each repository
+# releases its own artifacts and this function fetches from the source.  That
+# keeps neoproot's CI about neoproot -- cross-compiling somebody else's kernel
+# on every neoproot commit is slow and puts the version of one project in the
+# release of another.
+#
+# The pins below are what this neoproot release was tested against.  A mismatch
+# is a real problem (the kernel has to agree with um-init, umnet and passt), so
+# they are constants rather than "latest".
+UM_KERNEL_REPO=Raymer8639/linux-um-arm64
+UM_KERNEL_TAG=${NEOPROOT_UM_KERNEL_TAG:-um-arm64-v0.3.0}
+PASST_REPO=Raymer8639/passt-android
+PASST_TAG=${NEOPROOT_UM_PASST_TAG:-v0.3.1}
+
 install_um_runtime() {
-	_tag=$1
-	_base=$2
-	_prefix=$3
+	_prefix=$1
 	_um_dir=$_prefix/libexec/neoproot/um
-	_found=0
 	_missing=
 
 	mkdir -p "$_um_dir" 2>/dev/null || true
-	for _name in linux-bionic stub_exe umnet; do
-		if fetch "$_base/$_name" "$_um_dir/$_name" 2>/dev/null; then
+
+	# linux-um-arm64 publishes the kernel, its SMP build, the stub, umnet and
+	# passt-bionic in one release; they are built together and only make sense
+	# together.
+	_kernel_base="https://github.com/$UM_KERNEL_REPO/releases/download/$UM_KERNEL_TAG"
+	for _name in linux-bionic stub_exe umnet passt-bionic; do
+		if fetch "$_kernel_base/$_name" "$_um_dir/$_name" 2>/dev/null; then
 			chmod 755 "$_um_dir/$_name"
-			_found=$((_found + 1))
+			log "UML runtime: $_name"
 		else
 			_missing="$_missing $_name"
 		fi
 	done
 
-	if [ "$_found" -eq 3 ]; then
-		log "UML runtime installed($_um_dir)"
-		return 0
+	if [ -n "$_missing" ]; then
+		warn "could not fetch from $UM_KERNEL_REPO@$UM_KERNEL_TAG:$_missing"
+		warn "put them in $_um_dir, or set NEOPROOT_UM_KERNEL_TAG to a release that has them"
+	else
+		log "UML runtime installed into $_um_dir"
 	fi
-	if [ "$_found" -eq 0 ]; then
-		warn "this release does not publish the UML runtime (kernel, stub_exe, umnet)"
-		warn "--backend=um needs them; build linux-um-arm64 or sh install.sh --um-kernel=..."
-		rmdir "$_um_dir" 2>/dev/null || true
-		return 0
+
+	# passt also has a release of its own.  passt-bionic above is the copy that
+	# linux-um-arm64 shipped with its kernel; this one is the standalone build,
+	# and it is only a fallback for a caller who wants the newest passt rather
+	# than the matched set.
+	if [ ! -e "$_um_dir/passt-bionic" ]; then
+		_passt_base="https://github.com/$PASST_REPO/releases/download/$PASST_TAG"
+		if fetch "$_passt_base/passt-android-arm64" "$_um_dir/passt-bionic" 2>/dev/null; then
+			chmod 755 "$_um_dir/passt-bionic"
+			log "passt-bionic from $PASST_REPO@$PASST_TAG"
+		else
+			warn "--net needs passt-bionic; could not fetch it from $PASST_REPO@$PASST_TAG"
+		fi
 	fi
-	if [ "$_found" -lt 3 ]; then
-		warn "UML runtime is incomplete, missing:$_missing"
-		warn "put them in $_um_dir (see the README section on the kernel and network tools)"
-	fi
-	[ -e "$_um_dir/umnet" ] ||
-		warn "--net needs passt-bionic as well, which this release does not publish"
 	return 0
 }
 
@@ -247,7 +263,7 @@ else
 		|| die "checksum verification failed"
 	[ -n "$PREFIX_DIR" ] || PREFIX_DIR=${HOME:?}/.local
 	install_binary "$workdir/$asset" "$PREFIX_DIR"
-	install_um_runtime "$tag" "$base" "$PREFIX_DIR"
+	install_um_runtime "$PREFIX_DIR"
 fi
 
 next_steps

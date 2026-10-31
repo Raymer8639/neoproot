@@ -5,36 +5,38 @@
 
 ## [v5.17.0] - 2026-10-31
 
-**The installer asks, and the runtime comes with it**
+**The installer asks, and fetches the runtime from where it is published**
 
 `neoproot` is a supervisor: it `exec`s a kernel, and `--net` runs `umnet` and `passt`.
-Those are built by [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64), so an
-install that only copies the binary produces a neoproot whose first `--backend=um`
-says `set --kernel/--stub` -- which reads like a broken install. This release makes
-the runtime part of the install.
+Those are other projects, so this release does not build or publish them. It
+fetches each from its own release:
 
-- `install.sh` is now a guided setup: prefix, UML backend, kernel, stub, umnet,
+| Artifact | Repository | Release |
+| --- | --- | --- |
+| `linux-bionic`, `stub_exe`, `umnet`, `passt-bionic` | linux-um-arm64 | `um-arm64-v0.3.0` |
+| `passt-android-arm64` | passt-android | `v0.3.1` |
+
+- `install.sh` is a guided setup: prefix, UML backend, kernel, stub, umnet,
   passt, stat shim, target rootfs, then a summary and a confirmation, in the
-  shape of `pnpm create vite`. Empty input takes the default. When stdin is not a
-  terminal (curl | sh) it uses the defaults and says so; `--non-interactive`
-  forces that, `--interactive` forces the questions.
-- The kernel, `stub_exe`, `umnet` and `passt-bionic` are installed into
-  `<prefix>/libexec/neoproot/um/`. `neoproot` resolves its own prefix from
-  `argv[0]` and adopts whatever it finds there, so `--backend=um --net-auto`
-  works with no environment variable at all. Anything set in the environment
-  still wins. The result has no `..` component, which the supervisor requires of a
-  guest path.
+  shape of `pnpm create vite`. Empty input takes the default; `--non-interactive`
+  skips the questions, which is what happens automatically when stdin is not a
+  terminal.
+- Everything lands in `<prefix>/libexec/neoproot/um/`. `neoproot` resolves its own
+  prefix from `argv[0]` and adopts what it finds there, so `--backend=um`
+  and `--net-auto` work with no environment variable. Anything set in the
+  environment still wins. Three locations are searched: `$NEOPROOT_HOME/libexec/neoproot/um`,
+  `<prefix>/libexec/neoproot/um`, and beside the binary.
+- Versions are pinned to the combination this release was tested with, because
+  a kernel has to agree with the `um-init`, `umnet` and `passt` it runs
+  with. `NEOPROOT_UM_KERNEL_TAG` and `NEOPROOT_UM_PASST_TAG` override them.
 - Missing pieces are named, not left to fail later: no kernel, no `umnet`,
   no `passt` each print what is missing and the exact command that adds it.
-- `neoproot-um` is a link to `neoproot` rather than a second binary. The
-  dispatcher picks its command line from `argv[0]`, so `session` still reaches
-  the supervisor, and one copy of the code serves both names.
-- New workflow `um-runtime.yml`: builds the kernel, stub, umnet and passt from
-  `linux-um-arm64` at a pinned ref and attaches them to the release. It is a
-  separate workflow so an upstream build break cannot fail a neoproot release;
-  the one-line installer falls back to naming the missing files.
-- `scripts/install.sh` (the curl one-liner) downloads the runtime when the
-  release publishes it and reports which files are missing when it does not.
+  Bad paths are rejected before the build, so a typo costs milliseconds.
+- `neoproot-um` is a link to `neoproot`. The dispatcher picks its command
+  line from `argv[0]`, so `session` still reaches the supervisor and one copy of
+  the code serves both names.
+- `--help` now prints the resolved runtime paths rather than just the
+  variable names, which is the first thing to check when a boot fails.
 ## [v5.16.0] - 2026-10-31
 
 **Out-of-the-box install: optional UML backend, options everywhere, shim wired up**
