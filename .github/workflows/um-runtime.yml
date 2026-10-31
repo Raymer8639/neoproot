@@ -69,6 +69,9 @@ jobs:
           # The harness uses "set -o pipefail", which dash (sh on Ubuntu)
           # does not support, so run it with bash explicitly.
           bash tools/um-arm64/harness/build-bionic.sh
+          # The kernel build does not produce the network side; umnet and passt
+          # have their own harness, and --net needs both.
+          bash tools/um-arm64/harness/build-net-bionic.sh
 
       - name: Collect the runtime
         run: |
