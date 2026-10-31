@@ -25,7 +25,11 @@ for argument do
 	--with-um) WITH_UM=1 ;;
 	--without-um) WITH_UM=0 ;;
 	--help|-h) usage; exit 0 ;;
-	*) echo "错误: 未知参数 $argument（sh build.sh --help）" >&2; exit 2 ;;
+	*)
+		echo "错误: 未知参数 $argument" >&2
+		usage >&2
+		exit 2
+		;;
 	esac
 done
 
