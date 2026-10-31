@@ -134,7 +134,7 @@ install_um_runtime() {
 	_missing=
 
 	mkdir -p "$_um_dir" 2>/dev/null || true
-	for _name in linux-bionic stub_exe umnet passt-bionic; do
+	for _name in linux-bionic stub_exe umnet; do
 		if fetch "$_base/$_name" "$_um_dir/$_name" 2>/dev/null; then
 			chmod 755 "$_um_dir/$_name"
 			_found=$((_found + 1))
@@ -143,18 +143,22 @@ install_um_runtime() {
 		fi
 	done
 
-	if [ "$_found" -eq 4 ]; then
+	if [ "$_found" -eq 3 ]; then
 		log "UML runtime installed($_um_dir)"
 		return 0
 	fi
 	if [ "$_found" -eq 0 ]; then
-		warn "this release does not publish the UML runtime (kernel, stub_exe, umnet, passt)"
+		warn "this release does not publish the UML runtime (kernel, stub_exe, umnet)"
 		warn "--backend=um needs them; build linux-um-arm64 or sh install.sh --um-kernel=..."
 		rmdir "$_um_dir" 2>/dev/null || true
 		return 0
 	fi
-	warn "UML runtime is incomplete, missing:$_missing"
-	warn "put them in $_um_dir (see the README section on the kernel and network tools)"
+	if [ "$_found" -lt 3 ]; then
+		warn "UML runtime is incomplete, missing:$_missing"
+		warn "put them in $_um_dir (see the README section on the kernel and network tools)"
+	fi
+	[ -e "$_um_dir/umnet" ] ||
+		warn "--net needs passt-bionic as well, which this release does not publish"
 	return 0
 }
 
