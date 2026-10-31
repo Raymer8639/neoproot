@@ -8,7 +8,7 @@ GitHub Release 资产是 **ARM64 Linux（glibc）** CI 产物。Termux 必须用
 
 [![CI](https://github.com/Raymer8639/neoproot/actions/workflows/ci.yml/badge.svg)](https://github.com/Raymer8639/neoproot/actions/workflows/ci.yml)
 ![平台](https://img.shields.io/badge/platform-ARM64%20%2F%20Android-blue)
-![语言](https://img.shields.io/badge/C%2FC%2B%2B-C23%20%2F%20C%2B%2B23-orange)
+![语言](https://img.shields.io/badge/language-C23%20%2F%20C%2B%2B23-orange)
 ![许可证](https://img.shields.io/badge/license-GPLv2-green)
 
 ## 安装（一条命令）
@@ -39,6 +39,92 @@ meson install -C builddir
 安装脚本会把 `neoproot` 放到 `$PREFIX/bin`。
 
 **ARM64 Linux**（不是 Termux）可以从 [Releases](https://github.com/Raymer8639/neoproot/releases) 下载 `neoproot` 或降低指令集要求的 `neoproot-portable`，校验 SHA256 后放入 `PATH`。
+
+### 安装选项
+
+`sh install.sh --help` 会列出全部；会改变结果的几个：
+
+| 选项 | 作用 |
+| --- | --- |
+| `--with-um` | 默认。`neoproot` 能用 `--backend=um` 启动文件系统镜像，并安装 `neoproot-um`。 |
+| `--without-um` | 只留 fast 后端，不编译 supervisor 和 session daemon，也不装 `neoproot-um`。之后 `--backend=um` 会明确报「此构建没有 um 后端」。 |
+| `--with-shim` | 默认。把 `libstatfast.so` 装到 `$PREFIX/libexec/neoproot/`。 |
+| `--without-shim` | 不装 stat shim。 |
+| `--shim-rootfs DIR` | 额外把 shim 复制进那个容器 rootfs 的 `/opt/neoproot/libstatfast.so`。可重复。 |
+| `--lang en\|zh` | 安装界面语言；不给则跟随 `$LANG`，仍不确定就问。 |
+| `-y` / `--non-interactive` | 全部用默认值，不提问。`curl \| sh` 时 stdin 不是终端，会自动走这条。 |
+
+```sh
+sh install.sh                                   # 宿主安装，UML + shim
+sh install.sh --without-um                      # 最小的 neoproot
+sh install.sh --shim-rootfs=/data/.../alarm     # 顺带把 shim 放进容器
+sh build.sh --without-um                        # 只编译，不安装
+```
+
+开启 UML 后端时会**自动下载**内核、`stub_exe`、`umnet`、`passt`，不需要手填路径。
+
+### 更新已安装的版本
+
+```sh
+sh install.sh --update              # 升到最新，沿用原有前缀和选项
+sh install.sh --update --force      # 版本相同也强制重装
+sh install.sh --update --prefix DIR # 前缀不在默认位置时
+```
+
+`--update` 只替换二进制和运行时，**沿用上次的每一个选择**。普通安装会把选择记到
+`<prefix>/libexec/neoproot/install-state`：
+
+```
+version=v6.0.0.0
+prefix=/data/data/com.termux/files/usr
+portable=0
+with_um=1
+um_kernel_tag=um-arm64-v0.3.0
+um_passt_tag=v0.3.1
+installed_at=2026-10-31T19:30:00Z
+```
+
+这样做的好处：
+
+- **不再问问题。** 前缀、要不要保留 um 后端、是不是 portable 构建，全部来自记录。
+- **已是最新就什么都不做。** 版本比的是记录里的值，不是文件时间戳，所以从备份恢复或复制一份不会被误认为刚装过。
+- **运行时能独立前进。** 内核有自己的 tag；只有它变了就只刷新运行时，二进制不动。
+- **不会复活过期的 `neoproot-um`。** 当初没装 um 后端，就不会被更新凭空装回来。
+
+没有状态文件不算错误：脚本会说明情况然后继续装 —— 那只是便利，不是真相来源。
+
+### 运行时从哪里来
+
+`neoproot` 是个 supervisor：它 `exec` 一个内核，`--net` 还要跑 `umnet` 和 `passt`。
+这些**不由本项目构建或发布**，它们不是这个项目的东西：
+
+| 产物 | 由谁发布 | Release |
+| --- | --- | --- |
+| `linux-bionic`、`linux-bionic-smp` | [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) | `um-arm64-v0.3.0` |
+| `stub_exe` | 同一 Release | |
+| `umnet` | 同一 Release | |
+| `passt-bionic` | 同一 Release（与内核配套） | |
+| `passt-android-arm64` | [passt-android](https://github.com/Raymer8639/passt-android) | `v0.3.1` |
+
+各项目发各自的构建。这是有意为之：每提交一次 neoproot 就编一次内核会让 CI 变慢，
+也会把一个项目的版本号塞进另一个项目的发布说明里。
+
+`install.sh` 把它们取到 `<prefix>/libexec/neoproot/um/`，`neoproot` 从自己的路径就能找到，
+**不需要导出任何环境变量**：
+
+```
+<prefix>/libexec/neoproot/um/
+    linux-bionic     来自 linux-um-arm64
+    stub_exe         来自 linux-um-arm64
+    umnet            来自 linux-um-arm64
+    passt-bionic     来自 linux-um-arm64（与内核配套）
+```
+
+版本钉在本 neoproot 测试过的组合上。内核必须和它运行的 `um-init`、`umnet`、`passt`
+版本一致，所以「取最新」不是合适的默认值；知道自己在做什么可以用
+`NEOPROOT_UM_KERNEL_TAG` 或 `NEOPROOT_UM_PASST_TAG` 覆盖。
+
+内核必须**从源码构建** —— 没有项目会为新设备型号预置现成的。参见 linux-um-arm64 的 README。
 
 ## 为什么使用 neoproot
 
@@ -422,6 +508,22 @@ neoproot 的范围。
 - 便携版发布包使用 `-march=armv8-a -mtune=generic`；它只放宽 CPU 指令要求，不保证所有 libc 或内核兼容。
 - 链接选项包含 ThinLTO、段垃圾回收、相同代码折叠、RELRO/NOW 和去符号。
 - 构建依赖 `libtalloc`（Termux 包名：`talloc`），`upx` 为可选依赖。
+
+## 版本号规则
+
+版本号是 **x.y.z.a**：
+
+| 位 | 含义 |
+| --- | --- |
+| **x** | 革命性更新，会改变使用方式 |
+| **y** | 大更新 |
+| **z** | 新功能 |
+| **a** | 小补丁 |
+
+例：`v6.1.2.3` 是 6 代、第 1 次大更新、第 2 个新功能之后的第 3 个补丁。
+
+早期版本用 `v5.x` 并曾带 `-scicat` 后缀；那些编号与上游 PROOT 系列相同，讨论时容易混淆，
+所以从 `v6.0.0.0` 起改用四段式。
 
 ## 相关仓库
 

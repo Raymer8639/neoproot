@@ -74,7 +74,7 @@ previous install made. A normal install writes those choices to
 `<prefix>/libexec/neoproot/install-state`:
 
 ```
-version=v5.17.0
+version=v6.0.0.0
 prefix=/data/data/com.termux/files/usr
 portable=0
 with_um=1
@@ -627,7 +627,13 @@ for expectations when submitting AI-assisted work.
 
 ## Versioning
 
-Versions follow the termux/proot style. Releases before 2026-08-15 used the historical `-scicat` suffix; `v5.7.3` and later releases use the `neoproot` name without that suffix.
+Versions are **x.y.z.a**: x for a change that breaks the way the project is used,
+y for a large addition, z for a new feature, a for a fix. `v6.1.2.3` is the sixth
+series, after one large addition and two features, with three fixes on top.
+
+That is deliberate: the older `v5.x` numbers collided with the upstream PROOT
+series and with each other, so "5.17" needed a qualifier to be unambiguous.
+Earlier releases used the historical `-scicat` suffix; `v5.7.3` and later dropped it.
 
 ## License
 
