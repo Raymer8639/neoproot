@@ -89,9 +89,12 @@ jobs:
         run: |
           file src/neoproot
           # A dynamic build cannot start on Termux at all, so fail here rather
-          # than publish one.
-          if file src/neoproot | grep -q 'dynamically linked'; then
-            echo "::error::neoproot is dynamically linked; Termux has no ld-linux-aarch64.so.1"
+          # than publish one.  Ask about this one file: the check used to grep a
+          # whole-directory listing that also covered stat-shim's shared object,
+          # which is dynamic by design.
+          if ! file src/neoproot | grep -q 'statically linked'; then
+            echo "::error::neoproot is not statically linked; Termux has no ld-linux-aarch64.so.1"
+            file src/neoproot
             exit 1
           fi
           ls -lh src/neoproot
