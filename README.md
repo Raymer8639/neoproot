@@ -8,7 +8,7 @@ GitHub Release assets are **ARM64 Linux (glibc)** CI builds. Termux needs a **lo
 
 [![CI](https://github.com/Raymer8639/neoproot/actions/workflows/ci.yml/badge.svg)](https://github.com/Raymer8639/neoproot/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-ARM64%20%2F%20Android-blue)
-![Language](https://img.shields.io/badge/C%2FC%2B%2B-C23%20%2F%20C%2B%2B23-orange)
+![Language](https://img.shields.io/badge/language-C23%20%2F%20C%2B%2B23-orange)
 ![License](https://img.shields.io/badge/license-GPLv2-green)
 
 ## Install (one command)
