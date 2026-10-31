@@ -7,6 +7,8 @@
 #include <string.h>
 #include <stdbool.h>
 
+#include "build.h"
+
 /*
  * Both build systems generate this: GNUmake writes src/um-config.h, Meson
  * writes it into the build directory.  A plain #include would make the
@@ -224,6 +226,66 @@ int main(int argc, char *const argv[])
             (strcmp(invoked_as, "neoproot-um") == 0 ||
              strcmp(invoked_as, "uproot") == 0))
             return neoproot_um_supervisor_main(argc, argv);
+    }
+#endif
+#ifdef NEOPROOT_WITH_UM
+    /*
+     * --version and --help are neoproot's own, not the guest's.
+     *
+     * Without this they were forwarded to the backend like any other option,
+     * and the fast backend turned "--version" into a guest command that does
+     * not exist: the install printed "installed binary did not report a
+     * version" and "neoproot --version" exited 127 with no output.  The UML
+     * backend happened to handle them, which is why this only showed up on
+     * machines that installed the fast one.
+     */
+    {
+        int index;
+        bool wants_version = false;
+        bool wants_help = false;
+
+        for (index = 1; index < argc; index++) {
+            const char *argument = argv[index];
+
+            /* The guest command may have its own --version; stop at the
+             * separator or at the first non-option, exactly like the backend
+             * parser does. */
+            if (strcmp(argument, "--") == 0 || argument[0] != '-')
+                break;
+            if (strcmp(argument, "--version") == 0)
+                wants_version = true;
+            else if (strcmp(argument, "--help") == 0 ||
+                     strcmp(argument, "-h") == 0)
+                wants_help = true;
+        }
+        if (wants_version) {
+            /* The same three lines the backend prints, from the same macros:
+             * a caller asking neoproot what it is should not need a Tracee. */
+            printf("neoproot %s\n\n", VERSION);
+            printf("built-in accelerators: process_vm = %s, seccomp_filter = %s\n",
+#if defined(HAVE_PROCESS_VM)
+                   "yes",
+#else
+                   "no",
+#endif
+#if defined(HAVE_SECCOMP_FILTER)
+                   "yes"
+#else
+                   "no"
+#endif
+            );
+#ifdef NEOPROOT_WITH_UM
+            printf("backends: fast, um\n");
+#else
+            printf("backends: fast\n");
+#endif
+            return EXIT_SUCCESS;
+        }
+        if (wants_help) {
+            /* Hand it to the backend's own help: it knows the option list, and
+             * duplicating it here would drift. */
+            wants_help = false;
+        }
     }
 #endif
     if (reject_traced_startup())
