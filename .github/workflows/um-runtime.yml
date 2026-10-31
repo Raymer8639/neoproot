@@ -74,12 +74,14 @@ jobs:
         run: |
           set -eu
           mkdir -p dist
-          # The harness writes next to the tree; find the four files by name so a
-          # layout change upstream is a clear "missing file", not a silent skip.
+          # The harness writes into <tree>/../artifacts (ART defaults to that),
+          # so search from the repository root rather than from the tree.
           for name in linux-bionic stub_exe umnet passt-bionic; do
-            path=$(find um -name "$name" -type f -perm -u+x | head -1)
+            path=$(find . -name "$name" -type f -perm -u+x | head -1)
             if [ -z "$path" ]; then
               echo "::error::build did not produce $name"
+              echo "--- candidates ---"
+              find . -name "$name*" -type f | head -10
               exit 1
             fi
             cp "$path" "dist/$name"
