@@ -76,21 +76,20 @@ jobs:
           mkdir -p dist
           # The harness writes into <tree>/../artifacts (ART defaults to that),
           # so search from the repository root rather than from the tree.
-          # The harness names its outputs with a bionic suffix; the release
-          # asset names are what neoproot looks for, so map one to the other.
-          for pair in linux-bionic:linux-bionic_bionic \
-                      stub_exe:stub_exe_bionic \
-                      umnet:umnet_bionic \
-                      passt-bionic:passt-bionic_bionic; do
-            asset=${pair%%:*}
-            built=${pair##*:}
-            # No -perm filter: the harness does not always leave the execute
-            # bit on stub_exe, and a missing file here is a hard error anyway.
-            path=$(find . -name "$built" -type f | head -1)
+          # The release asset names are what neoproot looks for.  The harness is
+          # not consistent about suffixes (the kernel is plain linux-bionic, the
+          # stub is stub_exe_bionic), so try the suffixed name first and fall
+          # back to the plain one rather than hard-coding either.
+          for asset in linux-bionic stub_exe umnet passt-bionic; do
+            path=
+            for candidate in "${asset}_bionic" "$asset"; do
+              found=$(find . -name "$candidate" -type f | head -1)
+              if [ -n "$found" ]; then path=$found; break; fi
+            done
             if [ -z "$path" ]; then
-              echo "::error::build did not produce $built (for $asset)"
+              echo "::error::build did not produce $asset"
               echo "--- candidates ---"
-              find . -name "${asset%%-*}*" -type f | head -10
+              find . -type f -name "${asset%%-*}*" | head -10
               exit 1
             fi
             cp "$path" "dist/$asset"
