@@ -55,11 +55,23 @@ jobs:
             echo "::error::no static libtalloc; the release binary would be dynamic"
             exit 1
           }
+          # Two builds, in this order and for this reason:
+          #
+          #   1. a normal (dynamic) one, which is what the test suite runs.
+          #      A static binary links glibc differently, and the suite drives
+          #      the tracer through ptrace paths that a fully static build
+          #      exercises in ways the dynamic one does not -- the first static
+          #      build here died with SIGILL inside basic_test.sh.
+          #   2. the static one, which is what gets published, because Termux
+          #      has no ld-linux-aarch64.so.1.
+          #
+          # Building the published artifact last means the file that survives in
+          # src/ is the one the release uploads.
           if [ "$MODE" = "release" ]; then
-            # 默认 ARMv8.2 满血优化（与作者默认一致），makefile 自动选用 lld
-            make -C src all CC=clang CXX=clang++ STATIC_LINK=1
+            make -C src all CC=clang CXX=clang++
+            make -C src -B all CC=clang CXX=clang++ STATIC_LINK=1
           else
-            # 通用构建（例如老设备可降级指令集），验证 MARCH 可覆盖性
+            make -C src -B all CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
             make -C src -B all CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic" STATIC_LINK=1
           fi
 
