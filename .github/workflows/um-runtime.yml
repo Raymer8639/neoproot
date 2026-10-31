@@ -76,19 +76,26 @@ jobs:
           mkdir -p dist
           # The harness writes into <tree>/../artifacts (ART defaults to that),
           # so search from the repository root rather than from the tree.
-          for name in linux-bionic stub_exe umnet passt-bionic; do
+          # The harness names its outputs with a bionic suffix; the release
+          # asset names are what neoproot looks for, so map one to the other.
+          for pair in linux-bionic:linux-bionic_bionic \
+                      stub_exe:stub_exe_bionic \
+                      umnet:umnet_bionic \
+                      passt-bionic:passt-bionic_bionic; do
+            asset=${pair%%:*}
+            built=${pair##*:}
             # No -perm filter: the harness does not always leave the execute
             # bit on stub_exe, and a missing file here is a hard error anyway.
-            path=$(find . -name "$name" -type f | head -1)
+            path=$(find . -name "$built" -type f | head -1)
             if [ -z "$path" ]; then
-              echo "::error::build did not produce $name"
+              echo "::error::build did not produce $built (for $asset)"
               echo "--- candidates ---"
-              find . -name "$name*" -type f | head -10
+              find . -name "${asset%%-*}*" -type f | head -10
               exit 1
             fi
-            cp "$path" "dist/$name"
-            chmod 755 "dist/$name"
-            echo "$name <- $path"
+            cp "$path" "dist/$asset"
+            chmod 755 "dist/$asset"
+            echo "$asset <- $path"
           done
           ls -lh dist
 
