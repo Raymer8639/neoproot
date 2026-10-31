@@ -62,7 +62,9 @@ jobs:
           ls tools/um-arm64/harness/
           # The harness is the supported entry point; it builds with the NDK
           # above and leaves its output in the tree.
-          sh tools/um-arm64/harness/build-bionic.sh
+          # The harness uses "set -o pipefail", which dash (sh on Ubuntu)
+          # does not support, so run it with bash explicitly.
+          bash tools/um-arm64/harness/build-bionic.sh
 
       - name: Collect the runtime
         run: |
