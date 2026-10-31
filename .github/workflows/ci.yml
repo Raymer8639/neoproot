@@ -35,12 +35,16 @@ jobs:
 
       - name: Build neoproot
         run: |
+          # -static is not optional.  Termux has no /lib/ld-linux-aarch64.so.1,
+          # so a dynamically linked build does not start there at all: the
+          # loader open fails and the process exits 127 with no output.  That is
+          # exactly what a release built without this line did.
           if [ "$MODE" = "release" ]; then
             # 默认 ARMv8.2 满血优化（与作者默认一致），makefile 自动选用 lld
-            make -C src all CC=clang CXX=clang++
+            make -C src all CC=clang CXX=clang++ LDFLAGS="-static -ltalloc -lm -ldl -lc -lstdc++ -flto=thin -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--icf=all,-z,relro,-z,now -Wl,--strip-all -lpthread -s"
           else
             # 通用构建（例如老设备可降级指令集），验证 MARCH 可覆盖性
-            make -C src -B all CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
+            make -C src -B all CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic" LDFLAGS="-static -ltalloc -lm -ldl -lc -lstdc++ -flto=thin -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--icf=all,-z,relro,-z,now -Wl,--strip-all -lpthread -s"
           fi
 
       - name: Meson native ARM64 smoke test
@@ -68,6 +72,12 @@ jobs:
       - name: Check binary
         run: |
           file src/neoproot
+          # A dynamic build cannot start on Termux at all, so fail here rather
+          # than publish one.
+          if file src/neoproot | grep -q 'dynamically linked'; then
+            echo "::error::neoproot is dynamically linked; Termux has no ld-linux-aarch64.so.1"
+            exit 1
+          fi
           ls -lh src/neoproot
           test -x src/neoproot
           file src/neoproot-um
