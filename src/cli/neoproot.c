@@ -145,6 +145,7 @@ static void adopt_installed_um_files(const char *argv0)
             setenv(files[index].variable, path, 1);
     }
 }
+#endif
 
 int main(int argc, char *const argv[])
 {
@@ -166,6 +167,7 @@ int main(int argc, char *const argv[])
      * parsed: "neoproot-um session start ..." has to reach the supervisor
      * before neoproot's own option parser reads "session" as a guest command.
      */
+#ifdef NEOPROOT_WITH_UM
     adopt_installed_um_files(argc > 0 ? argv[0] : NULL);
     {
         const char *invoked_as =
