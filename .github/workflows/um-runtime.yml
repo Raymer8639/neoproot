@@ -77,7 +77,9 @@ jobs:
           # The harness writes into <tree>/../artifacts (ART defaults to that),
           # so search from the repository root rather than from the tree.
           for name in linux-bionic stub_exe umnet passt-bionic; do
-            path=$(find . -name "$name" -type f -perm -u+x | head -1)
+            # No -perm filter: the harness does not always leave the execute
+            # bit on stub_exe, and a missing file here is a hard error anyway.
+            path=$(find . -name "$name" -type f | head -1)
             if [ -z "$path" ]; then
               echo "::error::build did not produce $name"
               echo "--- candidates ---"
