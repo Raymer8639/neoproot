@@ -69,10 +69,12 @@ jobs:
           # The harness uses "set -o pipefail", which dash (sh on Ubuntu)
           # does not support, so run it with bash explicitly.
           bash tools/um-arm64/harness/build-bionic.sh
-          # The kernel build does not produce the network side; umnet and passt
-          # have their own harness, and --net needs both.
-          bash tools/um-arm64/harness/build-net-bionic.sh
 
+      # umnet and passt are NOT built here.  build-net-bionic.sh needs a patched
+      # passt checkout and hard-codes paths from the maintainer's tree, so it is
+      # not something CI can run unattended.  They stay a user-provided path
+      # (install.sh --um-net/--um-passt), and neoproot says plainly when --net
+      # cannot work because they are missing.
       - name: Collect the runtime
         run: |
           set -eu
@@ -83,7 +85,7 @@ jobs:
           # not consistent about suffixes (the kernel is plain linux-bionic, the
           # stub is stub_exe_bionic), so try the suffixed name first and fall
           # back to the plain one rather than hard-coding either.
-          for asset in linux-bionic stub_exe umnet passt-bionic; do
+          for asset in linux-bionic stub_exe; do
             path=
             for candidate in "${asset}_bionic" "$asset"; do
               found=$(find . -name "$candidate" -type f | head -1)
