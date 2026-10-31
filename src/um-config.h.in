@@ -1,0 +1,9 @@
+/* Generated from um-config.h.in by the build.
+ *
+ * The UML backend is optional: WITH_UM=0 (GNUmake) or -Dum=false (Meson)
+ * leaves the supervisor and the session daemon out of neoproot.  The switch
+ * lives in a header rather than in compiler flags because make does not track
+ * flag changes, so an object compiled with one setting would be reused with
+ * the other and the link would fail on neoproot_um_supervisor_main.
+ */
+#mesondefine NEOPROOT_WITH_UM

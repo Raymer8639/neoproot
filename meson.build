@@ -136,6 +136,16 @@ loader = custom_target('loader-wrapped', output: 'loader-wrapped.o', depend_file
 #   meson setup build -Dum=false
 # Without it neoproot cannot run --backend=um and the dispatcher says so; the
 # standalone neoproot-um is not built at all.
+# cli/neoproot.c includes um-config.h unconditionally, so the Meson build has to
+# provide it too -- the GNUmakefile generates it so that switching WITH_UM
+# invalidates the object that depends on it.
+um_config = configuration_data()
+um_config.set('NEOPROOT_WITH_UM', um_enabled ? 1 : 0)
+um_config_header = configure_file(
+  input: 'src/um-config.h.in',
+  output: 'um-config.h',
+  configuration: um_config)
+
 um_enabled = get_option('um')
 um_sources = []
 um_args = []
@@ -148,7 +158,7 @@ if um_enabled
     command: [find_program('sh'), files('scripts/embed-shell.sh'), 'um_session_loop_text', '@INPUT@'],
     capture: true)
   um_sources = [files('src/backend/um_supervisor.c', 'src/backend/um_session.c'), um_loop_header]
-  um_args = ['-DNEOPROOT_WITH_UM', '-I' + meson.current_build_dir()]
+  um_args = ['-I' + meson.current_build_dir()]
   # neoproot contains the supervisor already, so the second name is a link to
   # it; which name it was called by selects the command line.
   install_symlink('neoproot-um',

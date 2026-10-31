@@ -30,7 +30,8 @@ env:
   # passt of the same tree.
   UM_REPO: Raymer8639/linux-um-arm64
   UM_REF: ${{ github.event.inputs.um_ref || 'um-arm64' }}
-  NDK_VERSION: 29.0.14206865
+  # The download URL uses the short form (r29), not the full revision.
+  NDK_RELEASE: r29
 
 jobs:
   runtime:
@@ -46,10 +47,13 @@ jobs:
       - name: Install the Android NDK
         run: |
           set -eu
-          url="https://dl.google.com/android/repository/android-ndk-r${NDK_VERSION%-*}-linux.zip"
+          url="https://dl.google.com/android/repository/android-ndk-${NDK_RELEASE}-linux.zip"
+          echo "downloading $url"
           curl -fsSL -o /tmp/ndk.zip "$url"
           unzip -q /tmp/ndk.zip -d /opt
-          echo "ANDROID_NDK_HOME=/opt/android-ndk-r${NDK_VERSION%-*}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=/opt/android-ndk-${NDK_RELEASE}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=/opt/android-ndk-${NDK_RELEASE}" >> "$GITHUB_ENV"
+          ls -d /opt/android-ndk-*
 
       - name: Build the kernel, stub, umnet and passt
         run: |

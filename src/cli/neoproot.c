@@ -7,7 +7,17 @@
 #include <string.h>
 #include <stdbool.h>
 
-#include "um-config.h"
+/*
+ * Both build systems generate this: GNUmake writes src/um-config.h, Meson
+ * writes it into the build directory.  A plain #include would make the
+ * source depend on which one ran, so a build that does not provide it is
+ * treated as "no UML backend" rather than failing to compile.
+ */
+#if defined(__has_include)
+#  if __has_include("um-config.h")
+#    include "um-config.h"
+#  endif
+#endif
 
 #include "cli/auto_backend.h"
 #include "cli/backend.h"
