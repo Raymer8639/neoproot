@@ -218,51 +218,48 @@ jobs:
           chmod +x dist/install.sh
           ls -lh dist
       - name: Generate checksums
-        run: (cd dist && sha256sum neoproot neoproot-portable neoproot-um neoproot-um-portable libstatfast.so > SHA256SUMS)
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
-      # Put the install one-liner above the generated notes, so the release page
-      # answers "how do I install this" before it lists the merged PRs. Everything
-      # happens in one python block: the API needs the release *id* for the PATCH
-      # (PATCHing /releases/tags/<tag> is a 404), the by-tag lookup can lag a second
-      # or two behind creation, and a failure here must never fail a published
-      # release, so it retries and then gives up with a warning.
-      - name: Prepend install instructions to the release notes
+          # The body is composed by the step below, and composed from scratch
+          # every time.  Letting this action generate notes made each re-run of
+          # a tag append another copy: one release ended up with the same
+          # "What's Changed" section six times.
+          generate_release_notes: false
+          body: "Release notes are composed after upload."
+
+      # The whole body is rewritten on every run -- header, then exactly one set
+      # of generated notes -- so re-pushing a tag cannot accumulate duplicates.
+      - name: Compose the release notes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          header=$(cat <<'HEADER'
-          ## Install (one command)
+          python3 <<'PY'
+          import json, os, time, urllib.error, urllib.request
+
+          api = 'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY']
+          tag = os.environ['GITHUB_REF_NAME']
+          token = os.environ['GH_TOKEN']
+
+          header = '''## Install (one command)
 
           ```sh
-          curl -fsSL https://github.com/__REPO__/releases/latest/download/install.sh | sh
+          curl -fsSL https://github.com/%s/releases/latest/download/install.sh | sh
           ```
 
           The installer builds from this tag on Termux (bionic) and downloads the
           matching binary elsewhere. These assets are **ARM64 glibc** builds for
           containers and ARM64 Linux hosts: do not install `neoproot` from here as
           the Termux `$PREFIX/bin/neoproot`. On Termux use the installer or
-          `sh install.sh` from the source tarball (or `meson setup builddir && meson compile -C builddir`).
+          `sh install.sh` from the source tarball.
 
           ---
-          HEADER
-          )
-          export RELEASE_HEADER=${header//__REPO__/$GITHUB_REPOSITORY}
-          export RELEASE_TAG=$GITHUB_REF_NAME
-          export RELEASE_API=https://api.github.com/repos/$GITHUB_REPOSITORY/releases
-          python3 <<'PY'
-          import json, os, time, urllib.error, urllib.request
-
-          api = os.environ['RELEASE_API']
-          tag = os.environ['RELEASE_TAG']
-          header = os.environ['RELEASE_HEADER']
+          ''' % os.environ['GITHUB_REPOSITORY']
 
           def call(url, data=None, method='GET'):
               req = urllib.request.Request(url, data=data, method=method, headers={
-                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Authorization': 'Bearer ' + token,
                   'Accept': 'application/vnd.github+json',
                   'Content-Type': 'application/json',
                   'User-Agent': 'neoproot-release-notes',
@@ -273,21 +270,50 @@ jobs:
           release = None
           for attempt in range(1, 11):
               try:
-                  release = call('%s/tags/%s' % (api, tag))
+                  release = call('%s/releases/tags/%s' % (api, tag))
                   break
               except urllib.error.HTTPError as exc:
-                  print('release %s not visible through the API yet (attempt %d): %s' % (tag, attempt, exc))
+                  print('release %s not visible yet (attempt %d): %s' % (tag, attempt, exc))
                   time.sleep(3)
           if release is None:
-              print('::warning::could not read release %s; leaving the generated notes as they are' % tag)
+              print('::warning::could not read release %s' % tag)
               raise SystemExit(0)
 
-          body = release.get('body') or ''
-          if body.lstrip().startswith('## Install (one command)'):
-              print('install block already present for %s' % tag)
-              raise SystemExit(0)
+          # Prefer the hand-written CHANGELOG entry: it says why a release
+          # exists, while the generated list only says which PRs were merged.
+          # Fall back to the generated notes when there is no entry yet.
+          notes = ''
+          try:
+              with open('CHANGELOG.md', encoding='utf-8') as fh:
+                  changelog = fh.read()
+              marker = '## [' + tag + ']'
+              at = changelog.find(marker)
+              if at >= 0:
+                  rest = changelog[at:]
+                  nxt = rest.find('\n## [', 1)
+                  notes = rest if nxt < 0 else rest[:nxt]
+                  print('using the CHANGELOG entry for %s' % tag)
+          except OSError as exc:
+              print('::warning::could not read CHANGELOG.md: %s' % exc)
 
-          payload = json.dumps({'body': header + '\n' + body}).encode()
-          call('%s/%d' % (api, release['id']), payload, 'PATCH')
-          print('release notes updated for %s' % tag)
+          if not notes.strip():
+              try:
+                  notes = call('%s/releases/generate-notes' % api, json.dumps({
+                      'tag_name': tag,
+                      'target_commitish': os.environ.get('GITHUB_SHA') or 'HEAD',
+                  }).encode(), method='POST').get('body') or ''
+              except urllib.error.HTTPError as exc:
+                  print('::warning::could not generate notes for %s: %s' % (tag, exc))
+
+          body = header
+          if notes.strip():
+              body += '\n' + notes.strip() + '\n'
+
+          try:
+              call('%s/releases/%s' % (api, release['id']),
+                   json.dumps({'body': body}).encode(), method='PATCH')
+              print('notes set for %s: %d bytes' % (tag, len(body)))
+          except urllib.error.HTTPError as exc:
+              print('::warning::could not set notes for %s: %s' % (tag, exc))
           PY
+
