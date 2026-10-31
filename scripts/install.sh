@@ -619,6 +619,12 @@ if [ "$MODE" = "termux" ]; then
 	fi
 	[ -n "$PREFIX_DIR" ] || PREFIX_DIR=${PREFIX:-}
 	install_binary "$workdir/repo/src/neoproot" "$PREFIX_DIR"
+	# The build produces the supervisor; the kernel and the network helpers are
+	# separate and come from their own releases, on the same "backend on means
+	# fetch it" rule as the Linux path.
+	if [ "${WITH_UM:-1}" = 1 ]; then
+		install_um_runtime "$PREFIX_DIR"
+	fi
 	write_state "$PREFIX_DIR" "$tag" 0
 else
 	check_arch
