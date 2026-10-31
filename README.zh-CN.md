@@ -17,7 +17,7 @@ GitHub Release 资产是 **ARM64 Linux（glibc）** CI 产物。Termux 必须用
 curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/install.sh | sh
 ```
 
-脚本会自动识别平台：在 **Termux** 上安装编译依赖，用对应 tag 的源码编译出 bionic 二进制，备份旧二进制后装进 `$PREFIX/bin`；在 **ARM64 Linux** 上下载 release 二进制、用 `SHA256SUMS` 校验后放进 `PATH`。它**不会**改动正在运行的容器 rootfs。不放心管道执行可以先看 [scripts/install.sh](scripts/install.sh)，`sh scripts/install.sh --help` 可看 `--version`、`--prefix`、`--portable` 参数。
+脚本会自动识别平台：在 **Termux** 上安装编译依赖，用对应 tag 的源码编译出 bionic 二进制，备份旧二进制后装进 `$PREFIX/bin`；在 **ARM64 Linux** 上下载 release 二进制、用 `SHA256SUMS` 校验后放进 `PATH`。它**不会**改动正在运行的容器 rootfs。不放心管道执行可以先看 [scripts/install.sh](scripts/install.sh)，`sh scripts/install.sh --help` 可看全部参数：常用的是 `--version`、`--prefix`、`--portable`、`--lang`、`--update` 和 UM/shim 开关。
 
 ## 在 Termux 中手动编译
 
@@ -40,9 +40,9 @@ meson install -C builddir
 
 **ARM64 Linux**（不是 Termux）可以从 [Releases](https://github.com/Raymer8639/neoproot/releases) 下载 `neoproot` 或降低指令集要求的 `neoproot-portable`，校验 SHA256 后放入 `PATH`。
 
-### 安装选项
+### 安装选项（源码安装）
 
-`sh install.sh --help` 会列出全部；会改变结果的几个：
+`sh install.sh --help` 会列出全部；会改变结果的几个。下面是**源码安装器**（仓库里的 `install.sh`）的选项；上面的一键脚本是另一个脚本（`scripts/install.sh`，即 Release 里的 `install.sh`），接受 `--version`、`--prefix`、`--portable`、`--lang`、`--update`、`--force`、UM/shim 开关和 `-y`，并且会自己下载 UML 运行时。
 
 | 选项 | 作用 |
 | --- | --- |
@@ -50,8 +50,11 @@ meson install -C builddir
 | `--without-um` | 只留 fast 后端，不编译 supervisor 和 session daemon，也不装 `neoproot-um`。之后 `--backend=um` 会明确报「此构建没有 um 后端」。 |
 | `--with-shim` | 默认。把 `libstatfast.so` 装到 `$PREFIX/libexec/neoproot/`。 |
 | `--without-shim` | 不装 stat shim。 |
-| `--shim-rootfs DIR` | 额外把 shim 复制进那个容器 rootfs 的 `/opt/neoproot/libstatfast.so`。可重复。 |
-| `--lang en\|zh` | 安装界面语言；不给则跟随 `$LANG`，仍不确定就问。 |
+| `--shim-rootfs=DIR` | 额外把 shim 复制进那个容器 rootfs 的 `/opt/neoproot/libstatfast.so`。可重复。 |
+| `--um-kernel=FILE` | 把内核装到 `libexec/neoproot/um/linux-bionic`。 |
+| `--um-stub=FILE` | 与该内核配套的 `stub_exe`。 |
+| `--um-net=FILE` | `umnet`，`--net` 的运行器。 |
+| `--um-passt=FILE` | `passt-bionic`，`--net` 需要的 DHCP 服务。 |
 | `-y` / `--non-interactive` | 全部用默认值，不提问。`curl \| sh` 时 stdin 不是终端，会自动走这条。 |
 
 ```sh
@@ -61,7 +64,7 @@ sh install.sh --shim-rootfs=/data/.../alarm     # 顺带把 shim 放进容器
 sh build.sh --without-um                        # 只编译，不安装
 ```
 
-开启 UML 后端时会**自动下载**内核、`stub_exe`、`umnet`、`passt`，不需要手填路径。
+源码安装时 `sh install.sh` 会询问内核、`stub_exe`、`umnet`、`passt` 的本地路径（也可用 `--um-kernel=`/`--um-stub=`/`--um-net=`/`--um-passt=` 直接给）；只有一键脚本会自动下载运行时。
 
 ### 更新已安装的版本
 
@@ -71,7 +74,7 @@ sh install.sh --update --force      # 版本相同也强制重装
 sh install.sh --update --prefix DIR # 前缀不在默认位置时
 ```
 
-`--update` 只替换二进制和运行时，**沿用上次的每一个选择**。普通安装会把选择记到
+`--update` 属于一键脚本（Release 里的 `install.sh`）；源码安装器没有 `--update`。它只替换二进制和运行时，**沿用上次的每一个选择**。普通安装会把选择记到
 `<prefix>/libexec/neoproot/install-state`：
 
 ```
@@ -109,7 +112,7 @@ installed_at=2026-10-31T19:30:00Z
 各项目发各自的构建。这是有意为之：每提交一次 neoproot 就编一次内核会让 CI 变慢，
 也会把一个项目的版本号塞进另一个项目的发布说明里。
 
-`install.sh` 把它们取到 `<prefix>/libexec/neoproot/um/`，`neoproot` 从自己的路径就能找到，
+一键脚本（`scripts/install.sh`）把它们取到 `<prefix>/libexec/neoproot/um/`，`neoproot` 从自己的路径就能找到，
 **不需要导出任何环境变量**：
 
 ```
@@ -119,6 +122,8 @@ installed_at=2026-10-31T19:30:00Z
     umnet            来自 linux-um-arm64
     passt-bionic     来自 linux-um-arm64（与内核配套）
 ```
+
+源码安装时 `sh install.sh` 改为询问这四个文件的本地路径（也可用 `--um-kernel=`/`--um-stub=`/`--um-net=`/`--um-passt=` 直接给）。
 
 版本钉在本 neoproot 测试过的组合上。内核必须和它运行的 `um-init`、`umnet`、`passt`
 版本一致，所以「取最新」不是合适的默认值；知道自己在做什么可以用

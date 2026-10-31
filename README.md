@@ -17,7 +17,7 @@ GitHub Release assets are **ARM64 Linux (glibc)** CI builds. Termux needs a **lo
 curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/install.sh | sh
 ```
 
-The script detects the platform and does the right thing: on **Termux** it installs the build dependencies, builds the bionic binary from the tagged source, backs up the previous binary and installs the new one into `$PREFIX/bin`; on **ARM64 Linux** it downloads the release binary, verifies it against `SHA256SUMS`, and installs it into your `PATH`. It never touches a running container's rootfs. Read [scripts/install.sh](scripts/install.sh) before piping it to a shell if you prefer; `sh scripts/install.sh --help` lists `--version`, `--prefix` and `--portable`.
+The script detects the platform and does the right thing: on **Termux** it installs the build dependencies, builds the bionic binary from the tagged source, backs up the previous binary and installs the new one into `$PREFIX/bin`; on **ARM64 Linux** it downloads the release binary, verifies it against `SHA256SUMS`, and installs it into your `PATH`. It never touches a running container's rootfs. Read [scripts/install.sh](scripts/install.sh) before piping it to a shell if you prefer; `sh scripts/install.sh --help` lists every option, including `--version`, `--prefix`, `--portable`, `--lang`, `--update` and the UM/shim toggles.
 
 ## Start in Termux (manual)
 
@@ -38,9 +38,9 @@ meson install -C builddir
 
 The installer places `neoproot` in `$PREFIX/bin`.
 
-### Install options
+### Install options (source build)
 
-`sh install.sh --help` lists them; the ones that change what you get:
+`sh install.sh --help` lists them; the ones that change what you get. This is the source installer in the repository; the one-command installer above is a different script (`scripts/install.sh`, shipped as the release asset `install.sh`) and takes `--version`, `--prefix`, `--portable`, `--lang`, `--update` and `--force` instead. It also fetches the UML runtime for you.
 
 | Option | What it does |
 | --- | --- |
@@ -53,6 +53,7 @@ The installer places `neoproot` in `$PREFIX/bin`.
 | `--um-stub=FILE` | `stub_exe` that goes with that kernel. |
 | `--um-net=FILE` | `umnet`, the `--net` runner. |
 | `--um-passt=FILE` | `passt-bionic`, the DHCP server `--net` needs. |
+| `-y`, `--non-interactive` | Take every default without asking. |
 
 ```sh
 sh install.sh                                   # host install, UML + shim
@@ -69,7 +70,8 @@ sh install.sh --update --force      # reinstall even if the version matches
 sh install.sh --update --prefix DIR # when the prefix is not the default
 ```
 
-`--update` replaces the binary and the UML runtime and keeps every choice the
+`--update` belongs to the one-command installer (the release asset); the source
+installer has no `--update`. It replaces the binary and the UML runtime and keeps every choice the
 previous install made. A normal install writes those choices to
 `<prefix>/libexec/neoproot/install-state`:
 
@@ -114,7 +116,7 @@ Each project releases its own build. That is deliberate: compiling a kernel on
 every neoproot commit would make this CI slow, and it would put the version of
 one project inside the release notes of another.
 
-`install.sh` fetches them into `<prefix>/libexec/neoproot/um/` and `neoproot` finds
+The one-command installer (`scripts/install.sh`) fetches them into `<prefix>/libexec/neoproot/um/` and `neoproot` finds
 them from its own path, so nothing needs exporting:
 
 ```
@@ -124,6 +126,9 @@ them from its own path, so nothing needs exporting:
     umnet            from linux-um-arm64
     passt-bionic     from linux-um-arm64 (matched with the kernel)
 ```
+
+When you build from source, `sh install.sh` asks for the same four files instead;
+`--um-kernel=`, `--um-stub=`, `--um-net=` and `--um-passt=` skip the questions.
 
 The versions are pinned to the pair this neoproot was tested against. A kernel
 has to agree with the `um-init`, `umnet` and `passt` it runs with, so
