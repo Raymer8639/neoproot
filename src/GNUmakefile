@@ -56,8 +56,12 @@ CXXFLAGS += -std=c++23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-s
 # and falls back rather than failing the link with a bare "cannot find
 # -ltalloc".
 ifeq ($(STATIC_LINK),1)
-HAVE_STATIC_TALLOC := $(shell $(CC) -static -ltalloc -o /dev/null -xc /dev/null \
-	>/dev/null 2>&1 && echo yes)
+# The probe needs a main(): an empty translation unit fails to link for that
+# reason alone, and the failure would be read as "no static talloc".
+HAVE_STATIC_TALLOC := $(shell printf 'int main(void){return 0;}' > /tmp/.np-static-probe.c; \
+	$(CC) -static -ltalloc -o /tmp/.np-static-probe /tmp/.np-static-probe.c \
+	>/dev/null 2>&1 && echo yes; \
+	rm -f /tmp/.np-static-probe.c /tmp/.np-static-probe)
 ifeq ($(HAVE_STATIC_TALLOC),yes)
 LDFLAGS += -static
 else
