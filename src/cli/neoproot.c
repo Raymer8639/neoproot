@@ -138,21 +138,57 @@ static void adopt_installed_um_files(const char *argv0)
     if (prefix[0] == '\0')
         strcpy(prefix, "/");
 
-    if (snprintf(directory, sizeof(directory), "%s/libexec/neoproot/um", prefix) >=
-        (int)sizeof(directory))
-        return;
+    /*
+     * Three places, in order of how deliberate they are:
+     *
+     *   1. $NEOPROOT_HOME/libexec/neoproot/um -- for a caller that laid the
+     *      runtime out somewhere the binary does not know about.
+     *   2. <prefix>/libexec/neoproot/um -- what install.sh creates.
+     *   3. the binary's own directory -- someone copied neoproot and the four
+     *      files next to each other, which is the obvious thing to try.
+     *
+     * The first two are per-file: a caller may have provided only some of
+     * them.  The third is checked as a whole because a stray linux-bionic next
+     * to the binary is more likely a coincidence than a runtime.
+     */
+    {
+        const char *home = getenv("NEOPROOT_HOME");
+        char candidates[3][PATH_MAX];
+        int candidate_count = 0;
 
-    for (index = 0; index < sizeof(files) / sizeof(files[0]); index++) {
-        char path[PATH_MAX];
-        const char *existing = getenv(files[index].variable);
+        if (home != NULL && home[0] == '/') {
+            if (snprintf(candidates[candidate_count], PATH_MAX,
+                         "%s/libexec/neoproot/um", home) < PATH_MAX)
+                candidate_count++;
+            if (snprintf(candidates[candidate_count], PATH_MAX,
+                         "%s/um", home) < PATH_MAX)
+                candidate_count++;
+        }
+        if (snprintf(candidates[candidate_count], PATH_MAX,
+                     "%s/libexec/neoproot/um", prefix) < PATH_MAX)
+            candidate_count++;
+        if (snprintf(candidates[candidate_count], PATH_MAX, "%s", bindir) <
+            PATH_MAX)
+            candidate_count++;
 
-        if (existing != NULL && existing[0] != '\0')
-            continue;
-        if (snprintf(path, sizeof(path), "%s/%s", directory,
-                     files[index].name) >= (int)sizeof(path))
-            continue;
-        if (access(path, R_OK) == 0)
-            setenv(files[index].variable, path, 1);
+        for (index = 0; index < sizeof(files) / sizeof(files[0]); index++) {
+            const char *existing = getenv(files[index].variable);
+            int candidate;
+
+            if (existing != NULL && existing[0] != '\0')
+                continue;
+            for (candidate = 0; candidate < candidate_count; candidate++) {
+                char path[PATH_MAX];
+
+                if (snprintf(path, sizeof(path), "%s/%s", candidates[candidate],
+                             files[index].name) >= (int)sizeof(path))
+                    continue;
+                if (access(path, R_OK) != 0)
+                    continue;
+                setenv(files[index].variable, path, 1);
+                break;
+            }
+        }
     }
 }
 #endif

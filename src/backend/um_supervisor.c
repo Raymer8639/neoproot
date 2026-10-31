@@ -2499,8 +2499,27 @@ static void um_print_usage(void)
     puts("  --net-ipv6-addr=A[/P]  guest IPv6 address (default: fd00::2/64)");
     puts("  --net-ipv6-gw=ADDR  guest IPv6 gateway (default: fe80::1)");
     puts("  --net-ipv6-dns=ADDR IPv6 nameserver ('none' omits it, default: host resolver)");
-    puts("Environment defaults: NEOPROOT_UM_KERNEL, NEOPROOT_UM_STUB,");
-    puts("  NEOPROOT_UM_NET, NEOPROOT_UM_PASST");
+    /*
+     * Print what was actually resolved, not just the variable names.  An
+     * install that put the kernel in the wrong place is otherwise only
+     * discoverable by booting and reading "invalid kernel path", and the
+     * answer to "which kernel is it using" is the first question anyone asks.
+     */
+    puts("UML runtime (from NEOPROOT_UM_* or the install directory):");
+    {
+        static const char *const names[] = {
+            "NEOPROOT_UM_KERNEL", "NEOPROOT_UM_STUB",
+            "NEOPROOT_UM_NET", "NEOPROOT_UM_PASST", NULL
+        };
+        size_t index;
+
+        for (index = 0; names[index] != NULL; index++) {
+            const char *value = getenv(names[index]);
+
+            printf("  %-20s %s\n", names[index],
+                   (value != NULL && value[0] != '\0') ? value : "(not set)");
+        }
+    }
     puts("Sessions (one boot, many commands):");
     puts("  neoproot-um session start --rootfs=PATH [options]");
     puts("  neoproot-um session run -- command [args...]");

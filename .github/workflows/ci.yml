@@ -151,6 +151,10 @@ jobs:
           TMPDIR=/tmp/neoproot-um-cli-ci sh test-um-session-loop.sh
           loop_status=$?
           TMPDIR=/tmp/neoproot-um-cli-ci sh test-um-session-daemon.sh
+          # Where the UML runtime is found: prefix layout, $NEOPROOT_HOME,
+          # side by side, and an explicit variable that must win.
+          TMPDIR=/tmp/neoproot-um-cli-ci sh test-um-runtime-discovery.sh \
+            || test $? -eq 125
           session_status=$?
           set -e
           test "$um_status" -eq 0 || test "$um_status" -eq 125
