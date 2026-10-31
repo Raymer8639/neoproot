@@ -3,91 +3,69 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
-## [v5.19.0] - 2026-10-31
+## [v6.0.0.0] - 2026-10-31
 
-**The installer asks, in your language, and the binary runs on older CPUs**
+**Out of the box: one command, every piece fetched from where it is published**
 
-Three things a first install got wrong on a real second device:
+Version numbering changes to **x.y.z.a**: x for a change that breaks the way
+you use the project, y for a large addition, z for a new feature, a for a fix.
+This release is x=6 because the install layout and the release contents both
+changed: it replaces v5.17.0 and v5.19.0, which are withdrawn. Their version
+numbers also collided with the upstream PROOT series, which is what made them
+confusing to talk about.
 
-- **It died with SIGILL.** The build hard-coded `-march=armv8.2-a+dotprod+lse+crypto`,
-  which is an illegal instruction on a pre-8.2 CPU: the link succeeds and the
-  binary dies before printing anything. `build.sh` now reads
-  `/proc/cpuinfo` and falls back to `-march=armv8-a` when the features are
-  missing, saying which one it chose.
-- **Every run printed a ulimit error.** `ulimit -n 16384` raises both limits;
-  where the hard limit is lower, the shell refuses and says so. It is now
-  `ulimit -S -n 16384`: the soft limit goes as high as allowed and the hard
-  one is left alone.
-- **It cloned with a warning.** `git clone --branch <annotated tag>` prints
-  "refs/tags/... is not a commit" and lands in detached HEAD, which reads like
-  a failure. The tag is now fetched explicitly and checked out.
+### One command
 
-And the installer is a guided setup rather than a single question:
+```sh
+sh install.sh
+```
 
-- **Language first.** `--lang en|zh`, or it follows `$LANG`, or it asks.
-  Every prompt and message goes through one lookup, so the choice actually
-  changes what follows rather than only the first line.
-- **Then what to install**: the um backend, the kernel path if you have one,
-  the stat shim, and which container rootfs to put the shim in. A summary and
-  a confirmation come before anything is written.
-- `--with-um` / `--without-um` / `--with-shim` / `--without-shim`,
-  `--shim-rootfs DIR`, `-y`, `--interactive` and `--non-interactive` skip the
-  questions for scripted use. With stdin redirected the defaults are used and
-  the script says so instead of hanging.
-- `--without-um` is recorded, so `--update` does not quietly put the
-  supervisor back.
-## [v5.18.0] - 2026-10-31
+It asks, in your language, and then does the rest:
 
-**`install.sh --update`: bring an install up to date without re-choosing**
+- **Language first** -- `--lang en|zh`, or it follows `$LANG`, or it asks.
+  Every prompt goes through one lookup, so the choice changes what follows.
+- **Where to install**, and whether to include the UML backend and the stat
+  shim. A summary and a confirmation come before anything is written.
+- **The runtime comes with the backend.** Turning the UML backend on is the
+  whole answer: the kernel, `stub_exe`, `umnet` and `passt` are downloaded from
+  the releases that publish them. There is no kernel path to type.
 
-A normal install now records what it chose in
-`<prefix>/libexec/neoproot/install-state`, and `--update` replays it.
+### Where the pieces come from
 
-- `sh install.sh --update` replaces the binary and the UML runtime, keeps the
-  prefix, the um-backend choice and the portable/release choice, and asks
-  nothing.
-- It is a no-op when the recorded version already matches the newest release.
-  The comparison uses the record, not the file timestamp, so a restored backup
-  does not look like a new install. `--force` reinstalls anyway.
-- The UML runtime has its own tags, so it can be behind while the binary is
-  current: then only the runtime is refreshed, and the state file is updated
-  to say so.
-- A prefix is required or deduced; `--update` with no record says so and
-  proceeds rather than failing, because the file is a convenience.
-## [v5.17.0] - 2026-10-31
+Each project releases its own artifacts, so this repository builds and
+publishes only neoproot:
 
-**The installer asks, and fetches the runtime from where it is published**
-
-`neoproot` is a supervisor: it `exec`s a kernel, and `--net` runs `umnet` and `passt`.
-Those are other projects, so this release does not build or publish them. It
-fetches each from its own release:
-
-| Artifact | Repository | Release |
+| Artifact | Published by | Release |
 | --- | --- | --- |
-| `linux-bionic`, `stub_exe`, `umnet`, `passt-bionic` | linux-um-arm64 | `um-arm64-v0.3.0` |
-| `passt-android-arm64` | passt-android | `v0.3.1` |
+| `linux-bionic`, `stub_exe`, `umnet`, `passt-bionic` | [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) | `um-arm64-v0.3.0` |
+| `passt-android-arm64` | [passt-android](https://github.com/Raymer8639/passt-android) | `v0.3.1` |
 
-- `install.sh` is a guided setup: prefix, UML backend, kernel, stub, umnet,
-  passt, stat shim, target rootfs, then a summary and a confirmation, in the
-  shape of `pnpm create vite`. Empty input takes the default; `--non-interactive`
-  skips the questions, which is what happens automatically when stdin is not a
-  terminal.
-- Everything lands in `<prefix>/libexec/neoproot/um/`. `neoproot` resolves its own
-  prefix from `argv[0]` and adopts what it finds there, so `--backend=um`
-  and `--net-auto` work with no environment variable. Anything set in the
-  environment still wins. Three locations are searched: `$NEOPROOT_HOME/libexec/neoproot/um`,
-  `<prefix>/libexec/neoproot/um`, and beside the binary.
-- Versions are pinned to the combination this release was tested with, because
-  a kernel has to agree with the `um-init`, `umnet` and `passt` it runs
-  with. `NEOPROOT_UM_KERNEL_TAG` and `NEOPROOT_UM_PASST_TAG` override them.
-- Missing pieces are named, not left to fail later: no kernel, no `umnet`,
-  no `passt` each print what is missing and the exact command that adds it.
-  Bad paths are rejected before the build, so a typo costs milliseconds.
-- `neoproot-um` is a link to `neoproot`. The dispatcher picks its command
-  line from `argv[0]`, so `session` still reaches the supervisor and one copy of
-  the code serves both names.
-- `--help` now prints the resolved runtime paths rather than just the
-  variable names, which is the first thing to check when a boot fails.
+That keeps a neoproot release about neoproot, and keeps neoproot CI from
+cross-compiling a kernel on every commit. The versions are pinned to the set
+this release was tested with; `NEOPROOT_UM_KERNEL_TAG` and
+`NEOPROOT_UM_PASST_TAG` override them.
+
+### It runs on older phones
+
+- The build hard-coded `-march=armv8.2-a+dotprod+lse+crypto`, which is an
+  illegal instruction on a pre-8.2 CPU: the link succeeds and the binary dies
+  before printing anything. `build.sh` now reads `/proc/cpuinfo` and falls back
+  to `-march=armv8-a`, saying which one it chose.
+- `ulimit -S -n 16384` instead of `ulimit -n 16384`: the hard limit is left
+  alone, so a lower one no longer prints an error on every run.
+- The source build fetches the tag explicitly instead of `clone --branch`,
+  which used to warn "not a commit" and land in detached HEAD.
+
+### Updating
+
+- `sh install.sh --update` replays the recorded choices, replaces the binary
+  and the runtime, and does nothing when the recorded version is current.
+  `--force` reinstalls anyway. The runtime is refreshed on its own when only
+  its tag moved.
+- `neoproot-um` is a link to `neoproot`; the dispatcher picks the command line
+  from `argv[0]`, so `session` still reaches the supervisor.
+- `--help` prints the resolved runtime paths, which is the first thing to check
+  when a boot fails.
 ## [v5.16.0] - 2026-10-31
 
 **Out-of-the-box install: optional UML backend, options everywhere, shim wired up**

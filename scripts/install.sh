@@ -62,7 +62,7 @@ t() { # t KEY  -- prints the message for $LANG_CHOICE
 	zh:cancelled)     printf '%s' "已取消" ;;
 	zh:choose)        printf '%s' "选择" ;;
 	zh:default)       printf '%s' "默认" ;;
-	zh:um_note)       printf '%s' "neoproot 本身不含内核，--backend=um 需要另外的内核文件。" ;;
+	zh:um_note)       printf '%s' "将自动下载内核、stub_exe、umnet、passt（约 15MB）。" ;;
 	zh:shim_note)     printf '%s' "shim 是 guest 侧的库，装在宿主机上对容器没用。" ;;
 	zh:need_number)   printf '%s' "请输入编号" ;;
 	zh:not_current)   printf '%s' "没有任何安装记录" ;;
@@ -92,7 +92,7 @@ t() { # t KEY  -- prints the message for $LANG_CHOICE
 	en:cancelled)     printf '%s' "cancelled" ;;
 	en:choose)        printf '%s' "choose" ;;
 	en:default)       printf '%s' "default" ;;
-	en:um_note)       printf '%s' "neoproot does not contain a kernel; --backend=um needs one." ;;
+	en:um_note)       printf '%s' "the kernel, stub_exe, umnet and passt will be downloaded (about 15 MB)." ;;
 	en:shim_note)     printf '%s' "the shim is a guest-side library; the host copy does nothing for a container." ;;
 	en:need_number)   printf '%s' "enter a number" ;;
 	en:not_current)   printf '%s' "no record of a previous install" ;;
@@ -539,10 +539,11 @@ if [ "$INTERACTIVE" = yes ] && [ "$ACTION" != "update" ]; then
 		[ "$_um_choice" = 1 ] && WITH_UM=1 || WITH_UM=0
 	fi
 
-	if [ "$WITH_UM" = 1 ] && [ "$MODE" != "termux" ]; then
+	# No kernel prompt.  Turning the backend on is the whole answer: the kernel,
+	# stub, umnet and passt are fetched from the releases that publish them, so
+	# asking for a path would be asking the user to do the installer's job.
+	if [ "$WITH_UM" = 1 ]; then
 		printf '\n  %s\n' "$(t um_note)"
-		_kernel=$(ask_text "$(t q_kernel)" "")
-		[ -n "$_kernel" ] && UM_KERNEL_OVERRIDE=$_kernel
 	fi
 
 	if [ -z "$WITH_SHIM" ]; then
