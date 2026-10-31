@@ -262,26 +262,22 @@ int main(int argc, char *const argv[])
         }
         if (wants_version) {
             /* Print what the backend would print, through the backend's own
-             * function: the logo, the version, the colophon and the accelerator
-             * line are the same everywhere, and duplicating them here would
-             * drift the moment one of them changed.
+             * description: the logo, the version, the colophon and the
+             * accelerator line are one implementation, not two.
              *
-             * get_proot_cli() wants a talloc context; a temporary one is
-             * enough because the CLI description lives for the whole process.
+             * get_proot_cli() ignores its context argument -- the description
+             * is a static const -- so passing NULL is correct and avoids
+             * depending on talloc before main() has done anything.
              */
-            TALLOC_CTX *context = talloc_new(NULL);
+            const Cli *cli = get_proot_cli(NULL);
 
-            if (context != NULL) {
-                const Cli *cli = get_proot_cli(context);
-
-                if (cli != NULL) {
-                    print_version(cli);
-                    printf("\n%s\n", cli->colophon);
-                }
-                talloc_free(context);
-                return EXIT_SUCCESS;
-            }
-            return EXIT_FAILURE;
+            if (cli == NULL || cli->logo == NULL || cli->version == NULL)
+                return EXIT_FAILURE;
+            print_version(cli);
+            if (cli->colophon != NULL)
+                printf("\n%s\n", cli->colophon);
+            fflush(stdout);
+            return EXIT_SUCCESS;
         }
         if (wants_help) {
             /* The backend owns the option list; duplicating it here would
