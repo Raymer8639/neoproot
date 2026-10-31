@@ -154,15 +154,20 @@ um_args = []
 if um_enabled
   # The guest loop is real shell embedded as a C string, so it can be read and
   # tested as shell.  Same generator the GNUmake build uses.
-  # um_session.c includes "backend/um_session_loop.h", so the generated header
-  # has to land in a backend/ directory the compiler searches.  output: with a
-  # path is allowed; the directory is created by Meson.
-  um_loop_header = custom_target('um-session-loop-header',
-    input: files('src/backend/um_session_loop.sh'),
-    output: 'backend/um_session_loop.h',
-    command: [find_program('sh'), files('scripts/embed-shell.sh'), 'um_session_loop_text', '@INPUT@'],
-    capture: true)
-  um_sources = [files('src/backend/um_supervisor.c', 'src/backend/um_session.c'), um_loop_header]
+  # um_session.c includes "backend/um_session_loop.h".  A custom_target's
+  # output may not contain a path segment, so the header is written at configure
+  # time into a backend/ directory under the build dir, which is on the include
+  # path.  It is generated, not checked in, because it is a C literal of the
+  # shell loop.
+  um_loop_dir = meson.current_build_dir() / 'backend'
+  um_loop_header = um_loop_dir / 'um_session_loop.h'
+  run_command(
+    find_program('sh'), '-c',
+    'mkdir -p "$1" && sh "$2" um_session_loop_text "$3" > "$1/um_session_loop.h"',
+    'embed-shell', um_loop_dir, files('scripts/embed-shell.sh'),
+    files('src/backend/um_session_loop.sh'),
+    check: true)
+  um_sources = [files('src/backend/um_supervisor.c', 'src/backend/um_session.c')]
   um_args = []  # the generated header's directory is added below, always
   # neoproot contains the supervisor already, so the second name is a link to
   # it; which name it was called by selects the command line.
