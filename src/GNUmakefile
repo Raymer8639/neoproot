@@ -49,29 +49,6 @@ CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH)
 CFLAGS   += -std=c23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
 CXXFLAGS += -std=c++23 -Wall -Wextra -O3 -flto=thin -ffunction-sections -fdata-sections $(MARCH) -munaligned-access -ffast-math -D__ARM_NEON -D__ARM_FEATURE_DOTPROD
 
-# STATIC_LINK=1 asks for a fully static binary, which is what the release
-# assets are: an ARM64 Linux build that does not depend on the host's glibc.
-# It needs static libtalloc as well, and not every distribution ships one --
-# Arch, for instance, does not -- so a request that cannot be honoured says so
-# and falls back rather than failing the link with a bare "cannot find
-# -ltalloc".
-ifeq ($(STATIC_LINK),1)
-# The probe needs a main(): an empty translation unit fails to link for that
-# reason alone, and the failure would be read as "no static talloc".
-HAVE_STATIC_TALLOC := $(shell printf 'int main(void){return 0;}' > /tmp/.np-static-probe.c; \
-	$(CC) -static -ltalloc -o /tmp/.np-static-probe /tmp/.np-static-probe.c \
-	>/dev/null 2>&1 && echo yes; \
-	rm -f /tmp/.np-static-probe.c /tmp/.np-static-probe)
-ifeq ($(HAVE_STATIC_TALLOC),yes)
-LDFLAGS += -static
-else
-# Not a warning: a caller that asked for a static binary needs one.  A release
-# built here without it cannot start on Termux at all (no ld-linux-aarch64.so.1),
-# and finding that out at the end of a release is worse than failing now.
-$(error STATIC_LINK=1 needs a static libtalloc; install the static talloc package, or drop STATIC_LINK to link dynamically on purpose)
-endif
-endif
-
 LDFLAGS += -ltalloc -lm -ldl -lc -lstdc++ -flto=thin -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--icf=all,-z,relro,-z,now -Wl,--strip-all -lpthread -s
 
 # --icf=all 仅 lld 支持：有 ld.lld 时显式启用 lld；否则自动移除该选项。

@@ -114,6 +114,7 @@ static void adopt_installed_um_files(const char *argv0)
     char resolved[PATH_MAX];
     char bindir[PATH_MAX];
     char prefix[PATH_MAX];
+    char directory[PATH_MAX];
     const char *slash;
     size_t index;
 

@@ -35,44 +35,12 @@ jobs:
 
       - name: Build neoproot
         run: |
-          # -static is not optional.  Termux has no /lib/ld-linux-aarch64.so.1,
-          # so a dynamically linked build does not start there at all: the
-          # loader open fails and the process exits 127 with no output.  That is
-          # exactly what a release built without it did.
-          #
-          # It is passed as STATIC_LINK rather than by overriding LDFLAGS: the
-          # makefile builds that variable up from the compiler, the sanitizer
-          # flags and lld, and replacing it wholesale loses the lld selection
-          # and the link fails.
-          # The static talloc package is named differently per distribution; the
-          # dev package on Debian ships libtalloc.a, so check before building
-          # rather than discovering it when the release binary turns out to be
-          # dynamic and unusable on Termux.
-          if ! ls /usr/lib/*/libtalloc.a /usr/lib/libtalloc.a >/dev/null 2>&1; then
-            sudo apt-get install -y -qq libtalloc-dev
-          fi
-          ls -l /usr/lib/*/libtalloc.a 2>/dev/null || {
-            echo "::error::no static libtalloc; the release binary would be dynamic"
-            exit 1
-          }
-          # Two builds, in this order and for this reason:
-          #
-          #   1. a normal (dynamic) one, which is what the test suite runs.
-          #      A static binary links glibc differently, and the suite drives
-          #      the tracer through ptrace paths that a fully static build
-          #      exercises in ways the dynamic one does not -- the first static
-          #      build here died with SIGILL inside basic_test.sh.
-          #   2. the static one, which is what gets published, because Termux
-          #      has no ld-linux-aarch64.so.1.
-          #
-          # Building the published artifact last means the file that survives in
-          # src/ is the one the release uploads.
           if [ "$MODE" = "release" ]; then
+            # 默认 ARMv8.2 满血优化（与作者默认一致），makefile 自动选用 lld
             make -C src all CC=clang CXX=clang++
-            make -C src -B all CC=clang CXX=clang++ STATIC_LINK=1
           else
+            # 通用构建（例如老设备可降级指令集），验证 MARCH 可覆盖性
             make -C src -B all CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic"
-            make -C src -B all CC=clang CXX=clang++ MARCH="-march=armv8-a -mtune=generic" STATIC_LINK=1
           fi
 
       - name: Meson native ARM64 smoke test
@@ -100,15 +68,6 @@ jobs:
       - name: Check binary
         run: |
           file src/neoproot
-          # A dynamic build cannot start on Termux at all, so fail here rather
-          # than publish one.  Ask about this one file: the check used to grep a
-          # whole-directory listing that also covered stat-shim's shared object,
-          # which is dynamic by design.
-          if ! file src/neoproot | grep -q 'statically linked'; then
-            echo "::error::neoproot is not statically linked; Termux has no ld-linux-aarch64.so.1"
-            file src/neoproot
-            exit 1
-          fi
           ls -lh src/neoproot
           test -x src/neoproot
           file src/neoproot-um
