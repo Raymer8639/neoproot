@@ -267,6 +267,27 @@ fi
 # Install
 # ---------------------------------------------------------------------------
 
+# Validate the paths before building: a typo in --um-kernel would otherwise
+# cost a full build before the error appears.
+for check in "$UM_KERNEL:内核:--um-kernel" "$UM_STUB:stub:--um-stub" \
+             "$UM_NET:umnet:--um-net" "$UM_PASST:passt:--um-passt"; do
+	value=${check%%:*}
+	rest=${check#*:}
+	label=${rest%%:*}
+	option=${rest#*:}
+	[ -n "$value" ] || continue
+	if [ ! -f "$value" ]; then
+		echo "错误: $option 指向的文件不存在: $value" >&2
+		exit 2
+	fi
+done
+for rootfs in $SHIM_ROOTFS; do
+	case "$rootfs" in
+	/*) ;;
+	*) echo "错误: --shim-rootfs 需要绝对路径: $rootfs" >&2; exit 2 ;;
+	esac
+done
+
 BINDIR=$PREFIX_DIR/bin
 LIBEXECDIR=$PREFIX_DIR/libexec/neoproot
 UM_DIR=$LIBEXECDIR/um
