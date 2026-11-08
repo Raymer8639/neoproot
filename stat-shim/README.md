@@ -139,6 +139,7 @@ runs with the normal traced stats instead.
 | `NEOPROOT_STATSHIM_GID_REAL` / `_FAKE` | fake_id0 gid mapping. |
 | `NEOPROOT_STATSHIM_L2S` | Set when link2symlink is enabled. |
 | `NEOPROOT_STATSHIM_NOTIF` | Set when the flag-gated USER_NOTIF fallback is available (`--seccomp-notify`). |
+| `NEOPROOT_STATSHIM_RL_TAG` | Set when the tracer tag-gates `readlinkat` so the shim can read a symlink target in-process (L2S detection). |
 | `NEOPROOT_STATSHIM_DEBUG` | If set, print each intercepted call and its raw result to stderr. |
 
 None of these are required in the environment of a normal guest program; they

@@ -15,10 +15,10 @@
  * tracer also intercepts, so it cannot be reproduced here.  Instead the seccomp
  * filter keeps those stat syscalls routed to USER_NOTIF *only* when the caller
  * ORs NEOPROOT_STAT_SHIM_FLAG into its flags argument (NEOPROOT_STATSHIM_NOTIF
- * tells the shim that channel exists).  Whenever a raw result is a symlink or an
- * L2S-internal name the wrappers re-issue the call with that sentinel and let
- * the tracer do the full L2S emulation.  Regular-file stats never pay that
- * round trip.
+ * tells the shim that channel exists).  Whenever a raw result is an L2S-internal
+ * name, or a symlink whose immediate target is one, the wrappers re-issue the
+ * call with that sentinel and let the tracer do the full L2S emulation.  Regular
+ * files and ordinary symlinks never pay that round trip.
  *
  * Keep in sync with:
  *   src/syscall/seccomp.c                      set_seccomp_filters
@@ -68,6 +68,7 @@ static size_t      g_rootfs_len;
 static int         g_debug;
 static int         g_use_l2s;
 static int         g_have_notif;
+static int         g_rl_tag;     /* tracer tag-gates readlinkat for us */
 
 static int   g_have_ids;
 static uid_t g_uid_real, g_uid_fake;
@@ -80,6 +81,104 @@ static int   g_nbinds;
 static _Thread_local int    g_last_bind = -1;
 static _Thread_local size_t g_last_bind_len;
 static int   g_inited;
+
+/* ---- optional tallies: NEOPROOT_STATSHIM_STATS=1 ----
+ *
+ * Diagnosis only, and deliberately counted rather than timed: per process,
+ * tally what the wrappers actually did -- absolute vs relative names, L2S
+ * probes, USER_NOTIF round trips and their reason, bind hits -- and print the
+ * tally at exit.  Zero cost when the variable is unset (one predictable
+ * branch per event). */
+#define STATS_INC(field) do { if (g_stats) g_st.field++; } while (0)
+
+typedef struct {
+    unsigned long calls_total;
+    unsigned long calls_fstatat;
+    unsigned long calls_statx;
+    unsigned long calls_fstat;
+    unsigned long path_abs;
+    unsigned long path_rel_fdcwd;
+    unsigned long path_rel_dirfd;
+    unsigned long path_empty;
+    unsigned long flags_nofollow;
+    unsigned long raw_stat;          /* raw newfstatat/statx for a result */
+    unsigned long raw_fail;          /* ... of which the kernel said no */
+    unsigned long raw_fail_tracer_ok;/* ... of which the tracer then resolved */
+    unsigned long probe;             /* extra nofollow lstat for L2S */
+    unsigned long probe_hit;         /* ... of which saw a symlink */
+    unsigned long link_results;      /* results that were symlinks */
+    unsigned long readlink_probe;    /* raw readlinkat for the L2S check */
+    unsigned long readlink_fail;     /* ... of which did not answer */
+    unsigned long l2s_name_hits;     /* results under a .l2s.* name */
+    unsigned long notif;             /* USER_NOTIF round trips, all reasons */
+    unsigned long notif_rel_fdcwd;   /* relative name at AT_FDCWD */
+    unsigned long notif_raw_fail;    /* raw stat failed, ask the tracer */
+    unsigned long notif_l2s;         /* L2S-ambiguous result, ask the tracer */
+    unsigned long cwd_refresh;       /* getcwd() calls for the cwd cache */
+    unsigned long cwd_fast;          /* relative names translated in-process */
+    unsigned long bind_hits[MAX_BINDS];
+    unsigned long bind_rootfs;
+    unsigned long bind_none;
+    unsigned long last_bind_hits;
+    unsigned long init_calls;
+} ShimStats;
+
+static int       g_stats;
+static ShimStats g_st;
+
+static void stats_print(void)
+{
+    int i;
+    int any = 0;
+
+    fprintf(stderr,
+            "[stat-shim stats] calls=%lu (fstatat=%lu statx=%lu fstat=%lu)"
+            " init=%lu\n",
+            g_st.calls_total, g_st.calls_fstatat, g_st.calls_statx,
+            g_st.calls_fstat, g_st.init_calls);
+    fprintf(stderr,
+            "[stat-shim stats] paths abs=%lu rel_fdcwd=%lu rel_dirfd=%lu"
+            " empty=%lu nofollow=%lu\n",
+            g_st.path_abs, g_st.path_rel_fdcwd, g_st.path_rel_dirfd,
+            g_st.path_empty, g_st.flags_nofollow);
+    fprintf(stderr,
+            "[stat-shim stats] raw_stat=%lu raw_fail=%lu raw_fail_tracer_ok=%lu"
+            " probe=%lu probe_hit=%lu links=%lu readlink=%lu readlink_fail=%lu"
+            " l2s_name=%lu\n",
+            g_st.raw_stat, g_st.raw_fail, g_st.raw_fail_tracer_ok,
+            g_st.probe, g_st.probe_hit, g_st.link_results,
+            g_st.readlink_probe, g_st.readlink_fail, g_st.l2s_name_hits);
+    fprintf(stderr,
+            "[stat-shim stats] notif=%lu (rel_fdcwd=%lu raw_fail=%lu l2s=%lu)\n",
+            g_st.notif, g_st.notif_rel_fdcwd, g_st.notif_raw_fail,
+            g_st.notif_l2s);
+    fprintf(stderr, "[stat-shim stats] cwd refresh=%lu fast=%lu\n",
+            g_st.cwd_refresh, g_st.cwd_fast);
+    fprintf(stderr, "[stat-shim stats] binds rootfs=%lu none=%lu last_hit=%lu",
+            g_st.bind_rootfs, g_st.bind_none, g_st.last_bind_hits);
+    for (i = 0; i < g_nbinds; i++) {
+        if (g_st.bind_hits[i] == 0)
+            continue;
+        fprintf(stderr, " [%d]%.*s=%lu", i,
+                (int)(g_binds[i].glen > 40 ? 40 : g_binds[i].glen),
+                g_binds[i].guest, g_st.bind_hits[i]);
+        any = 1;
+    }
+    if (!any && g_nbinds == 0)
+        fprintf(stderr, " (no binds parsed)");
+    fputc('\n', stderr);
+}
+
+/* Called from shim_init(): a constructor is too early for getenv() here --
+ * the dynamic loader runs LD_PRELOAD constructors before __libc_start_main
+ * publishes environ, so getenv() still answers NULL at that point. */
+static void stats_enable(void)
+{
+    if (getenv("NEOPROOT_STATSHIM_STATS") == NULL)
+        return;
+    g_stats = 1;
+    atexit(stats_print);
+}
 
 /* ---- raw syscalls: never recurse into our own interposers ----
  *
@@ -121,6 +220,24 @@ static int raw_lstat(const char *path, struct stat *st) {
                              AT_SYMLINK_NOFOLLOW, 0, 0);
 }
 
+/* readlinkat() has no flags word to tag, but the kernel only reads dirfd as an
+ * int, so the raw tag rides in the upper half of arg 0.  Only valid once the
+ * tracer advertises NEOPROOT_STATSHIM_RL_TAG (seccomp.c installs the matching
+ * ALLOW rule); an untagged guest readlink is unaffected either way. */
+static int raw_readlinkat(int dirfd, const char *path, char *buf, size_t bufsz) {
+#ifdef SYS_readlinkat
+    unsigned long tagged = (unsigned long)(unsigned int)dirfd
+        | ((unsigned long)NEOPROOT_STAT_SHIM_RAW_TAG << 32);
+
+    return (int)raw_syscall6(SYS_readlinkat, (long)tagged, (long)path,
+                             (long)buf, (long)bufsz, 0, 0);
+#else
+    (void)dirfd; (void)path; (void)buf; (void)bufsz;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
 /* L2S links are only detectable through the nofollow view of the same path.
  * Absolute guest paths are probed on their translated host path; dirfd-relative
  * names must go through the same dirfd (a real host descriptor). */
@@ -130,12 +247,17 @@ static int probe_is_symlink(int dirfd, const char *path, const char *host) {
 
     if (path == NULL)
         return 0;
+    STATS_INC(probe);
     if (path[0] == '/')
         r = raw_lstat(host, &probe);
     else
         r = (int)raw_syscall6(SYS_newfstatat, dirfd, (long)path, (long)&probe,
                               AT_SYMLINK_NOFOLLOW, 0, 0);
-    return r == 0 && S_ISLNK(probe.st_mode);
+    if (r == 0 && S_ISLNK(probe.st_mode)) {
+        STATS_INC(probe_hit);
+        return 1;
+    }
+    return 0;
 }
 
 /* ---- binding map ---- */
@@ -180,6 +302,8 @@ static void shim_init(void) {
     if (g_inited)
         return;
     g_inited = 1;
+    stats_enable();
+    STATS_INC(init_calls);
 
     g_rootfs = getenv("NEOPROOT_STATSHIM_ROOTFS");
     if (g_rootfs == NULL)
@@ -188,6 +312,7 @@ static void shim_init(void) {
     g_debug = getenv("NEOPROOT_STATSHIM_DEBUG") != NULL;
     g_use_l2s = getenv("NEOPROOT_STATSHIM_L2S") != NULL;
     g_have_notif = getenv("NEOPROOT_STATSHIM_NOTIF") != NULL;
+    g_rl_tag = getenv("NEOPROOT_STATSHIM_RL_TAG") != NULL;
     if (g_debug)
         fprintf(stderr, "[stat-shim] init rootfs='%s' notif=%d l2s=%d\n",
                 g_rootfs, g_have_notif, g_use_l2s);
@@ -232,6 +357,7 @@ static const char *to_host(const char *path, char *buf, size_t bufsz) {
         && g_last_bind_len > 1
         && prefix_match(path, &g_binds[g_last_bind])) {
         best = &g_binds[g_last_bind];
+        STATS_INC(last_bind_hits);
     } else {
         for (i = 0; i < g_nbinds; i++) {
             const Bind *b = &g_binds[i];
@@ -248,6 +374,7 @@ static const char *to_host(const char *path, char *buf, size_t bufsz) {
     }
 
     if (best != NULL) {
+        STATS_INC(bind_hits[best - g_binds]);
         rest = path + best->glen;
         if (best->glen == 1 && best->guest[0] == '/')
             rest = path + 1;
@@ -272,7 +399,9 @@ static const char *to_host(const char *path, char *buf, size_t bufsz) {
         return buf;
     }
 
+    STATS_INC(bind_none);
     if (g_rootfs[0] != '\0') {
+        STATS_INC(bind_rootfs);
         size_t rlen = strlen(path);
         size_t hlen = g_rootfs_len;
         if (hlen + rlen + 1 >= bufsz) {
@@ -323,6 +452,91 @@ static const char *relative_to_host(const char *path, char *buf, size_t bufsz) {
     return buf;
 }
 
+/* ---- cached guest cwd for relative names at AT_FDCWD ----
+ *
+ * A relative name at AT_FDCWD means "relative to the tracee's virtual cwd",
+ * and chdir is emulated by the tracer: the real cwd never moves, so the kernel
+ * cannot resolve those names for us, but the *guest* path can be translated
+ * exactly like an absolute one once the cwd is known.  getcwd() is emulated by
+ * the tracer and reports that guest cwd, so one call -- not one per stat --
+ * fills the cache.  Anything that can change the cwd drops it again, and every
+ * uncertain case (no cache, "..", a name the binding map cannot translate)
+ * still goes to the tracer.
+ */
+static char g_cwd[PATH_MAX];
+static int  g_cwd_state;    /* 0 unknown, 1 usable, 2 unusable */
+static int  g_cwd_busy;
+
+static void forget_guest_cwd(void) {
+    g_cwd_state = 0;
+}
+
+static const char *guest_cwd(void) {
+    char translated[PATH_MAX];
+
+    if (g_cwd_state == 1)
+        return g_cwd;
+    if (g_cwd_state == 2 || g_cwd_busy)
+        return NULL;
+    g_cwd_busy = 1;
+    STATS_INC(cwd_refresh);
+    if (getcwd(g_cwd, sizeof g_cwd) == NULL || g_cwd[0] != '/'
+        || to_host(g_cwd, translated, sizeof translated) == g_cwd) {
+        /* No usable cwd, or the binding map does not translate it: leave every
+         * relative name to the tracer. */
+        g_cwd_state = 2;
+        g_cwd_busy = 0;
+        return NULL;
+    }
+    g_cwd_state = 1;
+    g_cwd_busy = 0;
+    return g_cwd;
+}
+
+/* Does @path contain a ".." component?  The tracer canonicalizes ".." inside
+ * the guest namespace, which is exactly where a bind boundary makes the kernel
+ * disagree, so such names keep the tracer path. */
+static int path_has_dotdot(const char *path) {
+    while (*path != '\0') {
+        const char *start;
+
+        while (*path == '/')
+            path++;
+        start = path;
+        while (*path != '\0' && *path != '/')
+            path++;
+        if (path - start == 2 && start[0] == '.' && start[1] == '.')
+            return 1;
+    }
+    return 0;
+}
+
+/* Translate a relative name at AT_FDCWD through the cached guest cwd.  NULL
+ * means "ask the tracer". */
+static const char *relative_guest_to_host(const char *path, char *buf,
+                                          size_t bufsz) {
+    const char *cwd = guest_cwd();
+    char guest[PATH_MAX];
+    const char *host;
+    size_t clen;
+    int n;
+
+    if (cwd == NULL || path == NULL || path[0] == '\0')
+        return NULL;
+    if (path_has_dotdot(path))
+        return NULL;
+    clen = strlen(cwd);
+    n = snprintf(guest, sizeof guest, "%s%s%s", cwd,
+                 (clen > 1 && cwd[clen - 1] == '/') ? "" : "/", path);
+    if (n < 0 || (size_t)n >= sizeof guest)
+        return NULL;
+    host = to_host(guest, buf, bufsz);
+    if (host == guest)
+        return NULL;
+    STATS_INC(cwd_fast);
+    return host;
+}
+
 /* ---- fake_id0 ---- */
 
 static void disguise_ids_stat(struct stat *st) {
@@ -350,17 +564,41 @@ static const char *base_name(const char *path) {
     return s != NULL ? s + 1 : path;
 }
 
-/* Only symlinks and .l2s.* storage names can need the tracer's L2S disguise. */
-static int l2s_ambiguous(const char *guest, const char *host, int is_link) {
-    if (is_link)
+/* A .l2s.<name><NNNN> storage name always needs the tracer's nlink fixup.
+ * The prefix test is deliberately broader than the tracer's (which also wants
+ * four trailing digits): a false positive only costs one round trip. */
+static int l2s_name(const char *path) {
+    if (path == NULL || *path == '\0')
+        return 0;
+    if (strncmp(base_name(path), L2S_PREFIX, L2S_PREFIX_LEN) != 0)
+        return 0;
+    STATS_INC(l2s_name_hits);
+    return 1;
+}
+
+/* link2symlink only disguises a symlink whose *immediate* target is a .l2s.
+ * name (link2symlink.c:resolve_l2s_stat_path).  Reading that target costs one
+ * raw readlinkat, far less than the USER_NOTIF round trip it saves, so an
+ * ordinary symlink no longer pays for the L2S machinery.  Everything
+ * unexpected -- no tag-gated readlinkat, a failed read -- answers "ask the
+ * tracer", which is exactly the old behaviour. */
+static int link_target_is_l2s(int dirfd, const char *path, const char *host) {
+    char target[PATH_MAX];
+    int n;
+
+    if (!g_rl_tag)
         return 1;
-    if (guest != NULL && *guest != '\0'
-        && strncmp(base_name(guest), L2S_PREFIX, L2S_PREFIX_LEN) == 0)
+    if (host != NULL && host[0] == '/')
+        n = raw_readlinkat(AT_FDCWD, host, target, sizeof target - 1);
+    else
+        n = raw_readlinkat(dirfd, path, target, sizeof target - 1);
+    STATS_INC(readlink_probe);
+    if (n <= 0) {
+        STATS_INC(readlink_fail);
         return 1;
-    if (host != NULL && *host != '\0'
-        && strncmp(base_name(host), L2S_PREFIX, L2S_PREFIX_LEN) == 0)
-        return 1;
-    return 0;
+    }
+    target[n] = '\0';
+    return l2s_name(target);
 }
 
 /* Re-issue through the tracer.  @path must stay the guest path so the tracer
@@ -368,6 +606,7 @@ static int l2s_ambiguous(const char *guest, const char *host, int is_link) {
 static int tracer_fstatat(int dirfd, const char *path, struct stat *st, int flags) {
     if (!g_have_notif || path == NULL)
         return 0;
+    STATS_INC(notif);
     return raw_syscall6(SYS_newfstatat, dirfd, (long)path, (long)st,
                         (int)((unsigned int)flags | NEOPROOT_STAT_SHIM_FLAG),
                         0, 0) == 0;
@@ -377,6 +616,7 @@ static int tracer_statx(int dirfd, const char *path, int flags, unsigned int mas
                         struct statx *stx) {
     if (!g_have_notif || path == NULL)
         return 0;
+    STATS_INC(notif);
     return raw_syscall6(SYS_statx, dirfd, (long)path,
                         (int)((unsigned int)flags | NEOPROOT_STAT_SHIM_FLAG),
                         mask, (long)stx, 0) == 0;
@@ -384,12 +624,33 @@ static int tracer_statx(int dirfd, const char *path, int flags, unsigned int mas
 
 /* ---- interposed entry points ---- */
 
+/* Tally one entry-point call by name form (stats only). */
+static void stats_classify(int dirfd, const char *path, int flags) {
+    if (!g_stats)
+        return;
+    g_st.calls_total++;
+    if ((flags & AT_SYMLINK_NOFOLLOW) != 0)
+        g_st.flags_nofollow++;
+    if (path == NULL)
+        return;
+    if (path[0] == '/')
+        g_st.path_abs++;
+    else if (path[0] == '\0')
+        g_st.path_empty++;
+    else if (dirfd == AT_FDCWD)
+        g_st.path_rel_fdcwd++;
+    else
+        g_st.path_rel_dirfd++;
+}
+
 int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
     char buf[PATH_MAX];
     const char *host;
     int is_link = 0;
 
     shim_init();
+    STATS_INC(calls_fstatat);
+    stats_classify(dirfd, path, flags);
     /* A relative name at AT_FDCWD resolves against the tracee's *virtual*
      * cwd, which differs from the real one (--cwd is applied virtually and a
      * bind source is a host path).  Only the tracer can translate that, so
@@ -397,20 +658,24 @@ int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
      * when --stat-shim is off.  Without that channel fall back to the guest
      * cwd the tracer reports for getcwd(). */
     if (dirfd == AT_FDCWD && path != NULL && path[0] != '/') {
-        if (g_have_notif) {
+        host = g_have_notif ? relative_guest_to_host(path, buf, sizeof(buf))
+                            : relative_to_host(path, buf, sizeof(buf));
+        if (host == NULL) {
+            STATS_INC(notif_rel_fdcwd);
             if (tracer_fstatat(dirfd, path, st, flags))
                 return 0;
             return -1;
         }
-        host = relative_to_host(path, buf, sizeof(buf));
     } else {
         host = to_host(path, buf, sizeof(buf));
     }
     if (g_debug)
         fprintf(stderr, "[stat-shim] fstatat(%d,'%s')->'%s' flags=%#x\n",
                 dirfd, path != NULL ? path : "", host != NULL ? host : "", flags);
+    STATS_INC(raw_stat);
     if (raw_syscall6(SYS_newfstatat, dirfd, (long)host, (long)st, flags, 0, 0) < 0) {
         int raw_errno = errno;
+        STATS_INC(raw_fail);
         if (g_debug)
             fprintf(stderr, "[stat-shim]   RAW FAIL errno=%d\n", raw_errno);
         /* A raw failure is not conclusive.  The host kernel resolves the
@@ -421,13 +686,17 @@ int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
          * tracer can resolve the guest path.  Retry through USER_NOTIF; it
          * is also the side that owns the binding map. */
         if (g_have_notif) {
-            int fb = tracer_fstatat(dirfd, path, st, flags);
+            int fb;
+            STATS_INC(notif_raw_fail);
+            fb = tracer_fstatat(dirfd, path, st, flags);
             if (g_debug)
                 fprintf(stderr, "[stat-shim]   FALLBACK fstatat %s errno=%d '%s'\n",
                         fb ? "ok" : "fail", fb ? 0 : errno,
                         path != NULL ? path : "");
-            if (fb)
+            if (fb) {
+                STATS_INC(raw_fail_tracer_ok);
                 return 0;
+            }
             return -1;
         }
         errno = raw_errno;
@@ -443,9 +712,13 @@ int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
         } else {
             is_link = probe_is_symlink(dirfd, path, host);
         }
-        if (l2s_ambiguous(path, host, is_link)) {
+        if (is_link)
+            STATS_INC(link_results);
+        if (l2s_name(path) || l2s_name(host)
+            || (is_link && link_target_is_l2s(dirfd, path, host))) {
             if (g_debug)
                 fprintf(stderr, "[stat-shim]   fallback is_link=%d\n", is_link);
+            STATS_INC(notif_l2s);
             if (tracer_fstatat(dirfd, path, st, flags))
                 return 0;
             if (g_debug)
@@ -464,28 +737,39 @@ int statx(int dirfd, const char *path, int flags, unsigned int mask,
     int is_link = 0;
 
     shim_init();
+    STATS_INC(calls_statx);
+    stats_classify(dirfd, path, flags);
     /* Same virtual-cwd rule as fstatat(). */
     if (dirfd == AT_FDCWD && path != NULL && path[0] != '/') {
-        if (g_have_notif) {
+        host = g_have_notif ? relative_guest_to_host(path, buf, sizeof(buf))
+                            : relative_to_host(path, buf, sizeof(buf));
+        if (host == NULL) {
+            STATS_INC(notif_rel_fdcwd);
             if (tracer_statx(dirfd, path, flags, mask, stx))
                 return 0;
             return -1;
         }
-        host = relative_to_host(path, buf, sizeof(buf));
     } else {
         host = to_host(path, buf, sizeof(buf));
     }
     if (g_debug)
         fprintf(stderr, "[stat-shim] statx(%d,'%s')->'%s' flags=%#x mask=%#x\n",
                 dirfd, path != NULL ? path : "", host != NULL ? host : "", flags, mask);
+    STATS_INC(raw_stat);
     if (raw_syscall6(SYS_statx, dirfd, (long)host, flags, mask, (long)stx, 0) < 0) {
         int raw_errno = errno;
+        STATS_INC(raw_fail);
         if (g_debug)
             fprintf(stderr, "[stat-shim]   statx RAW FAIL errno=%d\n", raw_errno);
         /* Same guest-absolute-symlink reasoning as fstatat(). */
         if (g_have_notif) {
-            if (tracer_statx(dirfd, path, flags, mask, stx))
+            int fb;
+            STATS_INC(notif_raw_fail);
+            fb = tracer_statx(dirfd, path, flags, mask, stx);
+            if (fb) {
+                STATS_INC(raw_fail_tracer_ok);
                 return 0;
+            }
             return -1;
         }
         errno = raw_errno;
@@ -501,9 +785,11 @@ int statx(int dirfd, const char *path, int flags, unsigned int mask,
         } else {
             is_link = probe_is_symlink(dirfd, path, host);
         }
-        if (l2s_ambiguous(path, host, is_link)) {
+        if (l2s_name(path) || l2s_name(host)
+            || (is_link && link_target_is_l2s(dirfd, path, host))) {
             if (g_debug)
                 fprintf(stderr, "[stat-shim]   statx fallback is_link=%d\n", is_link);
+            STATS_INC(notif_l2s);
             if (tracer_statx(dirfd, path, flags, mask, stx))
                 return 0;
             if (g_debug)
@@ -519,6 +805,8 @@ int fstat(int fd, struct stat *st) {
     int r;
 
     shim_init();
+    STATS_INC(calls_fstat);
+    STATS_INC(calls_total);
     /* neoproot removes fstat from the filter only when link2symlink is off.
      * Under L2S this same raw call remains traced, preserving fd/path state. */
 #ifdef SYS_fstat
@@ -530,6 +818,22 @@ int fstat(int fd, struct stat *st) {
     if (r == 0)
         disguise_ids_stat(st);
     return r;
+}
+
+/* chdir()/fchdir() only move the *virtual* cwd (the tracer emulates them and
+ * leaves the tracee's real cwd alone), so they have to drop the cached guest
+ * cwd: the next relative name re-reads it with getcwd().  A program that
+ * changes directory without going through one of these (or through
+ * syscall(), handled below) would leave the cache stale, which is why every
+ * uncertain case still ends up at the tracer. */
+int chdir(const char *path) {
+    forget_guest_cwd();
+    return (int)raw_syscall6(SYS_chdir, (long)path, 0, 0, 0, 0, 0);
+}
+
+int fchdir(int fd) {
+    forget_guest_cwd();
+    return (int)raw_syscall6(SYS_fchdir, fd, 0, 0, 0, 0, 0);
 }
 
 int stat(const char *path, struct stat *st) {
@@ -673,6 +977,15 @@ long syscall(long number, ...) {
     a5 = va_arg(ap, long);
     a6 = va_arg(ap, long);
     va_end(ap);
+
+#ifdef SYS_chdir
+    if (number == SYS_chdir)
+        forget_guest_cwd();
+#endif
+#ifdef SYS_fchdir
+    if (number == SYS_fchdir)
+        forget_guest_cwd();
+#endif
 
     switch (number) {
 #ifdef SYS_newfstatat

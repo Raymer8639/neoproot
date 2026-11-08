@@ -159,6 +159,33 @@ static ALWAYS_INLINE int add_notif_syscall_flag(struct sock_fprog *restrict prog
     return add_statements(program, sizeof(stmts)/sizeof(*stmts), stmts);
 }
 
+/* --stat-shim: the shim must tell an ordinary symlink from a link2symlink
+ * storage link before it can skip the tracer, and readlinkat() has no flags
+ * argument to carry the raw tag.  The kernel only reads dirfd as an int, so
+ * the upper half of args[0] is free.  Tagged calls are ALLOWed; untagged ones
+ * keep exactly the TRACE they get today, so guest readlink is unaffected. */
+#define TAGGED_ALLOW_STMTS 6
+
+static ALWAYS_INLINE int add_trace_syscall_tagged_allow(
+        struct sock_fprog *restrict program, word_t syscall, size_t arg_index,
+        int flag, uint32_t tag) {
+    if (UNLIKELY(syscall > UINT32_MAX || arg_index > 5))
+        return -ERANGE;
+    const size_t nr_off = offsetof(struct seccomp_data, nr);
+    if (UNLIKELY(nr_off > UINT32_MAX))
+        return -ERANGE;
+    const struct sock_filter stmts[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)nr_off),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)syscall, 0, 4),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 (uint32_t)offsetof(struct seccomp_data, args[arg_index]) + sizeof(uint32_t)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, tag, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE + flag),
+    };
+    return add_statements(program, sizeof(stmts)/sizeof(*stmts), stmts);
+}
+
 static ALWAYS_INLINE int end_arch_section(struct sock_fprog *restrict program,
                                           size_t nb_traced, size_t extra_stmts) {
     const struct sock_filter stmt = BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
@@ -227,6 +254,14 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
                 word_t sc = detranslate_sysnum(archs[i].abis[j], sysnums[k].value);
                 if (sc == SYSCALL_AVOIDER)
                     continue;
+                if (stat_shim && user_notif
+                    && sysnums[k].value == PR_readlinkat) {
+                    /* readlinkat keeps its normal TRACE; only the shim's
+                     * tagged calls (its L2S target probe) skip it. */
+                    ++n_trace;
+                    stat_extra += TAGGED_ALLOW_STMTS - 2;
+                    continue;
+                }
                 if (stat_shim && is_stat_shim_sysnum(sysnums[k].value, link2symlink)) {
                     /* --seccomp-notify keeps a flag-gated USER_NOTIF fallback for
                      * L2S/fake_id0-correlated results; without it there is no
@@ -255,6 +290,15 @@ static int set_seccomp_filters(const FilteredSysnum *restrict sysnums,
                 word_t sc = detranslate_sysnum(archs[i].abis[j], sysnums[k].value);
                 if (sc == SYSCALL_AVOIDER)
                     continue;
+                if (stat_shim && user_notif
+                    && sysnums[k].value == PR_readlinkat) {
+                    ret = add_trace_syscall_tagged_allow(
+                        &prog, sc, 0, sysnums[k].flags,
+                        NEOPROOT_STAT_SHIM_RAW_TAG);
+                    if (UNLIKELY(ret < 0))
+                        goto out;
+                    continue;
+                }
                 if (stat_shim && is_stat_shim_sysnum(sysnums[k].value, link2symlink)) {
                     if (user_notif && (sysnums[k].value == PR_newfstatat
                                        || sysnums[k].value == PR_fstatat64
