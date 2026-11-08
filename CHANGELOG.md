@@ -3,7 +3,32 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
-## [Unreleased]
+## [v6.0.1.0] - 2026-11-08
+
+**Alpine/musl guest 也有 stat shim 了**
+
+- 新增 `stat-shim/build-musl.sh`：从 Alpine 源取 musl/musl-dev 建 sysroot，用
+  `clang --target=aarch64-linux-musl --sysroot=... -nostdlib` 交叉构建
+  `libstatfast-musl.so`，不需要 guest chroot。
+- `stat-shim/shim.c`：glibc 专用符号（`fstatat64`/`stat64`/`lstat64`/`fstat64`、
+  `__xstat*`、`eaccess`）收进 `#ifdef __GLIBC__`；glibc 版导出的符号集不变。
+- `stat-shim/MUSL.md` 记录两种 ABI 的差异、构建与验证方法。
+- 实测（Termux + Alpine 3.21 guest，4.0 GB 目录树，`du -s`）：
+  `--seccomp-notify` 17,683 ms → **4,503 ms（3.9×）**；不加速的 plain ptrace 是 20,359 ms。
+  这台设备上 `fstatat64` 占全部 tracer 停靠的 89%（96,650/108,473），所以收益基本来自它。
+
+**启动开销：164 ms → 137 ms（−16%）**
+
+- `execve`：loader 跨调用缓存。以前每次启动都把 67,272 B 的 loader 重写到临时文件，
+  而 `PROOT_MEMFD_LOADER` 变量被 export 却无人读取；现在按内容哈希命名发布，复用前做
+  `O_NOFOLLOW`/属主/大小/逐字节校验，`mkstemp`+`rename` 原子落盘，`PROOT_MEMFD_LOADER=0`
+  可回退。顺带发现旧实现从不 unlink 临时 loader。
+- `seccomp`：USER_NOTIF 探针不再 fork 子进程，改用 `SECCOMP_GET_ACTION_AVAIL(USER_NOTIF)`
+  与 `SECCOMP_GET_NOTIF_SIZES` 两次只读查询。
+- 启动器：去掉 `sh -c` 一跳，在 C 里完成非阻塞 wake-lock、soft `RLIMIT_NOFILE=16384`、
+  清 `LD_*`；保留一次 `/proc/self/exe` re-exec（Termux 预加载的 libtermux-exec 无法
+  `unsetenv` 卸载）。`neoproot-um`/`uproot` 的名字分发不受影响。
+- 新增 `tests/test-loader-cache.sh`、`tests/test-launcher-environment.sh`。
 
 **按 guest ABI 安装 stat shim**
 
