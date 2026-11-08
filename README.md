@@ -33,6 +33,8 @@ On Termux it needs `pkg install clang make llvm binutils pkg-config libtalloc` a
 
 The script detects the platform and does the right thing: on **Termux** it installs the build dependencies, builds the bionic binary from the tagged source, backs up the previous binary and installs the new one into `$PREFIX/bin`; on **ARM64 Linux** it downloads the release binary, verifies it against `SHA256SUMS`, and installs it into your `PATH`. It never touches a running container's rootfs. Read [scripts/install.sh](scripts/install.sh) before piping it to a shell if you prefer; `sh scripts/install.sh --help` lists every option, including `--version`, `--prefix`, `--portable`, `--lang`, `--update` and the UM/shim toggles.
 
+`neoproot-um` is installed (or refreshed) as a relative link to `neoproot`, because the supervisor is the same binary under another name; an older separate `neoproot-um` is kept as `neoproot-um.prev-<timestamp>` first, and an existing `uproot` alias is pointed at the new binary too.
+
 ## Start in Termux (manual)
 
 Always build on the Termux host. Linux CI / Release files will not run correctly as the Termux Android binary.

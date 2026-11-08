@@ -28,6 +28,7 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-seccomp-notify-pipe.sh \
 	test-stat-shim-raw-stat.sh \
 	test-shim-abi.sh \
+	test-installer-links.sh \
 	test-exec-env-stack.sh \
 	test-version-branding.sh \
 	test-bwrap-oldroot-bind.sh \

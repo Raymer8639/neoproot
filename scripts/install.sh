@@ -213,6 +213,30 @@ check_arch() {
 	esac
 }
 
+# neoproot contains the UML supervisor itself: `neoproot-um` is the same
+# executable under another name and argv[0] selects the supervisor command line
+# (src/cli/neoproot.c).  Installing only `neoproot` therefore left an older
+# standalone `neoproot-um` from the previous release in place, still running
+# last year's supervisor beside today's tracer.  Make the name a relative link,
+# keeping any old file as evidence instead of deleting it.
+_link_neoproot_alias() { # _link_neoproot_alias BIN_DIR NAME
+	_la_dir=$1
+	_la_name=$2
+	_la_target=$_la_dir/$_la_name
+	if [ -L "$_la_target" ] && [ "$(readlink "$_la_target")" = "neoproot" ]; then
+		return 0
+	fi
+	if [ -e "$_la_target" ] || [ -L "$_la_target" ]; then
+		_la_stamp=$(date +%Y%m%d-%H%M%S)
+		mv -f "$_la_target" "$_la_target.prev-$_la_stamp" \
+			|| { warn "cannot move $_la_target out of the way"; return 0; }
+		log "previous $_la_name kept as $_la_target.prev-$_la_stamp"
+	fi
+	ln -sf neoproot "$_la_target" \
+		|| { warn "cannot link $_la_target -> neoproot"; return 0; }
+	log "installed $_la_target -> neoproot"
+}
+
 install_binary() { # install_binary NEW_BINARY PREFIX
 	# Every variable here is prefixed: POSIX sh has no locals, and clobbering the
 	# caller's workdir would make the EXIT trap clean up the wrong path (leaking
@@ -233,6 +257,27 @@ install_binary() { # install_binary NEW_BINARY PREFIX
 		|| die "cannot install into $bin_dir"
 	log "installed $bin_target"
 	"$bin_target" --version 2>/dev/null || warn "installed binary did not report a version"
+
+	if [ "${WITH_UM:-1}" = 1 ]; then
+		_link_neoproot_alias "$bin_dir" neoproot-um
+		# `uproot` is the historical name, not a name this installer creates.
+		# When an old install left one, keep it pointing at neoproot instead of
+		# letting it become another stale copy.
+		if [ -e "$bin_dir/uproot" ] || [ -L "$bin_dir/uproot" ]; then
+			_link_neoproot_alias "$bin_dir" uproot
+		fi
+	else
+		# The new binary has no supervisor; a leftover neoproot-um would run
+		# the wrong program.  Rename it rather than deleting it.
+		if [ -e "$bin_dir/neoproot-um" ] || [ -L "$bin_dir/neoproot-um" ]; then
+			bin_stale=$bin_dir/neoproot-um.stale-$(date +%Y%m%d-%H%M%S)
+			if mv -f "$bin_dir/neoproot-um" "$bin_stale"; then
+				log "old neoproot-um moved to $bin_stale (no um backend in this install)"
+			else
+				warn "cannot move the old $bin_dir/neoproot-um out of the way"
+			fi
+		fi
+	fi
 }
 
 # Install the UML runtime beside the binary.
@@ -346,31 +391,44 @@ _install_shim_into() { # _install_shim_into ROOTFS
 	*) warn "unknown shim ABI: $_si_abi"; return 0 ;;
 	esac
 
+	_si_dest=$_si_rootfs/opt/neoproot/libstatfast.so
+	log "shim ($_si_abi): installing $_si_asset into $_si_rootfs"
 	_si_src=
-	# A cached copy of the matching asset saves the download.  The rootfs's
-	# existing libstatfast.so is reused only when readelf confirms its ABI;
-	# an old install may hold the other variant under the same name.
+	_si_origin=
 	_si_cache="${PREFIX:-/nonexistent}/libexec/neoproot/$_si_asset"
-	if [ -r "$_si_cache" ]; then
-		_si_src=$_si_cache
-	elif [ -r "$_si_rootfs/opt/neoproot/libstatfast.so" ] &&
-		[ "$(_shim_file_abi "$_si_rootfs/opt/neoproot/libstatfast.so")" = "$_si_abi" ]; then
-		_si_src=$_si_rootfs/opt/neoproot/libstatfast.so
-	fi
-	if [ -z "$_si_src" ]; then
-		# The shim ships as a release asset, so fetch it rather than requiring
-		# a source tree next to the installer.
-		_si_tmp=$(mktemp "${TMPDIR:-/tmp}/libstatfast.XXXXXX") || return 0
-		_si_tag=$(resolve_tag)
-		if fetch "https://github.com/$REPO/releases/download/$_si_tag/$_si_asset" "$_si_tmp" 2>/dev/null; then
-			_si_src=$_si_tmp
+	# The asset from the requested release is authoritative.  The rootfs's own
+	# libstatfast.so is deliberately NOT used as a source: replacing that file
+	# is the whole point of running the installer, and copying it onto itself
+	# failed as "these are the same file" -- the error was swallowed, so an
+	# update printed nothing and left the previous shim in the guest.  A cache
+	# can also belong to an older release, so it is only a fallback.
+	# The shim ships as a release asset, so fetch it rather than requiring a
+	# source tree next to the installer.  stderr is left alone: a 404 or a DNS
+	# failure is the reason the user needs to see.
+	_si_tmp=$(mktemp "${TMPDIR:-/tmp}/libstatfast.XXXXXX") ||
+		{ warn "cannot create a temporary file for $_si_asset"; return 0; }
+	_si_tag=$(resolve_tag)
+	if fetch "https://github.com/$REPO/releases/download/$_si_tag/$_si_asset" "$_si_tmp"; then
+		_si_src=$_si_tmp
+		_si_origin="$_si_tag release"
+	else
+		rm -f "$_si_tmp"
+		if [ -r "$_si_cache" ]; then
+			_si_src=$_si_cache
+			_si_origin="cached $_si_cache"
+			log "shim ($_si_abi): could not fetch $_si_asset from $_si_tag; using cached $_si_cache"
+		elif [ -r "$_si_dest" ] &&
+			[ "$(_shim_file_abi "$_si_dest")" = "$_si_abi" ]; then
+			# A guest copy of the right ABI is better than nothing when both
+			# downloads fail, but say plainly that it was kept, not refreshed.
+			log "shim ($_si_abi): could not fetch $_si_asset from $_si_tag; keeping the existing $_si_dest"
+			return 0
 		else
-			rm -f "$_si_tmp"
 			if [ "$_si_abi" = musl ]; then
-				warn "the $_si_tag release has no libstatfast-musl.so"
-				warn "musl roots need a source build (stat-shim/build-musl.sh) or a musl libstatfast.so placed in $_si_rootfs/opt/neoproot manually"
+				warn "could not fetch libstatfast-musl.so from $_si_tag (the release may not publish it)"
+				warn "musl roots need a source build (stat-shim/build-musl.sh) or a musl libstatfast.so placed in $_si_dest manually"
 			else
-				warn "could not fetch libstatfast.so; the shim was not installed into $_si_rootfs"
+				warn "could not fetch libstatfast.so from $_si_tag; the shim was not installed into $_si_rootfs"
 			fi
 			return 0
 		fi
@@ -381,10 +439,18 @@ _install_shim_into() { # _install_shim_into ROOTFS
 		warn "$_si_src is a $_si_got_abi shim, not $_si_abi; refusing to install it into $_si_rootfs"
 		return 0
 	fi
-	mkdir -p "$_si_rootfs/opt/neoproot" 2>/dev/null || return 0
-	cp -f "$_si_src" "$_si_rootfs/opt/neoproot/libstatfast.so" 2>/dev/null || return 0
-	chmod 755 "$_si_rootfs/opt/neoproot/libstatfast.so" 2>/dev/null
-	log "shim ($_si_abi) installed into $_si_rootfs/opt/neoproot/libstatfast.so"
+	mkdir -p "$_si_rootfs/opt/neoproot" ||
+		{ warn "cannot create $_si_rootfs/opt/neoproot"; return 0; }
+	if [ "$_si_src" = "$_si_dest" ]; then
+		log "shim ($_si_abi) already at $_si_dest"
+		return 0
+	fi
+	if ! cp -f "$_si_src" "$_si_dest"; then
+		warn "cannot copy $_si_src to $_si_dest"
+		return 0
+	fi
+	chmod 755 "$_si_dest" || warn "cannot make $_si_dest executable"
+	log "shim ($_si_abi) installed into $_si_dest from $_si_origin"
 	return 0
 }
 

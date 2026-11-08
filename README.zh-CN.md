@@ -33,6 +33,8 @@ curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/insta
 
 脚本会自动识别平台：在 **Termux** 上安装编译依赖，用对应 tag 的源码编译出 bionic 二进制，备份旧二进制后装进 `$PREFIX/bin`；在 **ARM64 Linux** 上下载 release 二进制、用 `SHA256SUMS` 校验后放进 `PATH`。它**不会**改动正在运行的容器 rootfs。不放心管道执行可以先看 [scripts/install.sh](scripts/install.sh)，`sh scripts/install.sh --help` 可看全部参数：常用的是 `--version`、`--prefix`、`--portable`、`--lang`、`--update` 和 UM/shim 开关。
 
+`neoproot-um` 会安装（或刷新）成指向 `neoproot` 的相对链接，因为 supervisor 就是同一个二进制的另一个名字；旧版本留下的独立 `neoproot-um` 会先备份成 `neoproot-um.prev-<时间戳>`，已有的 `uproot` 别名也会一并指向新二进制。
+
 ## 在 Termux 中手动编译
 
 务必在 Termux 宿主上编译。Linux CI / Release 文件不能当 Termux 的 Android 二进制用。

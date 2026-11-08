@@ -202,7 +202,7 @@ mkdir -p "$WORK/rel-rootfs-musl/lib" "$WORK/rel-rootfs-glibc/lib"
 # the user is told how to get one.
 status=$(run_release_install "$WORK/rel-missing.log" "$WORK/rel-rootfs-musl" "$WORK/rel-prefix-missing" 0)
 [ "$status" = 0 ] || { cat "$WORK/rel-missing.log" >&2; fail "release-without-musl failed ($status)"; }
-grep -F 'has no libstatfast-musl.so' "$WORK/rel-missing.log" >/dev/null ||
+grep -F 'could not fetch libstatfast-musl.so' "$WORK/rel-missing.log" >/dev/null ||
 	fail 'release installer does not report a missing musl asset'
 [ ! -e "$WORK/rel-rootfs-musl/opt/neoproot/libstatfast.so" ] ||
 	fail 'release installer copied a shim when the musl asset was missing'
@@ -220,5 +220,17 @@ status=$(run_release_install "$WORK/rel-glibc.log" "$WORK/rel-rootfs-glibc" "$WO
 grep -F 'shim (glibc)' "$WORK/rel-glibc.log" >/dev/null ||
 	fail 'release installer did not report the glibc variant'
 check_installed "$WORK/rel-rootfs-glibc" glibc "$WORK/rel-glibc.log"
+
+# A rootfs that already holds a matching-ABI shim must still be refreshed from
+# the release.  The old code took the guest file as its own source, cp failed
+# with "are the same file" and the error was swallowed: the stale file stayed
+# and no shim line was printed at all.
+printf 'stale-marker' >>"$WORK/rel-rootfs-glibc/opt/neoproot/libstatfast.so"
+status=$(run_release_install "$WORK/rel-refresh.log" "$WORK/rel-rootfs-glibc" "$WORK/rel-prefix-refresh" 1)
+[ "$status" = 0 ] || { cat "$WORK/rel-refresh.log" >&2; fail "release shim refresh failed ($status)"; }
+grep -F 'shim (glibc) installed into' "$WORK/rel-refresh.log" >/dev/null ||
+	fail 'release installer did not report refreshing an existing guest shim'
+cmp -s "$WORK/rel-rootfs-glibc/opt/neoproot/libstatfast.so" "$WORK/fixtures/libstatfast-glibc.so" ||
+	fail 'release installer did not replace the stale guest shim'
 
 printf '%s\n' 'shim ABI install tests passed'
