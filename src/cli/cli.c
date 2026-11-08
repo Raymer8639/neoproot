@@ -449,6 +449,11 @@ int proot_main(int argc, char *const argv[]) {
          * L2S-correlated results. */
         if (tracee->seccomp_notify)
             setenv("NEOPROOT_STATSHIM_NOTIF", "1", 1);
+        /* seccomp.c tag-gates readlinkat so the shim can read a symlink target
+         * in-process; the shim must not tag calls a tracer without that rule
+         * would translate as guest paths. */
+        if (tracee->seccomp_notify)
+            setenv("NEOPROOT_STATSHIM_RL_TAG", "1", 1);
 
         note(tracee, WARNING, USER,
              "stat-shim: %s (rootfs=%s); newfstatat/statx/fstatat64 are NOT traced",

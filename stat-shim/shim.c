@@ -15,10 +15,10 @@
  * tracer also intercepts, so it cannot be reproduced here.  Instead the seccomp
  * filter keeps those stat syscalls routed to USER_NOTIF *only* when the caller
  * ORs NEOPROOT_STAT_SHIM_FLAG into its flags argument (NEOPROOT_STATSHIM_NOTIF
- * tells the shim that channel exists).  Whenever a raw result is a symlink or an
- * L2S-internal name the wrappers re-issue the call with that sentinel and let
- * the tracer do the full L2S emulation.  Regular-file stats never pay that
- * round trip.
+ * tells the shim that channel exists).  Whenever a raw result is an L2S-internal
+ * name, or a symlink whose immediate target is one, the wrappers re-issue the
+ * call with that sentinel and let the tracer do the full L2S emulation.  Regular
+ * files and ordinary symlinks never pay that round trip.
  *
  * Keep in sync with:
  *   src/syscall/seccomp.c                      set_seccomp_filters
@@ -68,6 +68,7 @@ static size_t      g_rootfs_len;
 static int         g_debug;
 static int         g_use_l2s;
 static int         g_have_notif;
+static int         g_rl_tag;     /* tracer tag-gates readlinkat for us */
 
 static int   g_have_ids;
 static uid_t g_uid_real, g_uid_fake;
@@ -105,6 +106,10 @@ typedef struct {
     unsigned long raw_fail_tracer_ok;/* ... of which the tracer then resolved */
     unsigned long probe;             /* extra nofollow lstat for L2S */
     unsigned long probe_hit;         /* ... of which saw a symlink */
+    unsigned long link_results;      /* results that were symlinks */
+    unsigned long readlink_probe;    /* raw readlinkat for the L2S check */
+    unsigned long readlink_fail;     /* ... of which did not answer */
+    unsigned long l2s_name_hits;     /* results under a .l2s.* name */
     unsigned long notif;             /* USER_NOTIF round trips, all reasons */
     unsigned long notif_rel_fdcwd;   /* relative name at AT_FDCWD */
     unsigned long notif_raw_fail;    /* raw stat failed, ask the tracer */
@@ -136,9 +141,11 @@ static void stats_print(void)
             g_st.path_empty, g_st.flags_nofollow);
     fprintf(stderr,
             "[stat-shim stats] raw_stat=%lu raw_fail=%lu raw_fail_tracer_ok=%lu"
-            " probe=%lu probe_hit=%lu\n",
+            " probe=%lu probe_hit=%lu links=%lu readlink=%lu readlink_fail=%lu"
+            " l2s_name=%lu\n",
             g_st.raw_stat, g_st.raw_fail, g_st.raw_fail_tracer_ok,
-            g_st.probe, g_st.probe_hit);
+            g_st.probe, g_st.probe_hit, g_st.link_results,
+            g_st.readlink_probe, g_st.readlink_fail, g_st.l2s_name_hits);
     fprintf(stderr,
             "[stat-shim stats] notif=%lu (rel_fdcwd=%lu raw_fail=%lu l2s=%lu)\n",
             g_st.notif, g_st.notif_rel_fdcwd, g_st.notif_raw_fail,
@@ -207,6 +214,24 @@ static long raw_syscall6(long number, long a1, long a2, long a3,
 static int raw_lstat(const char *path, struct stat *st) {
     return (int)raw_syscall6(SYS_newfstatat, AT_FDCWD, (long)path, (long)st,
                              AT_SYMLINK_NOFOLLOW, 0, 0);
+}
+
+/* readlinkat() has no flags word to tag, but the kernel only reads dirfd as an
+ * int, so the raw tag rides in the upper half of arg 0.  Only valid once the
+ * tracer advertises NEOPROOT_STATSHIM_RL_TAG (seccomp.c installs the matching
+ * ALLOW rule); an untagged guest readlink is unaffected either way. */
+static int raw_readlinkat(int dirfd, const char *path, char *buf, size_t bufsz) {
+#ifdef SYS_readlinkat
+    unsigned long tagged = (unsigned long)(unsigned int)dirfd
+        | ((unsigned long)NEOPROOT_STAT_SHIM_RAW_TAG << 32);
+
+    return (int)raw_syscall6(SYS_readlinkat, (long)tagged, (long)path,
+                             (long)buf, (long)bufsz, 0, 0);
+#else
+    (void)dirfd; (void)path; (void)buf; (void)bufsz;
+    errno = ENOSYS;
+    return -1;
+#endif
 }
 
 /* L2S links are only detectable through the nofollow view of the same path.
@@ -283,6 +308,7 @@ static void shim_init(void) {
     g_debug = getenv("NEOPROOT_STATSHIM_DEBUG") != NULL;
     g_use_l2s = getenv("NEOPROOT_STATSHIM_L2S") != NULL;
     g_have_notif = getenv("NEOPROOT_STATSHIM_NOTIF") != NULL;
+    g_rl_tag = getenv("NEOPROOT_STATSHIM_RL_TAG") != NULL;
     if (g_debug)
         fprintf(stderr, "[stat-shim] init rootfs='%s' notif=%d l2s=%d\n",
                 g_rootfs, g_have_notif, g_use_l2s);
@@ -449,17 +475,41 @@ static const char *base_name(const char *path) {
     return s != NULL ? s + 1 : path;
 }
 
-/* Only symlinks and .l2s.* storage names can need the tracer's L2S disguise. */
-static int l2s_ambiguous(const char *guest, const char *host, int is_link) {
-    if (is_link)
+/* A .l2s.<name><NNNN> storage name always needs the tracer's nlink fixup.
+ * The prefix test is deliberately broader than the tracer's (which also wants
+ * four trailing digits): a false positive only costs one round trip. */
+static int l2s_name(const char *path) {
+    if (path == NULL || *path == '\0')
+        return 0;
+    if (strncmp(base_name(path), L2S_PREFIX, L2S_PREFIX_LEN) != 0)
+        return 0;
+    STATS_INC(l2s_name_hits);
+    return 1;
+}
+
+/* link2symlink only disguises a symlink whose *immediate* target is a .l2s.
+ * name (link2symlink.c:resolve_l2s_stat_path).  Reading that target costs one
+ * raw readlinkat, far less than the USER_NOTIF round trip it saves, so an
+ * ordinary symlink no longer pays for the L2S machinery.  Everything
+ * unexpected -- no tag-gated readlinkat, a failed read -- answers "ask the
+ * tracer", which is exactly the old behaviour. */
+static int link_target_is_l2s(int dirfd, const char *path, const char *host) {
+    char target[PATH_MAX];
+    int n;
+
+    if (!g_rl_tag)
         return 1;
-    if (guest != NULL && *guest != '\0'
-        && strncmp(base_name(guest), L2S_PREFIX, L2S_PREFIX_LEN) == 0)
+    if (host != NULL && host[0] == '/')
+        n = raw_readlinkat(AT_FDCWD, host, target, sizeof target - 1);
+    else
+        n = raw_readlinkat(dirfd, path, target, sizeof target - 1);
+    STATS_INC(readlink_probe);
+    if (n <= 0) {
+        STATS_INC(readlink_fail);
         return 1;
-    if (host != NULL && *host != '\0'
-        && strncmp(base_name(host), L2S_PREFIX, L2S_PREFIX_LEN) == 0)
-        return 1;
-    return 0;
+    }
+    target[n] = '\0';
+    return l2s_name(target);
 }
 
 /* Re-issue through the tracer.  @path must stay the guest path so the tracer
@@ -572,7 +622,10 @@ int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
         } else {
             is_link = probe_is_symlink(dirfd, path, host);
         }
-        if (l2s_ambiguous(path, host, is_link)) {
+        if (is_link)
+            STATS_INC(link_results);
+        if (l2s_name(path) || l2s_name(host)
+            || (is_link && link_target_is_l2s(dirfd, path, host))) {
             if (g_debug)
                 fprintf(stderr, "[stat-shim]   fallback is_link=%d\n", is_link);
             STATS_INC(notif_l2s);
@@ -641,7 +694,8 @@ int statx(int dirfd, const char *path, int flags, unsigned int mask,
         } else {
             is_link = probe_is_symlink(dirfd, path, host);
         }
-        if (l2s_ambiguous(path, host, is_link)) {
+        if (l2s_name(path) || l2s_name(host)
+            || (is_link && link_target_is_l2s(dirfd, path, host))) {
             if (g_debug)
                 fprintf(stderr, "[stat-shim]   statx fallback is_link=%d\n", is_link);
             STATS_INC(notif_l2s);
