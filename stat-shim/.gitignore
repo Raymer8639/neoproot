@@ -1,2 +1,3 @@
 /libstatfast.so
+/libstatfast-musl.so
 /shim_test
