@@ -62,7 +62,8 @@ The installer places `neoproot` in `$PREFIX/bin`.
 | `--with-um` | The default: `neoproot` can boot a filesystem image with `--backend=um`, and `neoproot-um` is installed. |
 | `--with-shim` | The default: installs `libstatfast.so` to `$PREFIX/libexec/neoproot/`. |
 | `--without-shim` | Do not install the stat shim. |
-| `--shim-rootfs=DIR` | Also copy the shim into that container rootfs at `/opt/neoproot/libstatfast.so`. Repeatable. |
+| `--shim-rootfs=DIR` | Also copy the shim into that container rootfs at `/opt/neoproot/libstatfast.so`, choosing the musl or glibc build from the guest loader. Repeatable. |
+| `--shim-abi=ABI` | Force the guest ABI for `--shim-rootfs`: `musl` or `glibc`. Only needed when a rootfs has both loaders or neither. |
 | `--um-kernel=FILE` | Kernel to install at `libexec/neoproot/um/linux-bionic`. |
 | `--um-stub=FILE` | `stub_exe` that goes with that kernel. |
 | `--um-net=FILE` | `umnet`, the `--net` runner. |
@@ -73,6 +74,8 @@ The installer places `neoproot` in `$PREFIX/bin`.
 sh install.sh                                   # host install, UML + shim
 sh install.sh --without-um                      # smallest neoproot
 sh install.sh --shim-rootfs=/data/.../alarm     # shim into the container too
+sh install.sh --shim-rootfs=/data/.../alpine    # musl build chosen by the loader
+sh install.sh --shim-rootfs=DIR --shim-abi=musl # force the ABI for odd layouts
 sh build.sh --without-um                        # build only, no install
 ```
 
@@ -164,6 +167,21 @@ the guest. Put it in the container with `--shim-rootfs` (or copy it to
 no `--stat-shim` needed -- as long as `--seccomp-notify` is on, which is
 where its guest-side channel comes from. `NEOPROOT_NO_STAT_SHIM=1` turns the
 automatic use off.
+
+The guest libc has to match as well. With `--shim-rootfs`, the installer reads
+the rootfs loader -- `lib/ld-musl-aarch64.so.1` means musl,
+`lib/ld-linux-aarch64.so.1` or `lib64/ld-linux-aarch64.so.1` means glibc --
+and copies the matching build: `libstatfast-musl.so` for Alpine/musl,
+`libstatfast.so` for glibc. Both land as `/opt/neoproot/libstatfast.so`, the
+one name the tracer discovers. `stat-shim/build.sh` builds the glibc variant;
+`stat-shim/build-musl.sh` builds the musl one and needs network access to fetch
+Alpine's musl headers. A rootfs with both loaders or neither is an error rather
+than a guess: pass `--shim-abi=musl|glibc` to resolve it.
+
+The one-command installer (`scripts/install.sh`, shipped as the release asset
+`install.sh`) downloads `libstatfast-musl.so` when the release publishes it; if
+the asset is absent it says so, and musl roots need the source build above or a
+manual copy of the library into the rootfs.
 
 ```sh
 # before: remember two flags and a guest path

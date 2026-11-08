@@ -3,6 +3,29 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [Unreleased]
+
+**按 guest ABI 安装 stat shim**
+
+- `install.sh --shim-rootfs=DIR` 不再盲目复制 glibc 版：先看 rootfs 的
+  loader（`lib/ld-musl-aarch64.so.1` 对 `lib/ld-linux-aarch64.so.1` /
+  `lib64/ld-linux-aarch64.so.1`）判断 musl/glibc，再选
+  `stat-shim/build-musl.sh` 的 `libstatfast-musl.so` 或
+  `stat-shim/build.sh` 的 `libstatfast.so`。复制到 guest 时仍统一叫
+  `/opt/neoproot/libstatfast.so`，tracer 的自动发现不变。
+- 新增 `--shim-abi=musl|glibc`：rootfs 同时有两种 loader 或都没有时安装器
+  会明确报错，不再猜测；这个选项用于不寻常的 rootfs 布局。
+- `scripts/install.sh`（一键安装器）按 ABI 下载 Release 资产：
+  glibc 用 `libstatfast.so`，musl 用 `libstatfast-musl.so`；Release 没有
+  musl 资产时说明需要源码构建（`stat-shim/build-musl.sh`）或手动放置，
+  并用 `readelf` 核对下载/缓存的库 ABI，避免把另一种 libc 的库装进 guest。
+- 新增 `tests/test-shim-abi.sh`：用两个带空 loader 文件的临时 rootfs 跑真实
+  `install.sh`，断言复制进 guest 的 `.so` 的 `NEEDED` 分别是
+  `libc.musl-aarch64.so.1` 和 `libc.so.6`；同时覆盖双 loader/无 loader
+  的报错与 `--shim-abi` 覆盖。
+- README、`stat-shim/README.md` 与 `stat-shim/MUSL.md` 补充按 ABI 安装的
+  说明。
+
 ## [v6.0.0.0] - 2026-10-31
 
 **Out of the box: one command, every piece fetched from where it is published**

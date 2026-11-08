@@ -64,7 +64,8 @@ meson install -C builddir
 | `--without-um` | 只留 fast 后端，不编译 supervisor 和 session daemon，也不装 `neoproot-um`。之后 `--backend=um` 会明确报「此构建没有 um 后端」。 |
 | `--with-shim` | 默认。把 `libstatfast.so` 装到 `$PREFIX/libexec/neoproot/`。 |
 | `--without-shim` | 不装 stat shim。 |
-| `--shim-rootfs=DIR` | 额外把 shim 复制进那个容器 rootfs 的 `/opt/neoproot/libstatfast.so`。可重复。 |
+| `--shim-rootfs=DIR` | 额外把 shim 复制进那个容器 rootfs 的 `/opt/neoproot/libstatfast.so`，并按 guest loader 选择 musl 或 glibc 版。可重复。 |
+| `--shim-abi=ABI` | 为 `--shim-rootfs` 强制指定 guest ABI：`musl` 或 `glibc`。只有 rootfs 同时有两种 loader 或都没有时才需要。 |
 | `--um-kernel=FILE` | 把内核装到 `libexec/neoproot/um/linux-bionic`。 |
 | `--um-stub=FILE` | 与该内核配套的 `stub_exe`。 |
 | `--um-net=FILE` | `umnet`，`--net` 的运行器。 |
@@ -75,6 +76,8 @@ meson install -C builddir
 sh install.sh                                   # 宿主安装，UML + shim
 sh install.sh --without-um                      # 最小的 neoproot
 sh install.sh --shim-rootfs=/data/.../alarm     # 顺带把 shim 放进容器
+sh install.sh --shim-rootfs=/data/.../alpine    # loader 是 musl 就自动选 musl 版
+sh install.sh --shim-rootfs=DIR --shim-abi=musl # 布局不寻常时强制 ABI
 sh build.sh --without-um                        # 只编译，不安装
 ```
 
@@ -150,6 +153,10 @@ installed_at=2026-10-31T19:30:00Z
 ### stat shim 自动生效
 
 shim 是**guest ABI** 的库：装在宿主上对 guest 没有任何作用。把它放进容器（`--shim-rootfs`，或自己复制到 `/opt/neoproot/libstatfast.so`），只要 `--seccomp-notify` 开着，neoproot 就会自己找到它 —— 不需要再传 `--stat-shim`。`NEOPROOT_NO_STAT_SHIM=1` 可以关掉这个自动行为。
+
+guest 的 libc 也必须对上。带 `--shim-rootfs` 时安装器会看 rootfs 的 loader —— `lib/ld-musl-aarch64.so.1` 是 musl，`lib/ld-linux-aarch64.so.1` 或 `lib64/ld-linux-aarch64.so.1` 是 glibc —— 并复制对应的构建：Alpine/musl 用 `libstatfast-musl.so`，glibc 用 `libstatfast.so`。两者在 guest 里都叫 `/opt/neoproot/libstatfast.so`，tracer 的自动发现路径不变。`stat-shim/build.sh` 编 glibc 版；`stat-shim/build-musl.sh` 编 musl 版（需要联网取 Alpine 的 musl 头文件）。rootfs 同时有两种 loader 或都没有时安装器会报错而不是猜，可用 `--shim-abi=musl|glibc` 指定。
+
+一键安装器（`scripts/install.sh`，Release 资产 `install.sh`）会按 ABI 下载对应的 Release 资产；Release 没有 `libstatfast-musl.so` 时会明确说明 musl rootfs 需要源码构建或手动放置。
 
 ```sh
 # 以前：要记两个参数和一个 guest 路径

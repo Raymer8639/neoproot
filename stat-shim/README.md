@@ -42,7 +42,8 @@ rather than returning wrong link types or link counts.
 * neoproot built with this directory's shim support (the flag, the BPF rule and
   the `NEOPROOT_STAT_SHIM_FLAG` handling in `src/syscall/`).
 * A preloadable library built for the **guest ABI**, not the Termux host. For
-  the common Arch/glibc aarch64 rootfs that is an aarch64 glibc compiler.
+  the common Arch/glibc aarch64 rootfs that is an aarch64 glibc compiler;
+  Alpine guests need the musl build from `build-musl.sh`.
 * The library must be reachable from the guest namespace and loadable by the
   guest dynamic loader (a glibc `.so` for a glibc guest, a musl `.so` for a
   musl guest, ...).
@@ -65,6 +66,31 @@ C compiler and `-shared` support. The resulting `libstatfast.so` is the only
 artifact to ship; `shim_test` is for native builds.
 
 ## Install
+
+### By guest ABI
+
+`install.sh --shim-rootfs=DIR` does the whole job: it reads the rootfs loader,
+builds the matching variant if the artifact is missing (`build.sh` for glibc,
+`build-musl.sh` for musl), and copies it to `/opt/neoproot/libstatfast.so` --
+the fixed name neoproot auto-discovers.
+
+    sh install.sh --shim-rootfs=/path/to/container/rootfs
+
+| Rootfs marker | ABI | Artifact |
+| --- | --- | --- |
+| `lib/ld-musl-aarch64.so.1` | musl | `libstatfast-musl.so` |
+| `lib/ld-linux-aarch64.so.1` or `lib64/ld-linux-aarch64.so.1` | glibc | `libstatfast.so` |
+
+Both loaders present, or neither, stops the install with an error instead of
+guessing; `--shim-abi=musl|glibc` forces the choice for unusual layouts. The
+copied file is always named `libstatfast.so`, so the guest path and the
+auto-discovery rule do not change.
+
+The one-command installer (`scripts/install.sh`) downloads the same asset names
+from the release; a release without `libstatfast-musl.so` reports that musl
+roots need the source build or a manual copy.
+
+### Manually
 
 The convention is a dedicated folder inside the container rootfs,
 `/opt/neoproot/stat-shim/`:
