@@ -11,11 +11,25 @@ GitHub Release assets are **ARM64 Linux (glibc)** CI builds. Termux needs a **lo
 ![Language](https://img.shields.io/badge/language-C23%20%2F%20C%2B%2B23-orange)
 ![License](https://img.shields.io/badge/license-GPLv2-green)
 
+## Contents
+
+- [Install (one command)](#install-one-command)
+- [Start in Termux (manual)](#start-in-termux-manual)
+- [Why neoproot](#why-neoproot)
+- [Supported environments](#supported-environments)
+- [UML backend](#uml-backend-the-optional-second-execution-backend)
+- [Backend selection and the command separator](#backend-selection-and-the-command-separator)
+- [Performance evidence](#performance-evidence)
+- [Build notes](#build-notes)
+- [Contributing and support](#contributing-and-support)
+
 ## Install (one command)
 
 ```sh
 curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/install.sh | sh
 ```
+
+On Termux it needs `pkg install clang make llvm binutils pkg-config libtalloc` and a couple of minutes for the bionic build; on ARM64 Linux it only downloads and verifies a binary.
 
 The script detects the platform and does the right thing: on **Termux** it installs the build dependencies, builds the bionic binary from the tagged source, backs up the previous binary and installs the new one into `$PREFIX/bin`; on **ARM64 Linux** it downloads the release binary, verifies it against `SHA256SUMS`, and installs it into your `PATH`. It never touches a running container's rootfs. Read [scripts/install.sh](scripts/install.sh) before piping it to a shell if you prefer; `sh scripts/install.sh --help` lists every option, including `--version`, `--prefix`, `--portable`, `--lang`, `--update` and the UM/shim toggles.
 
@@ -65,9 +79,9 @@ sh build.sh --without-um                        # build only, no install
 ### Updating an install
 
 ```sh
-sh install.sh --update              # newest release, same prefix and options
-sh install.sh --update --force      # reinstall even if the version matches
-sh install.sh --update --prefix DIR # when the prefix is not the default
+sh scripts/install.sh --update              # newest release, same prefix and options
+sh scripts/install.sh --update --force      # reinstall even if the version matches
+sh scripts/install.sh --update --prefix DIR # when the prefix is not the default
 ```
 
 `--update` belongs to the one-command installer (the release asset); the source
@@ -135,8 +149,12 @@ has to agree with the `um-init`, `umnet` and `passt` it runs with, so
 "latest" is not the right default; override with `NEOPROOT_UM_KERNEL_TAG` or
 `NEOPROOT_UM_PASST_TAG` if you know the set you want.
 
-The kernel has to be **built from source** -- no project ships one ready-made
-for a new device profile. See the README of linux-um-arm64 for that.
+The one-command installer downloads that runtime from the releases above, so
+nothing has to be built to get started. Build the kernel from source only when
+you need a configuration or device profile the published UP/SMP builds do not
+cover -- linux-um-arm64's README is the starting point. A newer runtime,
+`um-arm64-v0.4.0` (Linux 7.3.1), is published; this release still pins the
+tested `um-arm64-v0.3.0` set.
 
 ### The stat shim configures itself
 
@@ -166,7 +184,7 @@ On **ARM64 Linux** (not Termux), download `neoproot` or the lower-instruction-se
 - link2symlink hard-link emulation works with pnpm and TypeScript/tsgo workflows that probe real paths through `/proc/<pid>/fd/<fd>`.
 - High-frequency path operations avoid the fork's removed translation-thread-pool overhead, keeping nvim and package-manager workflows responsive.
 - Optional `--seccomp-notify` (Linux 5.0+) emulates `newfstatat` via seccomp USER_NOTIF so directory metadata scans skip a ptrace stop. Kernel 4+ without the flag is unchanged.
-- Optional `--stat-shim=<guest-lib>` preloads a guest-ABI `LD_PRELOAD` library that resolves `stat`/`lstat`/`statx` in-process (bind translation and fake_id0), keeping link2symlink results exact through a flag-gated USER_NOTIF fallback. Off by default. See [stat-shim/README.md](stat-shim/README.md).
+- The stat shim (`stat-shim/README.md`) resolves `stat`/`lstat`/`statx` in-process in the guest (bind translation and fake_id0), keeping link2symlink results exact through a flag-gated USER_NOTIF fallback. It is picked up automatically when the shim is in the rootfs (`/opt/neoproot/libstatfast.so`) and `--seccomp-notify` is on; `--stat-shim=<guest-lib>` points at another copy and `NEOPROOT_NO_STAT_SHIM=1` turns it off.
 - Built-in high-priority scheduling (`setpriority(-20)`) improves CPU availability without root access.
 - Fixes include Chinese VNC exit hangs, logout/background-switch issues, and the misleading `signal 11` exit warning.
 - The codebase uses a lean C23/C++23 implementation tuned for ARMv8.2, trading generic architecture coverage for ARM64 performance.
@@ -289,6 +307,49 @@ kernel clamp it after the caller has sized the workload for several CPUs.
 for example `commit=60,data=writeback`. It is accepted only for an ext4 image;
 `--readonly` always keeps `noload` first (replaying the journal would write the
 base image) and appends the caller's options after it.
+
+### Persistent sessions
+
+A one-shot `--backend=um` run pays a full kernel boot per command. On the phone
+this was developed on that is 10.1-13.7 s, which is fine for `docker run` and
+painful for a shell you type into. `neoproot-um session` boots the guest once
+and keeps it:
+
+```sh
+# boot once; the guest stays up in the background
+neoproot-um session start --rootfs=/path/to/rootfs.img \
+                          --cow-file=/path/to/rootfs.img.cow
+
+# one command per call: stdout, stderr and the exit status come back
+neoproot-um session run --cwd=/work -- make -j4
+neoproot-um session run -- /bin/sh -c 'exit 7'   # exits 7
+
+neoproot-um session status
+neoproot-um session stop
+```
+
+`start` takes the same root options as a one-shot run (`--rootfs`,
+`--cow-file`, `--hostfs`, `--seccomp`, `--cpus`,
+`--rootflags`); the command after `--` is ignored, because the commands
+arrive later through `run`. `run` takes `--cwd=DIR` and
+`--timeout=SECONDS`.
+
+Measured on the same phone, one vCPU, ext4 root: **15.3 s** to start a session
+and **0.54-0.68 s per command** afterwards. The break-even against one boot per
+command is about three commands; a fifteen-command batch drops from roughly
+178 s to 28 s.
+
+Exit codes follow the shell convention: `124` on timeout, `126` when the working
+directory cannot be entered, `127` when the command is not found, and
+`128 + signal` when the caller is interrupted. A session stays usable after a
+timed-out command.
+
+One session per name: a second `start` exits `125` with `BUSY` instead of
+queueing. The daemon ignores `SIGHUP` and `SIGPIPE`, so it outlives the shell
+that started it; `stop` shuts the guest down and removes its state directory.
+`session` is a front end of `neoproot-um`, not a mode of the one-shot command
+line: the same binary decides whether this process becomes the daemon or a
+client.
 
 ### Binds
 

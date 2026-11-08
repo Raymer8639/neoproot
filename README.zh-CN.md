@@ -11,11 +11,25 @@ GitHub Release 资产是 **ARM64 Linux（glibc）** CI 产物。Termux 必须用
 ![语言](https://img.shields.io/badge/language-C23%20%2F%20C%2B%2B23-orange)
 ![许可证](https://img.shields.io/badge/license-GPLv2-green)
 
+## 目录
+
+- [安装（一条命令）](#安装一条命令)
+- [在 Termux 中手动编译](#在-termux-中手动编译)
+- [为什么使用 neoproot](#为什么使用-neoproot)
+- [支持的环境](#支持的环境)
+- [UML 后端](#uml-后端可选的第二执行后端)
+- [后端选择与 `--` 分隔符](#后端选择与---分隔符)
+- [性能依据](#性能依据)
+- [构建说明](#构建说明)
+- [贡献与支持](#贡献与支持)
+
 ## 安装（一条命令）
 
 ```sh
 curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/install.sh | sh
 ```
+
+在 Termux 上需要 `pkg install clang make llvm binutils pkg-config libtalloc`，编译 bionic 二进制还要几分钟；ARM64 Linux 上无需编译。
 
 脚本会自动识别平台：在 **Termux** 上安装编译依赖，用对应 tag 的源码编译出 bionic 二进制，备份旧二进制后装进 `$PREFIX/bin`；在 **ARM64 Linux** 上下载 release 二进制、用 `SHA256SUMS` 校验后放进 `PATH`。它**不会**改动正在运行的容器 rootfs。不放心管道执行可以先看 [scripts/install.sh](scripts/install.sh)，`sh scripts/install.sh --help` 可看全部参数：常用的是 `--version`、`--prefix`、`--portable`、`--lang`、`--update` 和 UM/shim 开关。
 
@@ -69,9 +83,9 @@ sh build.sh --without-um                        # 只编译，不安装
 ### 更新已安装的版本
 
 ```sh
-sh install.sh --update              # 升到最新，沿用原有前缀和选项
-sh install.sh --update --force      # 版本相同也强制重装
-sh install.sh --update --prefix DIR # 前缀不在默认位置时
+sh scripts/install.sh --update              # 升到最新，沿用原有前缀和选项
+sh scripts/install.sh --update --force      # 版本相同也强制重装
+sh scripts/install.sh --update --prefix DIR # 前缀不在默认位置时
 ```
 
 `--update` 属于一键脚本（Release 里的 `install.sh`）；源码安装器没有 `--update`。它只替换二进制和运行时，**沿用上次的每一个选择**。普通安装会把选择记到
@@ -129,7 +143,24 @@ installed_at=2026-10-31T19:30:00Z
 版本一致，所以「取最新」不是合适的默认值；知道自己在做什么可以用
 `NEOPROOT_UM_KERNEL_TAG` 或 `NEOPROOT_UM_PASST_TAG` 覆盖。
 
-内核必须**从源码构建** —— 没有项目会为新设备型号预置现成的。参见 linux-um-arm64 的 README。
+一键脚本会从上面的 Release 下载运行时，所以**开箱不需要编译内核**。只有在需要已发布的 UP/SMP 构建之外的配置或设备 profile 时才从源码构建 —— 起点是 linux-um-arm64 的 README。
+
+更新的运行时 `um-arm64-v0.4.0`（Linux 7.3.1）已经发布；本版本仍钉在测试过的 `um-arm64-v0.3.0` 组合上。
+
+### stat shim 自动生效
+
+shim 是**guest ABI** 的库：装在宿主上对 guest 没有任何作用。把它放进容器（`--shim-rootfs`，或自己复制到 `/opt/neoproot/libstatfast.so`），只要 `--seccomp-notify` 开着，neoproot 就会自己找到它 —— 不需要再传 `--stat-shim`。`NEOPROOT_NO_STAT_SHIM=1` 可以关掉这个自动行为。
+
+```sh
+# 以前：要记两个参数和一个 guest 路径
+neoproot --seccomp-notify --stat-shim=/opt/neoproot/libstatfast.so -r rootfs -- cmd
+
+# 现在：装一次
+sh install.sh --shim-rootfs=rootfs
+
+# 之后直接
+neoproot --seccomp-notify -r rootfs -- cmd
+```
 
 ## 为什么使用 neoproot
 
@@ -137,6 +168,7 @@ installed_at=2026-10-31T19:30:00Z
 - link2symlink 硬链接模拟兼容 pnpm 和 TypeScript/tsgo 通过 `/proc/<pid>/fd/<fd>` 探测真实路径的工作流。
 - 移除分支原有的路径翻译线程池开销，高频路径操作下 nvim 与包管理器更顺畅。
 - 可选 `--seccomp-notify`（Linux 5.0+）用 seccomp USER_NOTIF 模拟 `newfstatat`，目录元数据扫描少一次 ptrace 停靠。不加该参数时 kernel 4+ 行为不变。
+- stat shim（`stat-shim/README.md`）在 guest 进程内解析 `stat`/`lstat`/`statx`（含 bind 翻译与 fake_id0），并用受开关控制的 USER_NOTIF 回退保持 link2symlink 结果精确。rootfs 里有 shim（`/opt/neoproot/libstatfast.so`）且 `--seccomp-notify` 开启时会自动启用；`--stat-shim=<guest-lib>` 指定别的副本，`NEOPROOT_NO_STAT_SHIM=1` 关闭。
 - 内置高优先级调度（`setpriority(-20)`），无需 root 即可改善 CPU 调度倾向。
 - 修复中文 VNC 退出卡死、注销/切后台问题和误导性的 `signal 11` 退出警告。
 - 采用精简的 C23/C++23 实现并针对 ARMv8.2 调优，以 ARM64 性能换取通用架构覆盖范围。
@@ -237,6 +269,31 @@ CPU、让按多核准备的负载跑在单核上。
 `--rootflags=OPTS` 把额外的 ext4 挂载选项传给 kernel cmdline，例如
 `commit=60,data=writeback`。只接受 ext4 镜像；`--readonly` 时始终先放 `noload`
 （重放 journal 会写基础镜像）再把调用者的选项接在后面。
+
+### 常驻会话（session）
+
+一次性的 `--backend=um` 每个命令都要付一次内核启动：在开发用的手机上约 10.1–13.7 s，跑 `docker run` 无所谓，交互式 shell 就很难受。`neoproot-um session` 只启动一次 guest，之后一直复用：
+
+```sh
+# 启动一次，guest 留在后台
+neoproot-um session start --rootfs=/path/to/rootfs.img \
+                          --cow-file=/path/to/rootfs.img.cow
+
+# 每次一条命令：stdout、stderr 和退出码都会回传
+neoproot-um session run --cwd=/work -- make -j4
+neoproot-um session run -- /bin/sh -c 'exit 7'   # 返回 7
+
+neoproot-um session status
+neoproot-um session stop
+```
+
+`start` 支持与一次性运行相同的根文件系统选项（`--rootfs`、`--cow-file`、`--hostfs`、`--seccomp`、`--cpus`、`--rootflags`）。`--` 之后的命令会被忽略，命令由 `run` 逐条送入；`run` 支持 `--cwd=DIR` 与 `--timeout=SECONDS`。
+
+同一台手机、单 vCPU、ext4 根实测：启动会话 **15.3 s**，之后每条命令 **0.54–0.68 s**；与「每个命令启动一次」相比大约 3 条命令就回本，15 条命令的批处理从约 178 s 降到 28 s。
+
+退出码沿用 shell 惯例：超时 `124`，无法进入工作目录 `126`，命令不存在 `127`，被信号打断为 `128+n`。某条命令超时后会话仍然可用。
+
+同名会话只允许一个：重复 `start` 会以 `125` + `BUSY` 失败，而不是排队。守护进程忽略 `SIGHUP`/`SIGPIPE`，所以能活过启动它的那个 shell；`stop` 会关闭 guest 并删除状态目录。`session` 是 `neoproot-um` 的前端，而不是一次性命令行的一种模式：同一个二进制自己决定这次是当守护进程还是当客户端。
 
 ### 绑定（`-b`）
 
@@ -546,10 +603,6 @@ neoproot 由 `proot-scicat` / `uproot` 更名而来，并持续跟进 [termux/pr
 - [提出功能请求](https://github.com/Raymer8639/neoproot/issues/new?template=feature_request.yml)
 - [在 Discussions 提问](https://github.com/Raymer8639/neoproot/discussions)
 - 阅读 [help.md](help.md)、[SUPPORT.md](SUPPORT.md)、[CONTRIBUTING.md](CONTRIBUTING.md) 和 [SECURITY.md](SECURITY.md)
-
-## 版本命名
-
-版本号沿用 termux/proot 风格。2026-08-15 前的发布版本使用历史后缀 `-scicat`；`v5.7.3` 及之后的版本使用不带后缀的 `neoproot` 名称。
 
 ## 许可证
 
