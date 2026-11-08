@@ -3,6 +3,29 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v6.0.2.0] - 2026-11-08
+
+**stat shim：符号链接与相对名不再回退 tracer**
+
+- `--link2symlink` 下以前**每个符号链接结果**都要经 USER_NOTIF 回退一次（96,650 条 stat
+  的负载里 10,782 次往返，其中 9,668 次 tracer 无事可做）。现在改为读链接目标判定
+  （basename 以 `.l2s.` 开头、或结果名是 `.l2s.*`、或读失败才回退）；为此 `seccomp.c`
+  增加 tag 化 `readlinkat` ALLOW 规则（tag 在 `args[0]` 高 32 位），老 tracer 不设
+  `NEOPROOT_STATSHIM_RL_TAG` 时 shim 自动退回旧行为。往返 **10,782 → 355**（剩下全是真
+  `.l2s.` 链）。
+- `AT_FDCWD` 相对名以前**一律回退** tracer（`du -s .` 2,021 次往返）。现在用缓存的 guest
+  cwd 就地翻译并发裸系统调用；`chdir`/`fchdir`/`syscall` 清缓存，`..`、cwd 不可翻译、
+  裸调用失败仍然回退。往返 **2,021 → 0**。
+- 新增 `NEOPROOT_STATSHIM_STATS=1`：打印总调用、绝对/相对、裸调用、探测、回退按原因拆分
+  与 bind 命中分布，用于判断 shim 是否还在走回退路径。
+- 实测（Termux，Alpine 3.21 guest，4.0 GB 树，交错 5 轮中位）：
+  `--link2symlink` 下 `du -s` **7,622 → 5,094 ms（−33%）**；
+  `cd /bench && du -s .` **17,618 → 3,949 ms（4.5×）**；
+  绝对路径无 L2S 不变（本来就没有回退）。
+- 验证：Alpine guest 33 个用例开/关 shim 逐字节相同（相对路径、`..`、dirfd、`/bin/sh`
+  符号链接、断链、`-b` bind、`--change-id=0:0`、L2S 硬链接链、`chdir` 后相对名），
+  Arch glibc guest 抽查一致；`test-stat-shim-raw-stat.sh`、`test-link2symlink-stat-guard.sh`
+  通过。
 ## [v6.0.1.0] - 2026-11-08
 
 **Alpine/musl guest 也有 stat shim 了**
