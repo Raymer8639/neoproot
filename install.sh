@@ -14,6 +14,8 @@
 #   --with-shim         install the stat shim
 #   --without-shim      do not install the shim
 #   --shim-rootfs=DIR   also put the shim in this container rootfs (repeatable)
+#   --shim-abi=ABI      force the guest ABI for --shim-rootfs: musl or glibc
+#                       (default: read the rootfs loader)
 #   --um-kernel=FILE    kernel to install as libexec/neoproot/um/linux-bionic
 #   --um-stub=FILE      stub_exe for it
 #   --um-net=FILE       umnet, the --net runner
@@ -37,6 +39,7 @@ WITH_UM=
 WITH_SHIM=
 PREFIX_DIR=
 SHIM_ROOTFS=
+SHIM_ABI=
 UM_KERNEL=
 UM_STUB=
 UM_NET=
@@ -57,7 +60,12 @@ Run without options on a terminal for the guided install.
   --with-shim         install the stat shim (default: yes)
   --without-shim      do not install the shim
   --shim-rootfs=DIR   also copy the shim into this container rootfs, at
-                      /opt/neoproot/libstatfast.so (repeatable)
+                      /opt/neoproot/libstatfast.so (repeatable). The guest
+                      libc is read from the rootfs loader; a musl rootfs gets
+                      libstatfast-musl.so, a glibc rootfs libstatfast.so.
+  --shim-abi=ABI      force the guest ABI for every --shim-rootfs: musl or
+                      glibc. Needed only when a rootfs has both loaders or
+                      neither one.
   --um-kernel=FILE    kernel to install at libexec/neoproot/um/linux-bionic
   --um-stub=FILE      stub_exe that goes with that kernel
   --um-net=FILE       umnet, the --net runner (asked for by default)
@@ -84,6 +92,7 @@ for argument do
 	--without-shim) WITH_SHIM=0 ;;
 	--prefix=*) PREFIX_DIR=${argument#--prefix=} ;;
 	--shim-rootfs=*) SHIM_ROOTFS="$SHIM_ROOTFS ${argument#--shim-rootfs=}" ;;
+	--shim-abi=*) SHIM_ABI=${argument#--shim-abi=} ;;
 	--um-kernel=*) UM_KERNEL=${argument#--um-kernel=} ;;
 	--um-stub=*) UM_STUB=${argument#--um-stub=} ;;
 	--um-net=*) UM_NET=${argument#--um-net=} ;;
@@ -287,6 +296,10 @@ for rootfs in $SHIM_ROOTFS; do
 	*) echo "错误: --shim-rootfs 需要绝对路径: $rootfs" >&2; exit 2 ;;
 	esac
 done
+case "$SHIM_ABI" in
+''|musl|glibc) ;;
+*) echo "错误: --shim-abi 只能是 musl 或 glibc: $SHIM_ABI" >&2; exit 2 ;;
+esac
 
 BINDIR=$PREFIX_DIR/bin
 LIBEXECDIR=$PREFIX_DIR/libexec/neoproot
@@ -295,6 +308,101 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # build.sh and the src/ paths it produces are relative to the repository, and
 # "sh /somewhere/install.sh" may be run from anywhere.
 cd "$HERE"
+
+# ---------------------------------------------------------------------------
+# Which libc does this container rootfs run?
+#
+# The shim is an LD_PRELOAD library, so it has to match the guest's libc: an
+# Alpine/musl rootfs cannot load a glibc .so, and a glibc rootfs cannot load a
+# musl one.  The dynamic loader is the reliable marker -- every usable rootfs
+# has one, and its name says which libc owns the process:
+#
+#   lib/ld-musl-aarch64.so.1       musl  (Alpine, postmarketOS, ...)
+#   lib/ld-linux-aarch64.so.1      glibc (Arch, Debian, ...)
+#   lib64/ld-linux-aarch64.so.1    glibc, merged-/usr layouts
+#
+# Prints "musl" or "glibc" and returns 0.  On an ambiguous rootfs (both
+# loaders) or one with neither, prints the reason and returns 1: guessing here
+# only fails later, inside the guest, after the install said it worked.
+# --shim-abi=ABI is the escape hatch for unusual layouts.
+shim_abi_for_rootfs() { # shim_abi_for_rootfs ROOTFS [FORCED_ABI]
+	_safr_rootfs=$1
+	case "${2:-}" in
+	musl|glibc) printf '%s\n' "$2"; return 0 ;;
+	'') ;;
+	*) echo "错误: 未知的 shim ABI: $2（只能是 musl 或 glibc）" >&2; return 1 ;;
+	esac
+	_safr_musl=
+	_safr_glibc=
+	if [ -e "$_safr_rootfs/lib/ld-musl-aarch64.so.1" ] ||
+		[ -L "$_safr_rootfs/lib/ld-musl-aarch64.so.1" ]; then
+		_safr_musl=1
+	fi
+	if [ -e "$_safr_rootfs/lib/ld-linux-aarch64.so.1" ] ||
+		[ -L "$_safr_rootfs/lib/ld-linux-aarch64.so.1" ] ||
+		[ -e "$_safr_rootfs/lib64/ld-linux-aarch64.so.1" ] ||
+		[ -L "$_safr_rootfs/lib64/ld-linux-aarch64.so.1" ]; then
+		_safr_glibc=1
+	fi
+	if [ -n "$_safr_musl" ] && [ -z "$_safr_glibc" ]; then
+		printf 'musl\n'
+		return 0
+	fi
+	if [ -n "$_safr_glibc" ] && [ -z "$_safr_musl" ]; then
+		printf 'glibc\n'
+		return 0
+	fi
+	if [ -n "$_safr_musl" ]; then
+		echo "错误: $_safr_rootfs 同时有 musl 和 glibc 的 loader，无法判断 guest ABI；用 --shim-abi=musl|glibc 指定" >&2
+	else
+		echo "错误: $_safr_rootfs 里没有找到 aarch64 loader（lib/ld-musl-aarch64.so.1、lib/ld-linux-aarch64.so.1 或 lib64/ld-linux-aarch64.so.1）；用 --shim-abi=musl|glibc 指定" >&2
+	fi
+	return 1
+}
+
+shim_artifact_for_abi() { # shim_artifact_for_abi ABI -> artifact file name
+	case "$1" in
+	musl) printf 'libstatfast-musl.so\n' ;;
+	glibc) printf 'libstatfast.so\n' ;;
+	*) echo "错误: 未知的 shim ABI: $1" >&2; return 1 ;;
+	esac
+}
+
+shim_ensure_built() { # shim_ensure_built ABI
+	_seb_abi=$1
+	_seb_name=$(shim_artifact_for_abi "$_seb_abi") || return 1
+	[ -f "$HERE/stat-shim/$_seb_name" ] && return 0
+	case "$_seb_abi" in
+	glibc)
+		echo "==> stat shim (glibc) 未构建，先跑 stat-shim/build.sh" >&2
+		sh "$HERE/stat-shim/build.sh" >&2 || return 1
+		;;
+	musl)
+		echo "==> stat shim (musl) 未构建，先跑 stat-shim/build-musl.sh" >&2
+		sh "$HERE/stat-shim/build-musl.sh" >&2 || return 1
+		;;
+	esac
+	[ -f "$HERE/stat-shim/$_seb_name" ] || {
+		echo "错误: $_seb_abi 版 shim 构建后仍不存在: $HERE/stat-shim/$_seb_name" >&2
+		return 1
+	}
+}
+
+shim_install_into_rootfs() { # shim_install_into_rootfs ROOTFS SOURCE
+	_sirt_rootfs=$1
+	_sirt_source=$2
+	mkdir -p "$_sirt_rootfs$SHIM_GUEST_DIR"
+	cp -f "$_sirt_source" "$_sirt_rootfs$SHIM_GUEST_DIR/$SHIM_NAME"
+	chmod 755 "$_sirt_rootfs$SHIM_GUEST_DIR/$SHIM_NAME"
+}
+
+# Resolve every target before the build: an ambiguous or non-aarch64 rootfs
+# should fail now, not after compiling neoproot.
+if [ "$WITH_SHIM" = 1 ]; then
+	for rootfs in $SHIM_ROOTFS; do
+		shim_abi_for_rootfs "$rootfs" "$SHIM_ABI" >/dev/null || exit 2
+	done
+fi
 
 mkdir -p "$BINDIR" "$LIBEXECDIR"
 
@@ -381,11 +489,13 @@ if [ "$WITH_UM" = 1 ]; then
 fi
 
 if [ "$WITH_SHIM" = 1 ]; then
-	SHIM_SOURCE=$HERE/stat-shim/$SHIM_NAME
-	if [ ! -f "$SHIM_SOURCE" ]; then
-		echo "==> stat shim 未构建，先跑 stat-shim/build.sh" >&2
-		sh "$HERE/stat-shim/build.sh"
-	fi
+	# The host copy is the glibc build, unchanged.  Container copies are
+	# chosen per rootfs: same guest path and file name, different ABI.
+	shim_ensure_built glibc || {
+		echo "错误: 无法构建 glibc 版 stat shim" >&2
+		exit 1
+	}
+	SHIM_SOURCE=$HERE/stat-shim/libstatfast.so
 	cp -f "$SHIM_SOURCE" "$LIBEXECDIR/$SHIM_NAME"
 	chmod 644 "$LIBEXECDIR/$SHIM_NAME"
 	echo "==> shim 已安装: $LIBEXECDIR/$SHIM_NAME"
@@ -399,10 +509,16 @@ if [ "$WITH_SHIM" = 1 ]; then
 			echo "==> 跳过不存在的 rootfs: $rootfs" >&2
 			continue
 		fi
-		mkdir -p "$rootfs$SHIM_GUEST_DIR"
-		cp -f "$SHIM_SOURCE" "$rootfs$SHIM_GUEST_DIR/$SHIM_NAME"
-		chmod 755 "$rootfs$SHIM_GUEST_DIR/$SHIM_NAME"
-		echo "==> shim 已放入容器: $rootfs$SHIM_GUEST_DIR/$SHIM_NAME"
+		guest_abi=$(shim_abi_for_rootfs "$rootfs" "$SHIM_ABI") || exit 2
+		shim_name=$(shim_artifact_for_abi "$guest_abi") || exit 2
+		shim_ensure_built "$guest_abi" || {
+			echo "错误: 无法为 $rootfs 构建 $guest_abi 版 stat shim" >&2
+			exit 1
+		}
+		# The tracer auto-discovers /opt/neoproot/libstatfast.so, so both
+		# variants land under that one name.
+		shim_install_into_rootfs "$rootfs" "$HERE/stat-shim/$shim_name"
+		echo "==> shim ($guest_abi) 已放入容器: $rootfs$SHIM_GUEST_DIR/$SHIM_NAME"
 	done
 else
 	echo "==> 跳过 shim（--without-shim）"
