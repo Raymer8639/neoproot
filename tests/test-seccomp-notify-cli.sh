@@ -54,7 +54,7 @@ if [ "$STATIC" -eq 0 ]; then
 fi
 
 set +e
-notify_err=$(PROOT_UNSET_DONE=1 "$PROOT" --seccomp-notify -r "$ROOT" $BINDS /probe 2>&1 >/dev/null)
+notify_err=$(PROOT_UNSET_DONE=1 "$PROOT" -v 1 --seccomp-notify -r "$ROOT" $BINDS /probe 2>&1 >/dev/null)
 status=$?
 set -e
 if [ "$status" -ne 0 ]; then
@@ -62,7 +62,6 @@ if [ "$status" -ne 0 ]; then
 	printf '%s\n' 'neoproot --seccomp-notify failed'
 	exit "$status"
 fi
-printf '%s\n' "$notify_err" | grep -F 'USER_NOTIF listener ready' >/dev/null
-printf '%s\n' "$notify_err" | grep -F 'newfstatat/statx are emulated' >/dev/null
+printf '%s\n' "$notify_err" | grep -F 'fast path: seccomp USER_NOTIF' >/dev/null
 
 printf '%s\n' 'seccomp-notify CLI probe passed'

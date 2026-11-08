@@ -454,10 +454,6 @@ int proot_main(int argc, char *const argv[]) {
          * would translate as guest paths. */
         if (tracee->seccomp_notify)
             setenv("NEOPROOT_STATSHIM_RL_TAG", "1", 1);
-
-        note(tracee, WARNING, USER,
-             "stat-shim: %s (rootfs=%s); newfstatat/statx/fstatat64 are NOT traced",
-             tracee->stat_shim_lib, tracee->rootfs != NULL ? tracee->rootfs : "");
     }
     if (tracee->seccomp_notify) {
         int probe = probe_seccomp_user_notif();
@@ -468,9 +464,14 @@ int proot_main(int argc, char *const argv[]) {
                  strerror(-probe));
             goto error;
         }
-        note(tracee, WARNING, USER,
-             "seccomp-notify: USER_NOTIF listener ready; newfstatat/statx are emulated");
     }
+    /* One line, and only with -v.  The fast path is the normal case here, and
+     * a warning on every start teaches people to ignore warnings. */
+    if (tracee->verbose > 0 && (tracee->stat_shim_lib != NULL || tracee->seccomp_notify))
+        note(tracee, INFO, USER, "fast path: %s%s%s",
+             tracee->stat_shim_lib != NULL ? "stat shim" : "",
+             (tracee->stat_shim_lib != NULL && tracee->seccomp_notify) ? " + " : "",
+             tracee->seccomp_notify ? "seccomp USER_NOTIF" : "");
     if (!SAFE_GETENV("PROOT_NO_MOUNTINFO"))
         initialize_extension(tracee, mountinfo_callback, NULL);
     status = launch_process(tracee, &argv[status]);

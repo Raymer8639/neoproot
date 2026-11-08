@@ -42,7 +42,7 @@ fi
 set +e
 (cd "$ROOT" && PROOT_UNSET_DONE=1 NEOPROOT_TEST_HOST_DIRFD=1 \
 	NEOPROOT_TEST_USER_NOTIF=1 \
-	"$PROOT" --seccomp-notify ./probe expect-translated >"$ROOT/out" 2>&1)
+	"$PROOT" -v 1 --seccomp-notify ./probe expect-translated >"$ROOT/out" 2>&1)
 status=$?
 set -e
 cat "$ROOT/out"
@@ -50,7 +50,7 @@ if [ "$status" -ne 0 ]; then
 	printf '%s\n' 'with --seccomp-notify: expected translated fstatat'
 	exit "$status"
 fi
-grep -F 'USER_NOTIF listener ready' "$ROOT/out" >/dev/null
+grep -F 'fast path: seccomp USER_NOTIF' "$ROOT/out" >/dev/null
 grep -F 'pipe expect-translated ok' "$ROOT/out" >/dev/null
 grep -F 'neoproot host-dirfd: hit' "$ROOT/out" >/dev/null
 grep -F 'neoproot user-notif: fstatat continue' "$ROOT/out" >/dev/null
