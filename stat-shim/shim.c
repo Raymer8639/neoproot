@@ -114,6 +114,8 @@ typedef struct {
     unsigned long notif_rel_fdcwd;   /* relative name at AT_FDCWD */
     unsigned long notif_raw_fail;    /* raw stat failed, ask the tracer */
     unsigned long notif_l2s;         /* L2S-ambiguous result, ask the tracer */
+    unsigned long cwd_refresh;       /* getcwd() calls for the cwd cache */
+    unsigned long cwd_fast;          /* relative names translated in-process */
     unsigned long bind_hits[MAX_BINDS];
     unsigned long bind_rootfs;
     unsigned long bind_none;
@@ -150,6 +152,8 @@ static void stats_print(void)
             "[stat-shim stats] notif=%lu (rel_fdcwd=%lu raw_fail=%lu l2s=%lu)\n",
             g_st.notif, g_st.notif_rel_fdcwd, g_st.notif_raw_fail,
             g_st.notif_l2s);
+    fprintf(stderr, "[stat-shim stats] cwd refresh=%lu fast=%lu\n",
+            g_st.cwd_refresh, g_st.cwd_fast);
     fprintf(stderr, "[stat-shim stats] binds rootfs=%lu none=%lu last_hit=%lu",
             g_st.bind_rootfs, g_st.bind_none, g_st.last_bind_hits);
     for (i = 0; i < g_nbinds; i++) {
@@ -448,6 +452,91 @@ static const char *relative_to_host(const char *path, char *buf, size_t bufsz) {
     return buf;
 }
 
+/* ---- cached guest cwd for relative names at AT_FDCWD ----
+ *
+ * A relative name at AT_FDCWD means "relative to the tracee's virtual cwd",
+ * and chdir is emulated by the tracer: the real cwd never moves, so the kernel
+ * cannot resolve those names for us, but the *guest* path can be translated
+ * exactly like an absolute one once the cwd is known.  getcwd() is emulated by
+ * the tracer and reports that guest cwd, so one call -- not one per stat --
+ * fills the cache.  Anything that can change the cwd drops it again, and every
+ * uncertain case (no cache, "..", a name the binding map cannot translate)
+ * still goes to the tracer.
+ */
+static char g_cwd[PATH_MAX];
+static int  g_cwd_state;    /* 0 unknown, 1 usable, 2 unusable */
+static int  g_cwd_busy;
+
+static void forget_guest_cwd(void) {
+    g_cwd_state = 0;
+}
+
+static const char *guest_cwd(void) {
+    char translated[PATH_MAX];
+
+    if (g_cwd_state == 1)
+        return g_cwd;
+    if (g_cwd_state == 2 || g_cwd_busy)
+        return NULL;
+    g_cwd_busy = 1;
+    STATS_INC(cwd_refresh);
+    if (getcwd(g_cwd, sizeof g_cwd) == NULL || g_cwd[0] != '/'
+        || to_host(g_cwd, translated, sizeof translated) == g_cwd) {
+        /* No usable cwd, or the binding map does not translate it: leave every
+         * relative name to the tracer. */
+        g_cwd_state = 2;
+        g_cwd_busy = 0;
+        return NULL;
+    }
+    g_cwd_state = 1;
+    g_cwd_busy = 0;
+    return g_cwd;
+}
+
+/* Does @path contain a ".." component?  The tracer canonicalizes ".." inside
+ * the guest namespace, which is exactly where a bind boundary makes the kernel
+ * disagree, so such names keep the tracer path. */
+static int path_has_dotdot(const char *path) {
+    while (*path != '\0') {
+        const char *start;
+
+        while (*path == '/')
+            path++;
+        start = path;
+        while (*path != '\0' && *path != '/')
+            path++;
+        if (path - start == 2 && start[0] == '.' && start[1] == '.')
+            return 1;
+    }
+    return 0;
+}
+
+/* Translate a relative name at AT_FDCWD through the cached guest cwd.  NULL
+ * means "ask the tracer". */
+static const char *relative_guest_to_host(const char *path, char *buf,
+                                          size_t bufsz) {
+    const char *cwd = guest_cwd();
+    char guest[PATH_MAX];
+    const char *host;
+    size_t clen;
+    int n;
+
+    if (cwd == NULL || path == NULL || path[0] == '\0')
+        return NULL;
+    if (path_has_dotdot(path))
+        return NULL;
+    clen = strlen(cwd);
+    n = snprintf(guest, sizeof guest, "%s%s%s", cwd,
+                 (clen > 1 && cwd[clen - 1] == '/') ? "" : "/", path);
+    if (n < 0 || (size_t)n >= sizeof guest)
+        return NULL;
+    host = to_host(guest, buf, bufsz);
+    if (host == guest)
+        return NULL;
+    STATS_INC(cwd_fast);
+    return host;
+}
+
 /* ---- fake_id0 ---- */
 
 static void disguise_ids_stat(struct stat *st) {
@@ -569,13 +658,14 @@ int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
      * when --stat-shim is off.  Without that channel fall back to the guest
      * cwd the tracer reports for getcwd(). */
     if (dirfd == AT_FDCWD && path != NULL && path[0] != '/') {
-        if (g_have_notif) {
+        host = g_have_notif ? relative_guest_to_host(path, buf, sizeof(buf))
+                            : relative_to_host(path, buf, sizeof(buf));
+        if (host == NULL) {
             STATS_INC(notif_rel_fdcwd);
             if (tracer_fstatat(dirfd, path, st, flags))
                 return 0;
             return -1;
         }
-        host = relative_to_host(path, buf, sizeof(buf));
     } else {
         host = to_host(path, buf, sizeof(buf));
     }
@@ -651,13 +741,14 @@ int statx(int dirfd, const char *path, int flags, unsigned int mask,
     stats_classify(dirfd, path, flags);
     /* Same virtual-cwd rule as fstatat(). */
     if (dirfd == AT_FDCWD && path != NULL && path[0] != '/') {
-        if (g_have_notif) {
+        host = g_have_notif ? relative_guest_to_host(path, buf, sizeof(buf))
+                            : relative_to_host(path, buf, sizeof(buf));
+        if (host == NULL) {
             STATS_INC(notif_rel_fdcwd);
             if (tracer_statx(dirfd, path, flags, mask, stx))
                 return 0;
             return -1;
         }
-        host = relative_to_host(path, buf, sizeof(buf));
     } else {
         host = to_host(path, buf, sizeof(buf));
     }
@@ -727,6 +818,22 @@ int fstat(int fd, struct stat *st) {
     if (r == 0)
         disguise_ids_stat(st);
     return r;
+}
+
+/* chdir()/fchdir() only move the *virtual* cwd (the tracer emulates them and
+ * leaves the tracee's real cwd alone), so they have to drop the cached guest
+ * cwd: the next relative name re-reads it with getcwd().  A program that
+ * changes directory without going through one of these (or through
+ * syscall(), handled below) would leave the cache stale, which is why every
+ * uncertain case still ends up at the tracer. */
+int chdir(const char *path) {
+    forget_guest_cwd();
+    return (int)raw_syscall6(SYS_chdir, (long)path, 0, 0, 0, 0, 0);
+}
+
+int fchdir(int fd) {
+    forget_guest_cwd();
+    return (int)raw_syscall6(SYS_fchdir, fd, 0, 0, 0, 0, 0);
 }
 
 int stat(const char *path, struct stat *st) {
@@ -870,6 +977,15 @@ long syscall(long number, ...) {
     a5 = va_arg(ap, long);
     a6 = va_arg(ap, long);
     va_end(ap);
+
+#ifdef SYS_chdir
+    if (number == SYS_chdir)
+        forget_guest_cwd();
+#endif
+#ifdef SYS_fchdir
+    if (number == SYS_fchdir)
+        forget_guest_cwd();
+#endif
 
     switch (number) {
 #ifdef SYS_newfstatat
