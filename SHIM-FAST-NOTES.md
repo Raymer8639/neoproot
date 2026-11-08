@@ -48,7 +48,8 @@
 ## 验证（未跑任何计时基准）
 
 - 宿主构建：`sh build.sh --without-um`；musl shim `sh stat-shim/build-musl.sh`；
-  glibc shim `CC=gcc sh stat-shim/build.sh stat-shim`（Arch 内）。
+  glibc shim 在 Arch 容器内 gcc 构建（等价 `CC=gcc sh stat-shim/build.sh`），
+  宿主上同一条 build.sh 也能编过（bionic ABI，仅作编译检查）。
 - Alpine 3.21.3 guest（musl 1.2.5）功能对照：33 个用例 × 开/关 shim **逐字节
   相同**——busybox stat、`ls -l`、`du`、相对路径与 `..`、dirfd 相对名、
   `/bin/sh` 符号链接、断链、`-b` bind（绝对/相对/cwd 在 bind 内）、
@@ -56,6 +57,9 @@
 - Arch glibc guest 抽查（带/不带 `--stat-shim`）：输出相同。
 - 仓库测试：`tests/test-stat-shim-raw-stat.sh`、
   `tests/test-link2symlink-stat-guard.sh` 通过。
+- `stat-shim/shim_test` 在本机跑不了（Termux 宿主没有可写 `/tmp`；Arch 容器本身
+  就跑在 neoproot+shim 里，constructor 与内层 shim 冲突），故功能对照以 guest A/B
+  为准。
 - 计数器前后对比见上表（同一棵树、同一个 tracer 构建）。
 
 ## 风险与后续
