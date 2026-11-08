@@ -6,9 +6,9 @@
 #   ARM64 Linux (glibc):      downloads the matching release binary, verifies
 #                             it against SHA256SUMS and installs it.
 #
-# The script only writes into a bin directory. It never touches a container
-# rootfs: the stat-shim library belongs to the guest and must be built there
-# (see stat-shim/README.md).
+# The script writes into a bin directory. A container rootfs is touched only
+# when --shim-rootfs is given: the stat-shim library belongs to the guest, so
+# it is copied (never built) there in the ABI the rootfs loader implies.
 #
 # Usage:
 #   curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/install.sh | sh
@@ -27,6 +27,7 @@ LOG=""
 LANG_CHOICE=""   # en | zh   (asked first, or from --lang / NEOPROOT_LANG)
 ASSUME_YES=0
 SHIM_ROOTFS=""
+SHIM_ABI=""
 UM_KERNEL_OVERRIDE=""
 WITH_UM=""
 WITH_SHIM=""
@@ -133,6 +134,8 @@ Options:
   --with-um / --without-um      include the UML backend (default: ask)
   --with-shim / --without-shim  include the stat shim (default: ask)
   --shim-rootfs DIR             copy the shim into this container rootfs
+  --shim-abi ABI                force the guest ABI for --shim-rootfs: musl or
+                                glibc (default: read the rootfs loader)
   -y, --yes       accept every default, ask nothing
   --interactive / --non-interactive  force or suppress the questions
                   (also settable with NEOPROOT_INSTALL_MODE)
@@ -161,6 +164,7 @@ while [ $# -gt 0 ]; do
 		--mode) [ $# -ge 2 ] || die "--mode needs an argument"; MODE=$2; shift 2 ;;
 		--lang) [ $# -ge 2 ] || die "--lang needs an argument"; LANG_CHOICE=$2; shift 2 ;;
 		--shim-rootfs) [ $# -ge 2 ] || die "--shim-rootfs needs an argument"; SHIM_ROOTFS=$2; shift 2 ;;
+		--shim-abi) [ $# -ge 2 ] || die "--shim-abi needs an argument"; SHIM_ABI=$2; shift 2 ;;
 		--with-um) WITH_UM=1; shift ;;
 		--without-um) WITH_UM=0; shift ;;
 		--with-shim) WITH_SHIM=1; shift ;;
@@ -172,6 +176,11 @@ while [ $# -gt 0 ]; do
 		*) die "unknown option: $1 (try --help)" ;;
 	esac
 done
+
+case "$SHIM_ABI" in
+	''|musl|glibc) ;;
+	*) die "--shim-abi must be musl or glibc: $SHIM_ABI" ;;
+esac
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -269,7 +278,56 @@ write_state() { # write_state PREFIX TAG PORTABLE
 	return 0
 }
 
+# Which libc owns this rootfs.  Kept in step with shim_abi_for_rootfs() in
+# the source installer; this script is a standalone release asset, so it cannot
+# source that file.  The loader name is the marker: musl and glibc cannot load
+# each other's LD_PRELOAD libraries, and a wrong copy only fails inside the
+# guest, after the install claimed success.
+_rootfs_abi() { # _rootfs_abi ROOTFS -> musl|glibc, or 1 with a reason
+	_ra_rootfs=$1
+	_ra_musl=
+	_ra_glibc=
+	if [ -e "$_ra_rootfs/lib/ld-musl-aarch64.so.1" ] ||
+		[ -L "$_ra_rootfs/lib/ld-musl-aarch64.so.1" ]; then
+		_ra_musl=1
+	fi
+	if [ -e "$_ra_rootfs/lib/ld-linux-aarch64.so.1" ] ||
+		[ -L "$_ra_rootfs/lib/ld-linux-aarch64.so.1" ] ||
+		[ -e "$_ra_rootfs/lib64/ld-linux-aarch64.so.1" ] ||
+		[ -L "$_ra_rootfs/lib64/ld-linux-aarch64.so.1" ]; then
+		_ra_glibc=1
+	fi
+	if [ -n "$_ra_musl" ] && [ -z "$_ra_glibc" ]; then
+		printf 'musl\n'
+		return 0
+	fi
+	if [ -n "$_ra_glibc" ] && [ -z "$_ra_musl" ]; then
+		printf 'glibc\n'
+		return 0
+	fi
+	if [ -n "$_ra_musl" ]; then
+		warn "$_ra_rootfs has both musl and glibc loaders; pass --shim-abi musl|glibc"
+	else
+		warn "$_ra_rootfs has no aarch64 loader (lib/ld-musl-aarch64.so.1, lib/ld-linux-aarch64.so.1 or lib64/ld-linux-aarch64.so.1); pass --shim-abi musl|glibc"
+	fi
+	return 1
+}
+
+# Read the ABI a .so was linked against, when readelf is available.  "unknown"
+# means "cannot tell", not "wrong": the download is still used by file name.
+_shim_file_abi() { # _shim_file_abi FILE -> musl|glibc|unknown
+	_sfa_needed=$(readelf -d "$1" 2>/dev/null || true)
+	case "$_sfa_needed" in
+	*libc.musl-*.so.1*) printf 'musl\n' ;;
+	*libc.so.6*) printf 'glibc\n' ;;
+	*) printf 'unknown\n' ;;
+	esac
+}
+
 # Put the shim into a container rootfs, which is the only place it can work.
+# The ABI decides the asset: libstatfast.so for glibc, libstatfast-musl.so for
+# musl.  Both are copied as libstatfast.so because that is the name the tracer
+# auto-discovers.
 _install_shim_into() { # _install_shim_into ROOTFS
 	_si_rootfs=$1
 	case "$_si_rootfs" in
@@ -277,29 +335,56 @@ _install_shim_into() { # _install_shim_into ROOTFS
 	*) warn "--shim-rootfs needs an absolute path: $_si_rootfs"; return 0 ;;
 	esac
 	[ -d "$_si_rootfs" ] || { warn "no such rootfs: $_si_rootfs"; return 0; }
+	if [ -n "$SHIM_ABI" ]; then
+		_si_abi=$SHIM_ABI
+	else
+		_si_abi=$(_rootfs_abi "$_si_rootfs") || return 0
+	fi
+	case "$_si_abi" in
+	musl) _si_asset=libstatfast-musl.so ;;
+	glibc) _si_asset=libstatfast.so ;;
+	*) warn "unknown shim ABI: $_si_abi"; return 0 ;;
+	esac
+
 	_si_src=
-	for _si_candidate in \
-		"$_si_rootfs/opt/neoproot/libstatfast.so" \
-		"${PREFIX:-/nonexistent}/libexec/neoproot/libstatfast.so"; do
-		[ -r "$_si_candidate" ] && _si_src=$_si_candidate && break
-	done
+	# A cached copy of the matching asset saves the download.  The rootfs's
+	# existing libstatfast.so is reused only when readelf confirms its ABI;
+	# an old install may hold the other variant under the same name.
+	_si_cache="${PREFIX:-/nonexistent}/libexec/neoproot/$_si_asset"
+	if [ -r "$_si_cache" ]; then
+		_si_src=$_si_cache
+	elif [ -r "$_si_rootfs/opt/neoproot/libstatfast.so" ] &&
+		[ "$(_shim_file_abi "$_si_rootfs/opt/neoproot/libstatfast.so")" = "$_si_abi" ]; then
+		_si_src=$_si_rootfs/opt/neoproot/libstatfast.so
+	fi
 	if [ -z "$_si_src" ]; then
 		# The shim ships as a release asset, so fetch it rather than requiring
 		# a source tree next to the installer.
 		_si_tmp=$(mktemp "${TMPDIR:-/tmp}/libstatfast.XXXXXX") || return 0
 		_si_tag=$(resolve_tag)
-		if fetch "https://github.com/$REPO/releases/download/$_si_tag/libstatfast.so" "$_si_tmp" 2>/dev/null; then
+		if fetch "https://github.com/$REPO/releases/download/$_si_tag/$_si_asset" "$_si_tmp" 2>/dev/null; then
 			_si_src=$_si_tmp
 		else
 			rm -f "$_si_tmp"
-			warn "could not fetch libstatfast.so; the shim was not installed into $_si_rootfs"
+			if [ "$_si_abi" = musl ]; then
+				warn "the $_si_tag release has no libstatfast-musl.so"
+				warn "musl roots need a source build (stat-shim/build-musl.sh) or a musl libstatfast.so placed in $_si_rootfs/opt/neoproot manually"
+			else
+				warn "could not fetch libstatfast.so; the shim was not installed into $_si_rootfs"
+			fi
 			return 0
 		fi
+	fi
+
+	_si_got_abi=$(_shim_file_abi "$_si_src")
+	if [ "$_si_got_abi" != unknown ] && [ "$_si_got_abi" != "$_si_abi" ]; then
+		warn "$_si_src is a $_si_got_abi shim, not $_si_abi; refusing to install it into $_si_rootfs"
+		return 0
 	fi
 	mkdir -p "$_si_rootfs/opt/neoproot" 2>/dev/null || return 0
 	cp -f "$_si_src" "$_si_rootfs/opt/neoproot/libstatfast.so" 2>/dev/null || return 0
 	chmod 755 "$_si_rootfs/opt/neoproot/libstatfast.so" 2>/dev/null
-	log "shim installed into $_si_rootfs/opt/neoproot/libstatfast.so"
+	log "shim ($_si_abi) installed into $_si_rootfs/opt/neoproot/libstatfast.so"
 	return 0
 }
 
@@ -647,9 +732,12 @@ else
 		install_um_runtime "$PREFIX_DIR"
 	fi
 	write_state "$PREFIX_DIR" "$tag" "$PORTABLE"
-	if [ "${WITH_SHIM:-1}" = 1 ] && [ -n "$SHIM_ROOTFS" ]; then
-		_install_shim_into "$SHIM_ROOTFS"
-	fi
+fi
+
+# --shim-rootfs is about the guest, not the host: it applies to the source
+# build on Termux just as much as to the downloaded Linux binary.
+if [ "${WITH_SHIM:-1}" = 1 ] && [ -n "$SHIM_ROOTFS" ]; then
+	_install_shim_into "$SHIM_ROOTFS"
 fi
 
 next_steps
