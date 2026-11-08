@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <fcntl.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 #include "execve/execve.h"
 #include "execve/shebang.h"
@@ -396,6 +398,135 @@ patch_env:
 extern unsigned char _binary_loader_exe_start;
 extern unsigned char _binary_loader_exe_end;
 
+/*
+ * The loader is the same blob on every run of this binary, and every run used
+ * to write it to a fresh temp file that nothing ever removed.  Instead,
+ * publish it once under a name derived from its content and reuse that file
+ * while its bytes still match the embedded copy.
+ *
+ * The name is only a hint: the file is re-read and compared byte for byte
+ * before it is handed to a tracee.  That is what makes it safe to keep in a
+ * shared temp directory -- a stale file from an older build, a truncated
+ * write, or somebody else's file with the same name is replaced, never
+ * executed.  The check also covers the failure mode a write-then-exec cannot
+ * see: a crash between rename and writeback leaves a short file, which is
+ * detected and rewritten on the next run.
+ */
+static uint64_t loader_fingerprint(const unsigned char *data, size_t len)
+{
+	uint64_t hash = 1469598103934665603ULL;
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		hash ^= data[i];
+		hash *= 1099511628211ULL;
+	}
+	return hash;
+}
+
+static bool loader_cache_matches(int fd, const unsigned char *data, size_t len)
+{
+	struct stat st;
+	unsigned char buffer[8192];
+	size_t offset = 0;
+
+	if (fstat(fd, &st) < 0)
+		return false;
+	if (!S_ISREG(st.st_mode) || st.st_size != (off_t)len)
+		return false;
+	if (st.st_uid != geteuid())
+		return false;
+	if ((st.st_mode & (S_IRUSR | S_IXUSR)) != (S_IRUSR | S_IXUSR))
+		return false;
+
+	while (offset < len) {
+		size_t chunk = len - offset;
+		ssize_t got;
+
+		if (chunk > sizeof(buffer))
+			chunk = sizeof(buffer);
+		got = read(fd, buffer, chunk);
+		if (got <= 0)
+			return false;
+		if (memcmp(buffer, data + offset, (size_t)got) != 0)
+			return false;
+		offset += (size_t)got;
+	}
+	return true;
+}
+
+static bool loader_cache_lookup(const char *path, const unsigned char *data,
+				size_t len)
+{
+	int fd;
+	bool ok;
+
+	if (access(path, X_OK) != 0)
+		return false;
+	fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+	if (fd < 0)
+		return false;
+	ok = loader_cache_matches(fd, data, len);
+	close(fd);
+	return ok;
+}
+
+static bool write_whole_file(int fd, const unsigned char *data, size_t len)
+{
+	while (len > 0) {
+		ssize_t written = write(fd, data, len);
+
+		if (written < 0) {
+			if (errno == EINTR)
+				continue;
+			return false;
+		}
+		if (written == 0)
+			return false;
+		data += written;
+		len -= (size_t)written;
+	}
+	return true;
+}
+
+/*
+ * Write the loader beside its final name and rename it into place, so a
+ * concurrent neoproot never observes a partially written cache file.  If the
+ * rename loses a race, the winner has the same bytes by construction; if it
+ * still does not match, this run keeps its private temporary file.
+ */
+static char *publish_loader(const char *directory, const char *path,
+			    const unsigned char *data, size_t len)
+{
+	char temporary[PATH_MAX];
+	int fd;
+
+	if (snprintf(temporary, sizeof(temporary), "%s/.proot-loader-XXXXXX",
+		     directory) >= (int)sizeof(temporary))
+		return NULL;
+
+	fd = mkstemp(temporary);
+	if (fd < 0)
+		return NULL;
+
+	if (!write_whole_file(fd, data, len)
+	    || fchmod(fd, S_IRUSR | S_IXUSR) < 0) {
+		close(fd);
+		unlink(temporary);
+		return NULL;
+	}
+	close(fd);
+
+	if (rename(temporary, path) < 0) {
+		if (loader_cache_lookup(path, data, len)) {
+			unlink(temporary);
+			return talloc_strdup(g_loader_ctx, path);
+		}
+		return talloc_strdup(g_loader_ctx, temporary);
+	}
+	return talloc_strdup(g_loader_ctx, path);
+}
+
 static char *extract_loader(void)
 {
 	char path[PATH_MAX];
@@ -405,18 +536,41 @@ static char *extract_loader(void)
 	FILE *f;
 	char *out = NULL;
 	ssize_t w;
+	const char *cache_switch;
 
 	if (!g_loader_ctx)
 		return NULL;
+
+	start = &_binary_loader_exe_start;
+	len   = (size_t)(&_binary_loader_exe_end - &_binary_loader_exe_start);
+
+	/*
+	 * PROOT_MEMFD_LOADER has been exported by the launcher since the
+	 * beginning without a reader.  It now selects the shared loader file;
+	 * "0" keeps the old private-temp-file behaviour for callers that need
+	 * the loader gone when neoproot exits.
+	 */
+	cache_switch = getenv("PROOT_MEMFD_LOADER");
+	if (cache_switch == NULL || strcmp(cache_switch, "0") != 0) {
+		const char *directory = get_temp_directory();
+		uint64_t fingerprint = loader_fingerprint(start, len);
+
+		if (snprintf(path, sizeof(path), "%s/proot-loader-v1-%016llx",
+			     directory, (unsigned long long)fingerprint)
+		    < (int)sizeof(path)) {
+			if (loader_cache_lookup(path, start, len))
+				return talloc_strdup(g_loader_ctx, path);
+			out = publish_loader(directory, path, start, len);
+			if (out != NULL)
+				return out;
+		}
+	}
 
 	f = open_temp_file(NULL, "proot-loader");
 	if (!f)
 		return NULL;
 
 	fd = fileno(f);
-
-	start = &_binary_loader_exe_start;
-	len   = &_binary_loader_exe_end - &_binary_loader_exe_start;
 
 	w = write(fd, start, len);
 	if (UNLIKELY((size_t)w != len))
