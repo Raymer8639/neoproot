@@ -16,7 +16,8 @@
 #   CC                 compiler [clang]
 #   ALPINE_VERSION     Alpine branch [3.21]
 #   ALPINE_ARCH        package architecture [aarch64]
-#   ALPINE_MIRROR      mirror root [https://mirrors.ustc.edu.cn/alpine]
+#   ALPINE_MIRROR      mirror roots, tried in order, space separated
+#                      [https://mirrors.ustc.edu.cn/alpine https://dl-cdn.alpinelinux.org/alpine]
 #   MUSL_PKG_VERSION   musl/musl-dev version [auto: newest in APKINDEX]
 #   MUSL_SYSROOT       extracted headers/libc [<scratch>/musl-sysroot]
 #   MUSL_APK_CACHE     downloaded apks [<scratch>/musl-apk]
@@ -39,7 +40,7 @@ fi
 : "${CC:=clang}"
 : "${ALPINE_VERSION:=3.21}"
 : "${ALPINE_ARCH:=aarch64}"
-: "${ALPINE_MIRROR:=https://mirrors.ustc.edu.cn/alpine}"
+: "${ALPINE_MIRROR:=https://mirrors.ustc.edu.cn/alpine https://dl-cdn.alpinelinux.org/alpine}"
 : "${MUSL_PKG_VERSION:=auto}"
 : "${MUSL_SYSROOT:=$scratch/musl-sysroot}"
 : "${MUSL_APK_CACHE:=$scratch/musl-apk}"
@@ -53,17 +54,25 @@ need awk
 
 mkdir -p "$out" "$MUSL_APK_CACHE" "$MUSL_SYSROOT"
 
-repo="$ALPINE_MIRROR/v$ALPINE_VERSION/main/$ALPINE_ARCH"
 index="$MUSL_APK_CACHE/APKINDEX.tar.gz"
+first_mirror=$(echo "$ALPINE_MIRROR" | awk '{print $1}')
+repo="$first_mirror/v$ALPINE_VERSION/main/$ALPINE_ARCH"
 
-# Refresh the index; fall back to a cached copy when offline.
-if curl -fsSL --retry 3 --max-time 60 -o "$index.part" "$repo/APKINDEX.tar.gz"; then
-    mv -f "$index.part" "$index"
-elif [ -f "$index" ]; then
-    echo "build-musl: warning: using cached APKINDEX" >&2
-else
-    die "cannot download $repo/APKINDEX.tar.gz"
+# Refresh the index from the first mirror that answers; some mirrors refuse CI
+# runners or a given network, so the list is tried in order.  A cached index is
+# still usable when every mirror is unreachable.
+if [ ! -f "$index" ] || [ "${BUILD_MUSL_REFRESH:-1}" = 1 ]; then
+    for mirror in $ALPINE_MIRROR; do
+        candidate="$mirror/v$ALPINE_VERSION/main/$ALPINE_ARCH"
+        if curl -fsSL --retry 3 --max-time 60 -o "$index.part" "$candidate/APKINDEX.tar.gz"; then
+            mv -f "$index.part" "$index"
+            repo=$candidate
+            break
+        fi
+        echo "build-musl: mirror refused, trying the next one: $candidate" >&2
+    done
 fi
+[ -s "$index" ] || die "cannot download APKINDEX.tar.gz from any mirror: $ALPINE_MIRROR"
 
 if [ "$MUSL_PKG_VERSION" = auto ]; then
     MUSL_PKG_VERSION=$(tar -xzOf "$index" APKINDEX | awk '
@@ -83,9 +92,18 @@ for pkg in musl musl-dev; do
     apk="$MUSL_APK_CACHE/$pkg-$MUSL_PKG_VERSION.apk"
     if [ ! -s "$apk" ]; then
         echo "build-musl: downloading $pkg-$MUSL_PKG_VERSION.apk"
-        curl -fsSL --retry 3 --max-time 300 -o "$apk.part" \
-            "$repo/$pkg-$MUSL_PKG_VERSION.apk" || die "download failed: $pkg"
-        mv -f "$apk.part" "$apk"
+        downloaded=
+        for mirror in $ALPINE_MIRROR; do
+            candidate="$mirror/v$ALPINE_VERSION/main/$ALPINE_ARCH"
+            if curl -fsSL --retry 3 --max-time 300 -o "$apk.part" \
+                "$candidate/$pkg-$MUSL_PKG_VERSION.apk"; then
+                mv -f "$apk.part" "$apk"
+                downloaded=1
+                break
+            fi
+            echo "build-musl: mirror refused, trying the next one: $candidate" >&2
+        done
+        [ -n "$downloaded" ] || die "download failed: $pkg (tried: $ALPINE_MIRROR)"
     fi
     tar --ignore-zeros -xzf "$apk" -C "$MUSL_SYSROOT" 2>/dev/null \
         || die "cannot extract $apk"
