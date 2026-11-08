@@ -8,10 +8,8 @@
 #if defined(HAVE_SECCOMP_FILTER)
 
 #include <sys/prctl.h>
-#include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <sys/syscall.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -86,64 +84,36 @@ int probe_seccomp_user_notif(void)
 #ifndef __NR_seccomp
     return -ENOSYS;
 #else
-    int pipefd[2];
-    pid_t pid;
-    int status;
-    int child_errno = 0;
-    ssize_t n;
+    /*
+     * This used to fork a probe that installed a real NEW_LISTENER filter and
+     * reported the result through a pipe.  That cost a process on every
+     * --seccomp-notify launch, and the filter itself is irreversible: it
+     * cannot be installed and rolled back in the tracer, so the probe was
+     * necessarily a separate process.
+     *
+     * Two read-only queries answer the same question without changing the
+     * process.  GET_ACTION_AVAIL says the kernel knows SECCOMP_RET_USER_NOTIF;
+     * GET_NOTIF_SIZES, which appeared with USER_NOTIF in Linux 5.0, says the
+     * listener ABI is there and gives the buffer sizes ensure_notif_bufs()
+     * needs.  NEW_LISTENER is the only way to obtain a USER_NOTIF listener,
+     * so a kernel that advertises the action necessarily has the flag.
+     *
+     * Installation policy is not probed here any more.  If an outer sandbox
+     * lets seccomp queries through but refuses NEW_LISTENER, set_seccomp_filters()
+     * fails in the launched child with the same errno and the launch fails;
+     * the old fork probe could not change that outcome either, it only
+     * reported it before the fork.
+     */
+    uint32_t action = SECCOMP_RET_USER_NOTIF;
+    struct seccomp_notif_sizes sizes = { 0 };
 
-    if (pipe(pipefd) < 0)
+    if (syscall(__NR_seccomp, SECCOMP_GET_ACTION_AVAIL, 0, &action) < 0)
         return -errno;
-
-    pid = fork();
-    if (pid < 0) {
-        int saved = errno;
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return -saved;
-    }
-
-    if (pid == 0) {
-        struct sock_filter filter[] = {
-            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_getppid, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        };
-        struct sock_fprog prog = {
-            .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
-            .filter = filter,
-        };
-        int fd;
-        int e;
-
-        close(pipefd[0]);
-        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
-            e = errno ? errno : EPERM;
-            (void)write(pipefd[1], &e, sizeof(e));
-            _exit(1);
-        }
-        fd = (int)syscall(__NR_seccomp, SECCOMP_SET_MODE_FILTER,
-                          SECCOMP_FILTER_FLAG_NEW_LISTENER, &prog);
-        if (fd < 0) {
-            e = errno ? errno : EINVAL;
-            (void)write(pipefd[1], &e, sizeof(e));
-            _exit(1);
-        }
-        close(fd);
-        _exit(0);
-    }
-
-    close(pipefd[1]);
-    n = read(pipefd[0], &child_errno, sizeof(child_errno));
-    close(pipefd[0]);
-    if (waitpid(pid, &status, 0) < 0)
+    if (syscall(__NR_seccomp, SECCOMP_GET_NOTIF_SIZES, 0, &sizes) < 0)
         return -errno;
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
-        return 0;
-    if (n == (ssize_t)sizeof(child_errno) && child_errno != 0)
-        return -child_errno;
-    return -EPERM;
+    if (sizes.seccomp_notif == 0 || sizes.seccomp_notif_resp == 0)
+        return -EINVAL;
+    return 0;
 #endif
 }
 

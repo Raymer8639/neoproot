@@ -212,6 +212,9 @@
 #    ifndef SECCOMP_GET_ACTION_AVAIL
 #        define SECCOMP_GET_ACTION_AVAIL	2
 #    endif
+#    ifndef SECCOMP_GET_NOTIF_SIZES
+#        define SECCOMP_GET_NOTIF_SIZES	3
+#    endif
 #    ifndef SECCOMP_FILTER_FLAG_NEW_LISTENER
 #        define SECCOMP_FILTER_FLAG_NEW_LISTENER	(1UL << 3)
 #    endif
