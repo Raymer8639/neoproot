@@ -3,6 +3,24 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v6.0.2.1] - 2026-11-08
+
+**启动不再刷警告；一键安装器两处修复**
+
+- 容器每次启动都会打两条 WARNING（`stat-shim: ... newfstatat/statx/fstatat64 are NOT
+  traced`、`seccomp-notify: USER_NOTIF listener ready`）。这两条描述的其实是正常路径，
+  天天看到只会教人忽略警告。现在合并成一条 INFO，**只在 `-v 1` 打印**：
+  `neoproot info: fast path: stat shim + seccomp USER_NOTIF`；默认启动完全静默。
+- 修复 `neoproot-um` 不随安装更新：`neoproot` 本身就带 UML supervisor，`neoproot-um` 是
+  同一二进制换名字（argv[0] 分发），但安装器只写 `neoproot`，升级后 `bin/neoproot-um`
+  仍是旧版独立二进制。现在 `WITH_UM=1` 时刷新为 `-> neoproot` 相对链接（旧文件备份
+  `neoproot-um.prev-<时间戳>`），已有 `uproot` 一并维护；`--without-um` 时旧文件改名
+  `.stale-<时间戳>`，避免跑到错误的程序。新增 `tests/test-installer-links.sh`。
+- 修复 `--shim-rootfs` 静默失效：`_install_shim_into` 曾把 rootfs 里**已有的**
+  `libstatfast.so` 当作源文件，更新时源=目标，`cp` 报 `are the same file` 又被
+  `2>/dev/null || return 0` 吞掉 —— 结果没有任何日志、旧 shim 原封不动，而新 tracer 配旧
+  shim 会让 guest 进程崩溃。现在优先下载当前 tag 的 Release 资产，失败才回退 prefix 缓存，
+  最后才保留同 ABI 的旧文件，每条失败路径都有 `log`/`warn`。
 ## [v6.0.2.0] - 2026-11-08
 
 **stat shim：符号链接与相对名不再回退 tracer**
