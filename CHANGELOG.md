@@ -3,6 +3,20 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v6.0.2.2] - 2026-11-08
+
+**`--shim-rootfs` 不再把 bionic 库装进 glibc guest**
+
+- 事故：在 Termux 上跑 `install.sh --update --shim-rootfs <rootfs>`，Release 资产拉取失败
+  （当天多次 504）后回退到 prefix 缓存，而缓存里是 **Termux/bionic** 版的 `libstatfast.so`
+  （`NEEDED libdl.so` + `libc.so`）。它被复制进 glibc guest 后，容器里**所有程序都起不来**：
+  先报 `libdl.so: cannot open shared object file`，补上 `libdl.so` 后又报
+  `/usr/lib/libc.so: invalid ELF header`（glibc 的 `libc.so` 是链接脚本，不是 ELF）。
+- 原因：`_shim_file_abi` 把 bionic 构建判为 `unknown`，而旧的守卫只拒绝「已知不匹配」，
+  `unknown` 直接放行；缓存分支也完全没有 ABI 检查。
+- 现在：缓存**必须与目标 ABI 一致**才会被使用；`unknown` 与不匹配一样**拒绝安装**，并指明
+  是哪个文件、为什么；缓存不可用时给出明确 warn。装进 guest 的库必须 `NEEDED libc.so.6`
+  （glibc）或 `libc.musl-aarch64.so.1`（musl）。
 ## [v6.0.2.1] - 2026-11-08
 
 **启动不再刷警告；一键安装器两处修复**
