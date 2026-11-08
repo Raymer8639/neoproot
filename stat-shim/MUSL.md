@@ -50,7 +50,12 @@
 
     cd stat-shim && ./build-musl.sh        # 产物 stat-shim/libstatfast-musl.so
 
-安装到 Alpine rootfs（二选一）：
+安装到 Alpine rootfs：源码树里的安装器会从 loader 认出 musl，自动选用这个
+musl 产物，并以固定名字放进 rootfs（tracer 只自动发现这个名字）：
+
+    sh install.sh --shim-rootfs=<rootfs>        # 自动判断 musl/glibc 并复制
+
+也可以手动二选一：
 
     cp libstatfast-musl.so <rootfs>/opt/neoproot/libstatfast.so   # 自动发现
     # 或保留文件名，显式指定：

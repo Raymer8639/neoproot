@@ -113,6 +113,7 @@ jobs:
           PROOT=../src/neoproot sh test-seccomp-notify-cli.sh
           PROOT=../src/neoproot sh test-seccomp-notify-pipe.sh
           PROOT=../src/neoproot sh test-stat-shim-raw-stat.sh
+          sh test-shim-abi.sh
           PROOT=../src/neoproot sh test-exec-env-stack.sh
           PROOT=../src/neoproot sh test-version-branding.sh
           PROOT=../src/neoproot sh test-mount-setattr.sh
