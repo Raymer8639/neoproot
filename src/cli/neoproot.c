@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 
 #include "cli/cli.h"
 
@@ -35,16 +38,100 @@ extern int proot_main(int argc, char *const argv[]);
 extern int neoproot_um_supervisor_main(int argc, char *const argv[]);
 #endif
 
-/* 优先使用 Android 的 /system/bin/sh；
- * 在嵌入式 Linux / 其他环境回退到 /bin/sh，避免 execve 直接失败 */
-static const char *find_shell(void)
+#define NEOPROOT_NOFILE_LIMIT 16384
+
+/*
+ * The old shell bootstrap ran "ulimit -S -n 16384": set the soft limit to
+ * 16384 when the hard limit allows it, leave the hard limit alone, and never
+ * treat failure as fatal.  A hard limit below the target made the shell print
+ * a warning to stderr, which is why the script redirected it; here the same
+ * case leaves the soft limit untouched.
+ */
+static void set_nofile_limit(void)
 {
-    if (access("/system/bin/sh", X_OK) == 0)
-        return "/system/bin/sh";
-    if (access("/bin/sh", X_OK) == 0)
-        return "/bin/sh";
-    /* 两者都不存在时返回默认值，由 execve 报告具体错误 */
-    return "/system/bin/sh";
+    struct rlimit limit;
+    rlim_t wanted = NEOPROOT_NOFILE_LIMIT;
+
+    if (getrlimit(RLIMIT_NOFILE, &limit) < 0)
+        return;
+    if (limit.rlim_max != RLIM_INFINITY && wanted > limit.rlim_max)
+        return;
+    if (limit.rlim_cur == wanted)
+        return;
+    limit.rlim_cur = wanted;
+    (void)setrlimit(RLIMIT_NOFILE, &limit);
+}
+
+/*
+ * "termux-wake-lock >/dev/null 2>&1 &": start it, wait for the starter to
+ * exit, and never wait for the daemon itself.  A single fork would leave a
+ * zombie for the lifetime of the tracer, and the tracer's event loop reaps
+ * children with waitpid(-1); a second fork hands the long-lived process to
+ * init instead, so neither can happen.  The intermediate child is reaped
+ * immediately, before the tracer starts its own event loop.
+ */
+static void spawn_wake_lock(void)
+{
+    pid_t pid;
+    int status;
+
+    pid = fork();
+    if (pid < 0)
+        return;
+
+    if (pid == 0) {
+        int devnull;
+
+        if (fork() != 0)
+            _exit(0);
+
+        devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            (void)dup2(devnull, STDIN_FILENO);
+            (void)dup2(devnull, STDOUT_FILENO);
+            (void)dup2(devnull, STDERR_FILENO);
+            if (devnull > STDERR_FILENO)
+                close(devnull);
+        }
+        execlp("termux-wake-lock", "termux-wake-lock", (char *)NULL);
+        _exit(127);
+    }
+
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+        ;
+}
+
+static bool prepare_clean_environment(void)
+{
+    (void)unsetenv("LD_PRELOAD");
+    (void)unsetenv("LD_LIBRARY_PATH");
+    (void)unsetenv("LD_BIND_NOW");
+
+    {
+        const char *memfd = getenv("PROOT_MEMFD_LOADER");
+
+        if ((memfd == NULL || memfd[0] == '\0')
+            && setenv("PROOT_MEMFD_LOADER", "1", 1) < 0)
+            return false;
+    }
+    if (setenv("PROOT_UNSET_DONE", "1", 1) < 0)
+        return false;
+    return true;
+}
+
+/*
+ * Exec this same binary again so the dynamic linker starts it without the
+ * LD_* variables just removed.  /proc/self/exe is the reliable spelling when
+ * argv[0] came from PATH; the two fallbacks keep non-Android hosts that do not
+ * mount proc working the way the shell's "exec $0 $@" did.
+ */
+static void restart_clean(char *const argv[])
+{
+    execve("/proc/self/exe", argv, environ);
+    if (argv[0] != NULL && strchr(argv[0], '/') != NULL)
+        execve(argv[0], argv, environ);
+    else if (argv[0] != NULL)
+        execvp(argv[0], argv);
 }
 
 
@@ -391,56 +478,28 @@ int main(int argc, char *const argv[])
 #endif
     }
 
-    // 要传递给termux的命令
-    char *shell_cmd = 
-        "termux-wake-lock >/dev/null 2>&1 & "
-        // -S, not a bare number: a hard limit below 16384 made the shell print
-        // "exceeds allowable nofiles(descriptors) limit" on every run.  -S sets
-        // the soft limit as high as allowed and leaves the hard one alone.
-        "ulimit -S -n 16384 2>/dev/null; "
-        "unset LD_PRELOAD LD_LIBRARY_PATH LD_BIND_NOW ; "
-        "export PROOT_MEMFD_LOADER=${PROOT_MEMFD_LOADER:-1}; "
-        "export PROOT_UNSET_DONE=1; "
-        "exec \"$0\" \"$@\"";
-
-    char **sh_argv = malloc(((size_t)effective_argc + 4) * sizeof(char *));
-    if (!sh_argv) {
-        perror("malloc failed");
-        free(effective_argv);
-        return 1;
+    /*
+     * Termux host preparation, done here instead of through "sh -c".
+     *
+     * The old launcher exec'd /system/bin/sh with a small script that started
+     * the wake-lock, raised the descriptor limit, cleared the LD_* variables
+     * and re-exec'd neoproot.  That costs an extra exec and a shell parse on
+     * every launch.  The same steps are cheap C calls; the one thing that
+     * still needs a fresh process is clearing LD_*: Termux preloads
+     * libtermux-exec-ld-preload.so, welcome in the guest but not in the
+     * tracer, and unsetenv() cannot unload it from this process.  So re-exec
+     * /proc/self/exe directly -- one exec instead of shell + exec -- and let
+     * the second image enter proot_main.
+     */
+    if (getenv("PROOT_UNSET_DONE") == NULL) {
+        spawn_wake_lock();
+        set_nofile_limit();
+        if (prepare_clean_environment())
+            restart_clean(effective_argv);
+        /* A re-exec that cannot happen still gets a usable tracer. */
     }
 
-    int idx = 0;
-    sh_argv[idx++] = (char *)find_shell();
-    sh_argv[idx++] = "-c";
-    sh_argv[idx++] = shell_cmd;
-    sh_argv[idx++] = effective_argv[0];
-
-    for (int i = 1; i < effective_argc; i++) {
-        sh_argv[idx++] = effective_argv[i];
-    }
-    sh_argv[idx] = NULL;
-
-    // 执行完shell环境初始化后，直接走 proot_main
-    if (getenv("PROOT_UNSET_DONE")) {
-        free(sh_argv);
-        int status = proot_main(effective_argc, effective_argv);
-
-        free(effective_argv);
-        return status;
-    }
-
-    // 首选 shell 执行失败时（例如 proot 容器内 /system 目录不可 exec），
-    // 自动回退到 /bin/sh 再试一次
-    if (execve(sh_argv[0], sh_argv, environ) != 0
-        && strcmp(sh_argv[0], "/system/bin/sh") == 0
-        && access("/bin/sh", X_OK) == 0) {
-        sh_argv[0] = "/bin/sh";
-        execve(sh_argv[0], sh_argv, environ);
-    }
-
-    perror("execve shell failed");
-    free(sh_argv);
+    int status = proot_main(effective_argc, effective_argv);
     free(effective_argv);
-    return 1;
+    return status;
 }
