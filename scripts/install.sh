@@ -213,6 +213,30 @@ check_arch() {
 	esac
 }
 
+# neoproot contains the UML supervisor itself: `neoproot-um` is the same
+# executable under another name and argv[0] selects the supervisor command line
+# (src/cli/neoproot.c).  Installing only `neoproot` therefore left an older
+# standalone `neoproot-um` from the previous release in place, still running
+# last year's supervisor beside today's tracer.  Make the name a relative link,
+# keeping any old file as evidence instead of deleting it.
+_link_neoproot_alias() { # _link_neoproot_alias BIN_DIR NAME
+	_la_dir=$1
+	_la_name=$2
+	_la_target=$_la_dir/$_la_name
+	if [ -L "$_la_target" ] && [ "$(readlink "$_la_target")" = "neoproot" ]; then
+		return 0
+	fi
+	if [ -e "$_la_target" ] || [ -L "$_la_target" ]; then
+		_la_stamp=$(date +%Y%m%d-%H%M%S)
+		mv -f "$_la_target" "$_la_target.prev-$_la_stamp" \
+			|| { warn "cannot move $_la_target out of the way"; return 0; }
+		log "previous $_la_name kept as $_la_target.prev-$_la_stamp"
+	fi
+	ln -sf neoproot "$_la_target" \
+		|| { warn "cannot link $_la_target -> neoproot"; return 0; }
+	log "installed $_la_target -> neoproot"
+}
+
 install_binary() { # install_binary NEW_BINARY PREFIX
 	# Every variable here is prefixed: POSIX sh has no locals, and clobbering the
 	# caller's workdir would make the EXIT trap clean up the wrong path (leaking
@@ -233,6 +257,27 @@ install_binary() { # install_binary NEW_BINARY PREFIX
 		|| die "cannot install into $bin_dir"
 	log "installed $bin_target"
 	"$bin_target" --version 2>/dev/null || warn "installed binary did not report a version"
+
+	if [ "${WITH_UM:-1}" = 1 ]; then
+		_link_neoproot_alias "$bin_dir" neoproot-um
+		# `uproot` is the historical name, not a name this installer creates.
+		# When an old install left one, keep it pointing at neoproot instead of
+		# letting it become another stale copy.
+		if [ -e "$bin_dir/uproot" ] || [ -L "$bin_dir/uproot" ]; then
+			_link_neoproot_alias "$bin_dir" uproot
+		fi
+	else
+		# The new binary has no supervisor; a leftover neoproot-um would run
+		# the wrong program.  Rename it rather than deleting it.
+		if [ -e "$bin_dir/neoproot-um" ] || [ -L "$bin_dir/neoproot-um" ]; then
+			bin_stale=$bin_dir/neoproot-um.stale-$(date +%Y%m%d-%H%M%S)
+			if mv -f "$bin_dir/neoproot-um" "$bin_stale"; then
+				log "old neoproot-um moved to $bin_stale (no um backend in this install)"
+			else
+				warn "cannot move the old $bin_dir/neoproot-um out of the way"
+			fi
+		fi
+	fi
 }
 
 # Install the UML runtime beside the binary.
