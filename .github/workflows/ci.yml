@@ -83,12 +83,30 @@ jobs:
           file stat-shim/libstatfast.so
           stat-shim/shim_test
 
+      - name: Build musl stat-shim
+        if: matrix.mode == 'release'
+        run: |
+          # An Alpine/musl guest cannot load the glibc library built above: the
+          # ABI differs, and musl has no struct stat64 or __xstat family. This is
+          # the same script a user runs locally; it fetches the musl headers and
+          # libc from the Alpine aarch64 repository and cross-compiles with clang.
+          sh stat-shim/build-musl.sh stat-shim-musl
+          file stat-shim-musl/libstatfast-musl.so
+
       - name: Upload stat-shim
         if: matrix.mode == 'release'
         uses: actions/upload-artifact@v4
         with:
           name: stat-shim-${{ github.sha }}
           path: stat-shim/libstatfast.so
+          if-no-files-found: error
+
+      - name: Upload musl stat-shim
+        if: matrix.mode == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stat-shim-musl-${{ github.sha }}
+          path: stat-shim-musl/libstatfast-musl.so
           if-no-files-found: error
 
       - name: Run test suite
@@ -215,11 +233,12 @@ jobs:
           esac
           done
           cp artifacts/stat-shim-*/libstatfast.so dist/libstatfast.so
+          cp artifacts/stat-shim-musl-*/libstatfast-musl.so dist/libstatfast-musl.so
           cp scripts/install.sh dist/install.sh
           chmod +x dist/install.sh
           ls -lh dist
       - name: Generate checksums
-        run: (cd dist && sha256sum neoproot neoproot-portable neoproot-um neoproot-um-portable libstatfast.so > SHA256SUMS)
+        run: (cd dist && sha256sum neoproot neoproot-portable neoproot-um neoproot-um-portable libstatfast.so libstatfast-musl.so > SHA256SUMS)
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

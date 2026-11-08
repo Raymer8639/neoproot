@@ -26,6 +26,13 @@
 - README、`stat-shim/README.md` 与 `stat-shim/MUSL.md` 补充按 ABI 安装的
   说明。
 
+**发布产物带上 musl 版 shim**
+
+- 发布 workflow 在 `ubuntu-24.04-arm` 上用 `stat-shim/build-musl.sh` 额外构建
+  `libstatfast-musl.so`，作为独立 artifact 进入 Release，并计入 `SHA256SUMS`。
+  一键安装器因此能在 Alpine/musl rootfs 上直接拿到可用的 shim，不再需要用户
+  自己编译。
+
 ## [v6.0.0.0] - 2026-10-31
 
 **Out of the box: one command, every piece fetched from where it is published**

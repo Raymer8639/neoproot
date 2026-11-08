@@ -179,9 +179,11 @@ Alpine's musl headers. A rootfs with both loaders or neither is an error rather
 than a guess: pass `--shim-abi=musl|glibc` to resolve it.
 
 The one-command installer (`scripts/install.sh`, shipped as the release asset
-`install.sh`) downloads `libstatfast-musl.so` when the release publishes it; if
-the asset is absent it says so, and musl roots need the source build above or a
-manual copy of the library into the rootfs.
+`install.sh`) downloads both `libstatfast.so` and `libstatfast-musl.so` — the
+release workflow builds the musl variant alongside the glibc one — and picks
+whichever matches the guest loader. Releases published before that change have
+no musl asset: the installer says so, and a musl root then needs the source
+build above or a manual copy of the library into the rootfs.
 
 ```sh
 # before: remember two flags and a guest path
