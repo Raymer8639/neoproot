@@ -540,6 +540,14 @@ int lstat(const char *path, struct stat *st) {
     return fstatat(AT_FDCWD, path, st, AT_SYMLINK_NOFOLLOW);
 }
 
+/* glibc-only compatibility entry points.
+ *
+ * musl has neither struct stat64 nor the __xstat family: its headers map the
+ * *64 names onto the plain functions and its libc has no versioned stat ABI,
+ * so these stubs would be unreachable symbols over an incomplete type.  Keep
+ * them for glibc guests only; musl's own eaccess() is already a single
+ * faccessat(..., AT_EACCESS) that the tracer translates. */
+#ifdef __GLIBC__
 /* glibc implements eaccess() on top of an *internal* stat() call: a direct
  * intra-libc branch to stat@@GLIBC_2.33, not a PLT call, so LD_PRELOAD cannot
  * interpose that stat().  Under --stat-shim the path-stat syscalls are removed
@@ -646,6 +654,7 @@ int __fxstatat64(int version, int dirfd, const char *path,
     (void)version;
     return fstatat64(dirfd, path, st, flags);
 }
+#endif /* __GLIBC__ */
 
 /* libc's variadic syscall() entry point.  Code that issues the stat syscalls
  * itself (libuv's statx path, for instance) never reaches the wrappers above,
