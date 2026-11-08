@@ -413,10 +413,23 @@ _install_shim_into() { # _install_shim_into ROOTFS
 		_si_origin="$_si_tag release"
 	else
 		rm -f "$_si_tmp"
-		if [ -r "$_si_cache" ]; then
+		if [ -r "$_si_cache" ] && [ "$(_shim_file_abi "$_si_cache")" = "$_si_abi" ]; then
 			_si_src=$_si_cache
 			_si_origin="cached $_si_cache"
 			log "shim ($_si_abi): could not fetch $_si_asset from $_si_tag; using cached $_si_cache"
+		elif [ -r "$_si_cache" ]; then
+			_cache_abi=$(_shim_file_abi "$_si_cache")
+			case "$_cache_abi" in
+			unknown) warn "cached $_si_cache has no readable ABI (Termux/bionic or truncated); ignoring it" ;;
+			*) warn "cached $_si_cache is a $_cache_abi shim, not $_si_abi; ignoring it" ;;
+			esac
+			if [ -r "$_si_dest" ] &&
+				[ "$(_shim_file_abi "$_si_dest")" = "$_si_abi" ]; then
+				log "shim ($_si_abi): could not fetch $_si_asset from $_si_tag; keeping the existing $_si_dest"
+				return 0
+			fi
+			warn "could not fetch $_si_asset from $_si_tag; the shim was not installed into $_si_rootfs"
+			return 0
 		elif [ -r "$_si_dest" ] &&
 			[ "$(_shim_file_abi "$_si_dest")" = "$_si_abi" ]; then
 			# A guest copy of the right ABI is better than nothing when both
@@ -435,10 +448,20 @@ _install_shim_into() { # _install_shim_into ROOTFS
 	fi
 
 	_si_got_abi=$(_shim_file_abi "$_si_src")
-	if [ "$_si_got_abi" != unknown ] && [ "$_si_got_abi" != "$_si_abi" ]; then
+	# "unknown" means readelf saw neither libc.so.6 nor libc.musl-*: a Termux
+	# (bionic) build, a stray file, or a truncated download.  Copying that into a
+	# guest breaks every program there, so refuse instead of guessing.
+	case "$_si_got_abi" in
+	"$_si_abi") ;;
+	unknown)
+		warn "cannot confirm the ABI of $_si_src (neither libc.so.6 nor libc.musl-*); refusing to install it into $_si_rootfs"
+		return 0
+		;;
+	*)
 		warn "$_si_src is a $_si_got_abi shim, not $_si_abi; refusing to install it into $_si_rootfs"
 		return 0
-	fi
+		;;
+	esac
 	mkdir -p "$_si_rootfs/opt/neoproot" ||
 		{ warn "cannot create $_si_rootfs/opt/neoproot"; return 0; }
 	if [ "$_si_src" = "$_si_dest" ]; then
