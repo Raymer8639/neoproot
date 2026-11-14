@@ -7,8 +7,9 @@ temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/neoproot-um-net-auto.XXXXXX")
 trap 'rm -rf "$temporary_directory"' EXIT HUP INT TERM
 mkdir "$temporary_directory/bin"
 export NET_TEST_DIR="$temporary_directory"
-cat >"$temporary_directory/bin/udhcpc" <<'MOCK'
-#!/bin/sh
+native_path=$PATH
+printf '#!%s\n' "$(command -v sh)" >"$temporary_directory/bin/udhcpc"
+cat >>"$temporary_directory/bin/udhcpc" <<'MOCK'
 printf '%s\n' "$*" >>"$NET_TEST_DIR/dhcp-log"
 case "$NET_TEST_MODE" in
     ready|ready-error) touch "$NET_TEST_DIR/address" "$NET_TEST_DIR/route" ;;
@@ -20,8 +21,8 @@ case "$NET_TEST_MODE" in
 esac
 exit 0
 MOCK
-cat >"$temporary_directory/bin/ip" <<'MOCK'
-#!/bin/sh
+printf '#!%s\n' "$(command -v sh)" >"$temporary_directory/bin/ip"
+cat >>"$temporary_directory/bin/ip" <<'MOCK'
 printf '%s\n' "$*" >>"$NET_TEST_DIR/ip-log"
 case "$*" in
     'link set vec0 up') exit 0 ;;
@@ -73,23 +74,21 @@ sh -n "$temporary_directory/wrapper"
 sed -n '/^um_net_.*() {$/,/^um_net_auto$/p' \
     "$temporary_directory/wrapper-ext4" >"$temporary_directory/network-ext4.sh"
 cmp "$temporary_directory/network.sh" "$temporary_directory/network-ext4.sh"
+# Relocate only the proc fixture path; execute the exact generated network logic.
+: >"$temporary_directory/proc-net-dev"
+sed 's@/proc/net/dev@"$NET_TEST_DIR/proc-net-dev"@g' \
+    "$temporary_directory/network.sh" >"$temporary_directory/network-mapped.sh"
 cat >"$temporary_directory/run.sh" <<'RUN'
 #!/bin/sh
-# The managed container may hide /proc/net/dev. Mock only its existence and
-# vec0 presence; address/route predicates use real grep over stateful ip output.
-[() {
-    if test "$#" -eq 3 && test "$1" = -e && test "$2" = /proc/net/dev; then
-        return 0
-    fi
-    command [ "$@"
-}
+# The relocated proc file exists; mock only vec0 presence. Address/route
+# predicates still use real grep over stateful ip output.
 grep() {
     case "$*" in
-        *'/proc/net/dev') [ "$NET_TEST_MODE" != no-vec0 ] ;;
+        *"$NET_TEST_DIR/proc-net-dev") [ "$NET_TEST_MODE" != no-vec0 ] ;;
         *) command grep "$@" ;;
     esac
 }
-. "$NET_TEST_DIR/network.sh"
+. "$NET_TEST_DIR/network-mapped.sh"
 printf '%s\n' guest-command-ran
 RUN
 fail() {
@@ -103,7 +102,7 @@ for NET_TEST_MODE in no-hook address-only route-only ready ready-error dhcp-erro
     rm -f "$temporary_directory/address" "$temporary_directory/route"
     : >"$temporary_directory/ip-log"
     : >"$temporary_directory/dhcp-log"
-    PATH="$temporary_directory/bin:/usr/bin:/bin" sh "$temporary_directory/run.sh" \
+    PATH="$temporary_directory/bin:$native_path" sh "$temporary_directory/run.sh" \
         >"$temporary_directory/output" 2>&1 || fail 'network setup aborted guest'
     grep -q '^guest-command-ran$' "$temporary_directory/output" || fail 'guest not reached'
     case "$NET_TEST_MODE" in
