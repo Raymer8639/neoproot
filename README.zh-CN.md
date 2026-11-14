@@ -255,7 +255,7 @@ companion。该仓库的 `config/smp.config` 和 `config/docker.config` 是构�
 
 UML 内核默认用 `ptrace` 跑 guest 用户态。`--seccomp=auto` 在宿主允许时改用内核的
 seccomp 模式，`--seccomp=on` 强制要求该模式；两者都必须显式打开。同一镜像、同一
-内核、同一探针的两轮真机 A/B：系统调用密集的探针在 ptrace 下用 43–61 秒，在
+内核、同一探针的历史两轮真机 A/B：系统调用密集的探针在 ptrace 下用 43–61 秒，在
 seccomp 下用 4.2–5.1 秒；`getpid` 从 158–221 µs 降到 12.5–13.0 µs，
 `open`+`close` 从 501–503 µs 降到 14–50 µs，`read` 从 209–222 µs 降到
 5.9–13.7 µs。一次性命令的启动时间变化小得多（827 → 751 ms），因为那部分主要耗在
@@ -265,6 +265,56 @@ seccomp 下用 4.2–5.1 秒；`getpid` 从 158–221 µs 降到 12.5–13.0 µs
 seccomp 模式**不是安全边界**。内核文档明确说该过滤器不够严格：guest 用户态可以
 读写全部物理内存，也可以诱使 stub 关掉定时器信号。只对可信 guest 使用；默认仍是
 `ptrace`。
+
+### 分开测量启动与执行
+
+系统调用执行快，不代表启动快。一次性 UM 命令包含 supervisor 初始化、内核启动、
+guest 初始化、命令执行和关机；已启动 guest 内的 syscall 循环测量的是另一段时间。
+本文的 827/751 ms、10.1–13.7 s 和 session 耗时都是不同设备/配置实验的历史数据，
+不能当作当前延迟保证，也不能直接横向比较。
+
+在未被跟踪的宿主上用 Python 3.8+（POSIX）运行
+[tools/benchmark-first-output.py](tools/benchmark-first-output.py)。fast/UM 命令
+均可配置为 JSON argv 数组，工具不做宿主 shell 展开。替换示例路径，并按本机 UM
+安装配置所需的 kernel/stub：
+
+```sh
+python3 tools/benchmark-first-output.py --runs=5 --timeout=60 \
+  --fast-command '["neoproot","--backend=fast","-r","/path/to/rootfs","/bin/sh","-c","printf \"%s\\n\" \"$1\"","bench","{marker}"]' \
+  --um-command '["neoproot","--backend=um","--rootfs=/path/to/rootfs.img","--cow-file=/path/to/rootfs.img.cow","--","/bin/sh","-c","printf \"%s\\n\" \"$1\"","bench","{marker}"]' \
+  > first-output.jsonl
+```
+
+在 guest 命令中放入 `{marker}`，让它单独输出到 stdout，必须以 LF 结尾
+（也接受 CRLF）。每个样本都替换成新的 UUID marker；内核启动日志、stderr、
+包含 marker 的日志片段、EOF 前未结束的行均不计为首条 guest 输出。不要由宿主
+wrapper 打印 marker，也不要打开 shell tracing；这是 guest 输出协议，工具无法
+鉴别完全相同的整行究竟由谁输出。两路输出会并发排空，不会混入工具的 JSONL stdout。
+
+每行 JSONL 记录 backend、sample、展开后的 argv、marker、输出字节数、移除的
+环境变量名，以及用 `time.monotonic_ns` 测得的宿主观测时间：
+
+- `first_output_ms`：从启动到收到完整 guest marker 行。
+- `total_ms`：从启动到观测到启动器退出，包含 UM 关机；启动失败时为 null。
+  退出观测可能滞后一个轮询间隔（最多 50 ms 加宿主调度延迟）。
+- `elapsed_ms`：整个样本耗时，包含管道排空和清理。
+
+这些数据会受管道缓冲、宿主调度影响，`total_ms - first_output_ms` 不是纯 guest
+执行时间。超时样本即使已有 marker 时间也仍然失败。默认每后端 5 次，每轮交替
+fast/UM 顺序，不做隐藏预热；`--timeout` 为每样本的时限，默认 30 秒。比较时请把
+设备、二进制/内核版本、rootfs/COW、syscall 模式、CPU 数和缓存条件与 JSONL 一起保存。
+
+每个命令在独立进程组中启动；超时向该组发送 SIGKILL 并 wait 回收启动器，启动器
+先退出而后代仍持有管道的情况也适用。样本结束时也会终止组内残留进程，因此被测
+命令不能启动常驻服务或通过 setsid 逃离进程组。工具会从传入子进程的环境中删除
+`LD_PRELOAD`、`LD_AUDIT` 和 `NEOPROOT_STATSHIM_*`，并记录变量名；外层 tracer
+仍可能重新注入自己的环境，所以真实跑分必须在 PRoot 外执行。
+
+所有样本都收到完整 marker、退出码为 0 且无超时/错误时，工具才返回 0；任一样本
+失败返回 1，CLI 参数错误返回 2。JSONL 保留各启动器的原始 Python returncode
+（信号退出为负数）、正的 signal 编号、timed_out 标志及启动/I/O error，不能把
+失败样本当成功耗时求平均。本机专属自测：
+`python3 tests/test-benchmark-first-output.py -v`。
 
 ### CPU 数与 ext4 挂载选项
 
@@ -281,7 +331,7 @@ CPU、让按多核准备的负载跑在单核上。
 
 ### 常驻会话（session）
 
-一次性的 `--backend=um` 每个命令都要付一次内核启动：在开发用的手机上约 10.1–13.7 s，跑 `docker run` 无所谓，交互式 shell 就很难受。`neoproot-um session` 只启动一次 guest，之后一直复用：
+一次性的 `--backend=um` 每个命令都要付一次内核启动：开发手机上的历史测量为 10.1–13.7 s，交互式 shell 每次启动都会感受到这笔开销。`neoproot-um session` 只启动一次 guest，之后一直复用：
 
 ```sh
 # 启动一次，guest 留在后台
@@ -298,7 +348,7 @@ neoproot-um session stop
 
 `start` 支持与一次性运行相同的根文件系统选项（`--rootfs`、`--cow-file`、`--hostfs`、`--seccomp`、`--cpus`、`--rootflags`）。`--` 之后的命令会被忽略，命令由 `run` 逐条送入；`run` 支持 `--cwd=DIR` 与 `--timeout=SECONDS`。
 
-同一台手机、单 vCPU、ext4 根实测：启动会话 **15.3 s**，之后每条命令 **0.54–0.68 s**；与「每个命令启动一次」相比大约 3 条命令就回本，15 条命令的批处理从约 178 s 降到 28 s。
+同一台手机、单 vCPU、ext4 根的历史实测：启动会话 **15.3 s**，之后每条命令 **0.54–0.68 s**；与「每个命令启动一次」相比大约 3 条命令就回本，15 条命令的批处理从约 178 s 降到 28 s。
 
 退出码沿用 shell 惯例：超时 `124`，无法进入工作目录 `126`，命令不存在 `127`，被信号打断为 `128+n`。某条命令超时后会话仍然可用。
 

@@ -51,6 +51,7 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-um-supervisor-cli.sh test-um-supervisor-bind-cli.sh \
 	test-um-supervisor-ext4-cli.sh test-um-supervisor-net-argv.sh \
 	test-um-supervisor-seccomp-argv.sh \
+	test-um-supervisor-net-auto.sh \
 	test-um-supervisor-optimizations-argv.sh \
 	test-um-supervisor-cow-file-cli.sh \
 	test-um-supervisor-ext4-binds-cli.sh \
@@ -84,7 +85,12 @@ test-auto-backend: test-auto-backend.c ../src/cli/auto_backend.c \
 		../src/cli/auto_backend.c ../src/cli/backend.c
 
 # 运行所有测试
-test: all
+test-host-tools:
+	python3 test-benchmark-first-output.py
+
+.PHONY: test-host-tools
+
+test: all test-host-tools
 	@echo "运行 SciCat PRoot 测试..."
 	@for prog in $(CHECK_PROGS); do \
 		echo "运行 $$prog..."; \

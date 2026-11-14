@@ -300,7 +300,7 @@ the SMP/container kernel profile used by `--cpus`.
 
 The UML kernel's default userspace mode is `ptrace`. `--seccomp=auto` lets it
 use the kernel's seccomp mode when the host allows it, and `--seccomp=on`
-requires that mode; both are opt-in. In two device A/B runs on the same image,
+requires that mode; both are opt-in. In two historical device A/B runs on the same image,
 kernel and probe, a syscall-heavy probe took 43-61 s with ptrace and 4.2-5.1 s
 with seccomp: `getpid` fell from 158-221 to 12.5-13.0 us, `open`+`close`
 from 501-503 to 14-50 us, and `read` from 209-222 to 5.9-13.7 us. Boot time
@@ -313,6 +313,66 @@ seccomp mode is **not** a security boundary. The kernel documentation states
 that its filter is not restrictive enough: guest userspace can read and write
 all physical memory and can trick the stub into disabling the timer signal.
 Use it only with a guest you trust; the default stays `ptrace`.
+
+### Measuring startup separately from execution
+
+Fast syscall execution does not imply fast startup. A one-shot UM command
+includes supervisor setup, a kernel boot, guest initialization and command
+execution; a syscall loop inside an already running guest measures a different
+interval. Historical figures in this README (including 827/751 ms, 10.1-13.7 s,
+and session timings) came from different device/configuration experiments and
+are not current latency guarantees or directly comparable measurements.
+
+Use [tools/benchmark-first-output.py](tools/benchmark-first-output.py) on the
+untraced host with Python 3.8+ (POSIX). Both commands are configurable JSON argv
+arrays; no host shell expansion is performed. Replace these example paths and
+supply the kernel/stub configuration required by your UM installation:
+
+```sh
+python3 tools/benchmark-first-output.py --runs=5 --timeout=60 \
+  --fast-command '["neoproot","--backend=fast","-r","/path/to/rootfs","/bin/sh","-c","printf \"%s\\n\" \"$1\"","bench","{marker}"]' \
+  --um-command '["neoproot","--backend=um","--rootfs=/path/to/rootfs.img","--cow-file=/path/to/rootfs.img.cow","--","/bin/sh","-c","printf \"%s\\n\" \"$1\"","bench","{marker}"]' \
+  > first-output.jsonl
+```
+
+Put `{marker}` in a guest command that prints it as a separate stdout line
+ending in LF (CRLF also works). The tool substitutes a fresh UUID marker for
+every sample. Kernel boot lines, stderr, embedded marker text and an incomplete
+line at EOF do not count. Do not print the marker from a host wrapper or enable
+shell tracing: this is a guest-output protocol, not authentication of its source.
+The tool drains both streams concurrently without copying logs to its own stdout.
+
+Each JSONL row records the backend, sample, expanded argv, marker, byte counts,
+removed environment variable names, and host-observed durations measured with `time.monotonic_ns`:
+
+- `first_output_ms`: launch to receipt of the complete guest marker line.
+- `total_ms`: launch to observed launcher exit, including UM shutdown; null if
+  launch failed. Exit observation may lag by one polling interval (up to 50 ms
+  plus host scheduling).
+- `elapsed_ms`: the whole sample, including pipe draining and cleanup.
+
+These are host observations, affected by pipe buffering and scheduling;
+`total_ms - first_output_ms` is not pure guest execution time. A timeout may
+retain a valid marker time but still invalidates the sample.
+
+The default is five samples per backend, alternating fast/UM order each round,
+with no hidden warmup; `--timeout` applies to each sample (30 seconds by default).
+Record device, binary/kernel versions, rootfs/COW, syscall mode, CPU count and
+cache conditions alongside the JSONL when comparing runs. Each command starts
+in its own process group; timeout sends SIGKILL to that group and reaps the
+launcher, including when descendants keep its pipes open after it exits.
+Remaining group members are also killed at sample completion; commands must not
+start persistent services or escape the group with setsid. The tool removes
+`LD_PRELOAD`, `LD_AUDIT` and `NEOPROOT_STATSHIM_*` from the supplied child
+environment and records their names; an outer tracer can still inject its own
+environment, so run real benchmarks outside PRoot.
+
+The tool exits 0 only if every sample has a complete marker, exit code 0 and no
+timeout/error; it exits 1 for any failed sample, or 2 for invalid CLI arguments.
+JSONL retains each launcher's raw Python returncode (negative for a signal),
+positive signal number, timeout flag and launch/I/O error; failed samples must
+not be averaged as successful timings. Run the host-only self-tests with
+`python3 tests/test-benchmark-first-output.py -v`.
 
 ### CPUs and ext4 mount options
 
@@ -332,9 +392,9 @@ base image) and appends the caller's options after it.
 
 ### Persistent sessions
 
-A one-shot `--backend=um` run pays a full kernel boot per command. On the phone
-this was developed on that is 10.1-13.7 s, which is fine for `docker run` and
-painful for a shell you type into. `neoproot-um session` boots the guest once
+A one-shot `--backend=um` run pays a full kernel boot per command. A historical
+measurement on the development phone was 10.1-13.7 s; interactive shells feel
+this startup cost on every launch. `neoproot-um session` boots the guest once
 and keeps it:
 
 ```sh
@@ -356,7 +416,7 @@ neoproot-um session stop
 arrive later through `run`. `run` takes `--cwd=DIR` and
 `--timeout=SECONDS`.
 
-Measured on the same phone, one vCPU, ext4 root: **15.3 s** to start a session
+Historically measured on the same phone, one vCPU, ext4 root: **15.3 s** to start a session
 and **0.54-0.68 s per command** afterwards. The break-even against one boot per
 command is about three commands; a fifteen-command batch drops from roughly
 178 s to 28 s.
