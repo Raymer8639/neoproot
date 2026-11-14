@@ -14,6 +14,7 @@
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "syscall/socket.h"
+#include "syscall/readlink_result.h"
 #include "syscall/chain.h"
 #include "syscall/heap.h"
 #include "syscall/rlimit.h"
@@ -314,6 +315,7 @@ void translate_syscall_exit(Tracee *tracee)
 {
     word_t syscall_number;
     word_t syscall_result;
+    bool copy_raw_readlink = false;
     int status;
 
     status = notify_extensions(tracee, SYSCALL_EXIT_START, 0, 0);
@@ -698,7 +700,7 @@ void translate_syscall_exit(Tracee *tracee)
                         ? (size_t)translated_len - 1 : strlen(failed_target);
                     if (write_len > failed_max)
                         write_len = failed_max;
-                    if (write_data(tracee, failed_output, failed_target, write_len) >= 0) {
+                    if (write_readlink_output(tracee, failed_output, failed_target, write_len) >= 0) {
                         status = (int)write_len;
                         break;
                     }
@@ -726,9 +728,11 @@ void translate_syscall_exit(Tracee *tracee)
             break;
         }
 
+        copy_raw_readlink = true;
         if (old_size >= sizeof(referee))
             goto end; /* no room to terminate; preserve the kernel buffer/result */
-        status = read_data(tracee, referee, output, old_size);
+        status = read_data(tracee, referee,
+                peek_reg(tracee, MODIFIED, syscall_number == PR_readlink ? SYSARG_2 : SYSARG_3), old_size);
         if (status < 0)
             break;
         referee[old_size] = '\0';
@@ -814,10 +818,11 @@ void translate_syscall_exit(Tracee *tracee)
                     break;
                 }
                 write_size = len < max_size ? len : max_size;
-                status = write_data(tracee, output, reported_cwd, write_size);
+                status = write_readlink_output(tracee, output, reported_cwd, write_size);
                 if (status < 0)
                     break;
                 status = write_size;
+                copy_raw_readlink = false;
                 break;
             }
         }
@@ -902,15 +907,16 @@ void translate_syscall_exit(Tracee *tracee)
 write_back:
         if ((size_t)status - 1 <= max_size) {
             new_size = status - 1;
-            status = write_data(tracee, output, referee, new_size);
+            status = write_readlink_output(tracee, output, referee, new_size);
         } else {
             new_size = max_size;
-            status = write_data(tracee, output, referee, max_size);
+            status = write_readlink_output(tracee, output, referee, max_size);
         }
         if (status < 0)
             break;
 
         status = new_size;
+        copy_raw_readlink = false;
         break;
     }
 
@@ -1091,6 +1097,12 @@ write_back:
     poke_reg(tracee, SYSARG_RESULT, (word_t)status);
 
 end:
+    if (copy_raw_readlink && (int)peek_reg(tracee, CURRENT, SYSARG_RESULT) >= 0) {
+        status = copy_raw_readlink_output(tracee,
+                syscall_number == PR_readlink ? SYSARG_2 : SYSARG_3, syscall_result);
+        if (status < 0)
+            poke_reg(tracee, SYSARG_RESULT, (word_t)status);
+    }
     status = notify_extensions(tracee, SYSCALL_EXIT_END, 0, 0);
     if (status < 0)
         poke_reg(tracee, SYSARG_RESULT, (word_t)status);

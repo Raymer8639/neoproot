@@ -38,6 +38,7 @@
 #include "extension/extension.h"
 #include "compat.h"
 #include "syscall/compat_policy.h"
+#include "syscall/readlink_result.h"
 #include "execve/execve.h"
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
@@ -3097,6 +3098,11 @@ int translate_syscall_enter(Tracee *tracee)
         break;
 
     case PR_readlink:
+        status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
+        if (status >= 0)
+            status = prepare_readlink_output(tracee, SYSARG_2, SYSARG_3);
+        break;
+
     case PR_lgetxattr:
     case PR_llistxattr:
     case PR_lstat:
@@ -3191,6 +3197,8 @@ int translate_syscall_enter(Tracee *tracee)
             break;
 
         status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
+        if (status >= 0)
+            status = prepare_readlink_output(tracee, SYSARG_3, SYSARG_4);
         break;
 
     /* 写操作：先做 ro bind 只读检查 */

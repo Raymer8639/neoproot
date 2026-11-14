@@ -41,11 +41,24 @@ static void link_result(const char *path,const char *expected)
         require(buf[want]==0xa5,"readlink wrote beyond returned bytes");
     }
 }
+static void readonly_link(const char *path)
+{
+    size_t page_size = sysconf(_SC_PAGESIZE);
+    unsigned char *buffer = mmap(NULL,page_size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    require(buffer != MAP_FAILED,"readonly output mmap"); memset(buffer,0xa5,page_size);
+    require(mprotect(buffer,page_size,PROT_READ)==0,"readonly output mprotect");
+    errno=0; require(readlink(path,(char *)buffer,32)==-1 && errno==EFAULT,"readlink readonly output must fail");
+    for(size_t i=0;i<page_size;i++) require(buffer[i]==0xa5,"readlink modified readonly output");
+    munmap(buffer,page_size);
+}
 static void paths(void)
 {
     int fd=open("file",O_CREAT|O_RDWR|O_TRUNC,0600); require(fd>=0,"fixture open");
     char proc[128]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",fd);
     link_result(proc,"/case/file");
+    readonly_link(proc);
+    link_result("relative-link","file");
+    readonly_link("relative-link");
     snprintf(proc,sizeof(proc),"/proc/%d/task/%ld/fd/%d",getpid(),syscall(SYS_gettid),fd);
     link_result(proc,"/case/file");
     struct stat cwd,empty; require(stat(".",&cwd)==0,"cwd stat");
@@ -82,7 +95,8 @@ int main(int argc,char **argv)
     require(argc>=2,"mode");
     if(strcmp(argv[1],"native-privilege")==0) { printf("%d\n",prctl(PR_GET_NO_NEW_PRIVS,0,0,0,0)); return 0; }
     if(strcmp(argv[1],"native-mapping")==0) { printf("%d\n",large_mapping()); return 0; }
-    if(strcmp(argv[1],"privilege")==0) privilege(atoi(argv[2]));
+    if(strcmp(argv[1],"permissions")==0) readonly_link(argv[2]);
+    else if(strcmp(argv[1],"privilege")==0) privilege(atoi(argv[2]));
     else if(strcmp(argv[1],"paths")==0) paths();
     else if(strcmp(argv[1],"sockets")==0) sockets();
     else if(strcmp(argv[1],"mapping")==0) require(large_mapping() || atoi(argv[2])==0,"large ARM64 VM reservation");

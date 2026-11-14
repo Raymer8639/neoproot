@@ -14,6 +14,8 @@ mkdir -p "$fixture"
 "${CC:-cc}" -D_GNU_SOURCE -O2 -Wall -Wextra "$script_directory/test-upstream-compat.c" -o "$test_directory/probe"
 inherited=$("$test_directory/probe" native-privilege)
 mapping=$("$test_directory/probe" native-mapping)
+ln -s file "$fixture/relative-link"
+"$test_directory/probe" permissions "$fixture/relative-link"
 for traced_mode in filter all; do
     if [ "$traced_mode" = all ]; then export PROOT_NO_SECCOMP=1; else unset PROOT_NO_SECCOMP; fi
     "$PROOT" -r / -b "$fixture:/case" -w /case "$test_directory/probe" privilege "$inherited"
