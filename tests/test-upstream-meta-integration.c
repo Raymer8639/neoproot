@@ -64,7 +64,9 @@ static void tracee(int native_fchmodat2)
     require(geteuid()==0 && getegid()==0,"real -0 tracee identity");
     create_file("a"); create_file("b"); set_record("a",04751,13001,24001); set_record("b",0640,13002,24002);
     int fd=open("a",O_PATH); require(fd>=0,"O_PATH for failed chmod"); errno=0;
-    require(fchmod(fd,0700)==-1 && errno==EBADF,"failed fchmod O_PATH"); close(fd); metadata("a",04751,13001,24001);
+    /* Bionic fchmod may deliberately use a procfd fallback, even natively.
+     * The raw Linux fchmod syscall must reject O_PATH and leave the record. */
+    require(syscall(SYS_fchmod,fd,0700)==-1 && errno==EBADF,"failed raw fchmod O_PATH"); close(fd); metadata("a",04751,13001,24001);
     errno=0; int rc=syscall(SYS_fchmodat2,AT_FDCWD,"a",0641,0),error=errno;
     if(!native_fchmodat2) { require(rc==-1 && error==ENOSYS,"unsupported fchmodat2 unchanged"); metadata("a",04751,13001,24001); puts("SKIP native kernel/Android policy fchmodat2 unavailable"); }
     else { require(rc==0,"supported fchmodat2"); metadata("a",0641,13001,24001); require(chmod("a",04751)==0,"restore virtual mode"); }
