@@ -13,7 +13,7 @@ TEST_PROGS = test_argv test_echo test_file_ops test_dir_ops
 CHECK_PROGS = test-auto-backend
 
 # 测试脚本列表
-TEST_SCRIPTS = test-upstream-core.sh test-upstream-readlink.sh test-upstream-proot-me.sh \
+TEST_SCRIPTS = test-upstream-core.sh test-upstream-readlink.sh test-upstream-sendmmsg.sh test-upstream-proot-me.sh \
 	test-upstream-tracee.sh test-upstream-l2s-logic.sh test-upstream-fake-id.sh test-upstream-meta-tree.sh \
 	test-upstream-compat.sh test-upstream-l2s-integration.sh \
 	test-build-script.sh basic_test.sh advanced_test.sh \

@@ -8,12 +8,14 @@
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
+#include <sys/syscall.h>
 #include <stdint.h>
 #include <talloc.h>
 #include "tracee/abi.h"
 #include "cli/note.h"
 
 #include "syscall/socket.h"
+#include "syscall/chain.h"
 #include "tracee/tracee.h"
 #include "tracee/mem.h"
 #include "path/binding.h"
@@ -24,6 +26,41 @@
 
 static const size_t offsetof_path = offsetof(struct sockaddr_un, sun_path);
 static const size_t sizeof_path = sizeof(((struct sockaddr_un *)0)->sun_path);
+
+/* Unlike ptrace (and write_data's fallback), process_vm_* honors the
+ * tracee's page protections.  Never fall back when accessing a sendmmsg
+ * input header or reporting msg_len: a fault must stop the batch. */
+static int sendmmsg_read(const Tracee *tracee, void *data, word_t address, size_t size)
+{
+#ifdef __NR_process_vm_readv
+	struct iovec local = { .iov_base = data, .iov_len = size };
+	struct iovec remote = { .iov_base = (void *)address, .iov_len = size };
+	ssize_t result = syscall(__NR_process_vm_readv, tracee->pid,
+				&local, 1, &remote, 1, 0);
+	if (result < 0)
+		return -errno;
+	return result == (ssize_t)size ? 0 : -EFAULT;
+#else
+	(void)tracee; (void)data; (void)address; (void)size;
+	return -ENOSYS;
+#endif
+}
+
+static int sendmmsg_write_length(Tracee *tracee, word_t address, uint32_t length)
+{
+#ifdef __NR_process_vm_writev
+	struct iovec local = { .iov_base = &length, .iov_len = sizeof(length) };
+	struct iovec remote = { .iov_base = (void *)address, .iov_len = sizeof(length) };
+	ssize_t result = syscall(__NR_process_vm_writev, tracee->pid,
+				&local, 1, &remote, 1, 0);
+	if (result < 0)
+		return -errno;
+	return result == sizeof(length) ? 0 : -EFAULT;
+#else
+	(void)tracee; (void)address; (void)length;
+	return -ENOSYS;
+#endif
+}
 
 /**
  * Read sockaddr_un from tracee memory.
@@ -67,7 +104,8 @@ static int push_sockaddr_un(Tracee *tracee, struct sockaddr_un *sockaddr,
 {
 	int status;
 
-	strncpy(sockaddr->sun_path, host_path, sizeof_path);
+	if (host_path != sockaddr->sun_path)
+		strncpy(sockaddr->sun_path, host_path, sizeof_path);
 
 	/* Push the updated sockaddr to a newly allocated space.  */
 	*address = alloc_mem(tracee, sizeof(*sockaddr));
@@ -182,25 +220,39 @@ int translate_socketcall_enter(Tracee *tracee, word_t *addr_ptr, int len)
  *     tracees to such a path is found through the binding created by
  *     bind(2) instead.
  *
- * The new address of the translated sockaddr_un is put in the
- * @address parameter.  This function returns -errno if an error
- * occurred, 0 if the address was left as is, otherwise 1.
+ * The translated address is copied to @sockaddr.  With @checked, input
+ * reads honor page protections instead of using the ptrace fallback.
+ * Returns -errno on error, 0 if unchanged, otherwise 1.
  */
-int translate_send_address(Tracee *tracee, word_t *address, int size)
+static int translate_send_sockaddr(Tracee *tracee, word_t address, int size,
+				   struct sockaddr_un *sockaddr, bool checked)
 {
-	struct sockaddr_un sockaddr;
 	char user_path[PATH_MAX];
 	char host_path[PATH_MAX];
 	struct stat statl;
 	int saved_errno;
 	int status;
 
-	if (*address == 0)
+	if (address == 0)
 		return 0;
 
-	status = read_sockaddr_un(tracee, &sockaddr, sizeof(sockaddr), user_path, *address, size);
-	if (status <= 0)
-		return status;
+	if (checked) {
+		if (size <= (int)offsetof_path || (size_t)size > sizeof(*sockaddr))
+			return 0;
+		memset(sockaddr, 0, sizeof(*sockaddr));
+		status = sendmmsg_read(tracee, sockaddr, address, size);
+		if (status < 0)
+			return status;
+		if (sockaddr->sun_family != AF_UNIX || sockaddr->sun_path[0] == '\0')
+			return 0;
+		memcpy(user_path, sockaddr->sun_path, sizeof_path);
+		user_path[sizeof_path] = '\0';
+	}
+	else {
+		status = read_sockaddr_un(tracee, sockaddr, sizeof(*sockaddr), user_path, address, size);
+		if (status <= 0)
+			return status;
+	}
 
 	status = translate_path(tracee, host_path, AT_FDCWD, user_path, true);
 
@@ -226,7 +278,18 @@ int translate_send_address(Tracee *tracee, word_t *address, int size)
 	if (strlen(host_path) > sizeof_path)
 		return -ENAMETOOLONG;
 
-	return push_sockaddr_un(tracee, &sockaddr, host_path, address);
+	strncpy(sockaddr->sun_path, host_path, sizeof_path);
+	return 1;
+}
+
+int translate_send_address(Tracee *tracee, word_t *address, int size)
+{
+	struct sockaddr_un sockaddr;
+	int status = translate_send_sockaddr(tracee, *address, size, &sockaddr, false);
+
+	if (status <= 0)
+		return status;
+	return push_sockaddr_un(tracee, &sockaddr, sockaddr.sun_path, address);
 }
 
 /* A struct msghdr is seven words long, msg_name being the first one
@@ -372,12 +435,16 @@ int translate_sendmmsg_enter(Tracee *tracee, word_t *address, word_t *vlen)
 	if (vector == NULL)
 		return -ENOMEM;
 
-	/* Let the kernel report a bad address.  */
-	status = read_data(tracee, vector, *address, count * size);
-	if (status < 0)
-		return 0;
-
 	for (i = 0; i < count; i++) {
+		/* Keep the translated prefix if a later header is unreadable.  */
+		status = read_data(tracee, vector + i * size, *address + i * size, size);
+		if (status < 0) {
+			/* With no valid prefix, let the kernel report the bad address.  */
+			if (i == 0)
+				return 0;
+			break;
+		}
+
 		status = translate_msg_name(tracee, vector + i * size);
 		if (status < 0)
 			break;
@@ -423,12 +490,215 @@ int translate_sendmmsg_exit(Tracee *tracee, word_t address, word_t copy, word_t 
 		if (errno != 0)
 			return -errno;
 
-		poke_uint32(tracee, address + i * size + offsetof_len, length);
-		if (errno != 0)
-			return -errno;
+		int status = sendmmsg_write_length(tracee, address + i * size + offsetof_len, length);
+		if (status < 0)
+			return status;
 	}
 
 	return 0;
+}
+
+/* Only an index is kept across stops.  Each next input header is read after
+ * the previous send AND msg_len store have completed, just as in the kernel.
+ * This object is a child of Tracee, never of the per-event tracee->ctx. */
+struct sendmmsg_pending {
+	Tracee *tracee;
+	struct sendmmsg_pending *next;
+	struct sendmmsg_pending **previous;
+	word_t vector;
+	word_t count;
+	word_t completed;
+	word_t scratch;
+	word_t fd;
+	word_t flags;
+	bool chained;
+};
+
+static struct sendmmsg_pending *sendmmsg_pending_head;
+
+static int unlink_sendmmsg_pending(struct sendmmsg_pending *pending)
+{
+	*pending->previous = pending->next;
+	if (pending->next != NULL)
+		pending->next->previous = pending->previous;
+	return 0;
+}
+
+static struct sendmmsg_pending *find_sendmmsg_pending(const Tracee *tracee)
+{
+	struct sendmmsg_pending *pending;
+	for (pending = sendmmsg_pending_head; pending != NULL; pending = pending->next)
+		if (pending->tracee == tracee)
+			return pending;
+	return NULL;
+}
+
+/* Read only msghdr, not the output msg_len or trailing mmsghdr padding.
+ * A readable input header followed by an inaccessible msg_len still sends. */
+static int read_sendmmsg_header(Tracee *tracee, word_t vector, word_t index, uint8_t *header)
+{
+	word_t offset = index * SIZEOF_MMSGHDR(tracee);
+	if (vector > (word_t)-1 - offset ||
+	    vector + offset > (word_t)-1 - SIZEOF_MSGHDR(tracee))
+		return -EFAULT;
+	return sendmmsg_read(tracee, header, vector + offset, SIZEOF_MSGHDR(tracee));
+}
+
+static int translate_sendmmsg_name(Tracee *tracee, uint8_t *header, struct sockaddr_un *sockaddr)
+{
+	int32_t namelen;
+	memcpy(&namelen, header + sizeof_word(tracee), sizeof(namelen));
+	return translate_send_sockaddr(tracee, get_word(tracee, header), namelen, sockaddr, true);
+}
+
+static int prepare_sendmmsg_message(struct sendmmsg_pending *pending)
+{
+	Tracee *tracee = pending->tracee;
+	uint8_t header[7 * sizeof(word_t)];
+	struct sockaddr_un sockaddr;
+	int32_t namelen = sizeof(sockaddr);
+	int status;
+
+	status = read_sendmmsg_header(tracee, pending->vector, pending->completed, header);
+	if (status < 0)
+		return status;
+	status = translate_sendmmsg_name(tracee, header, &sockaddr);
+	if (status < 0)
+		return status;
+	if (status > 0) {
+		word_t name = pending->scratch + SIZEOF_MSGHDR(tracee);
+		status = write_data(tracee, name, &sockaddr, sizeof(sockaddr));
+		if (status < 0)
+			return status;
+		set_word(tracee, header, name);
+		memcpy(header + sizeof_word(tracee), &namelen, sizeof(namelen));
+	}
+	return write_data(tracee, pending->scratch, header, SIZEOF_MSGHDR(tracee));
+}
+
+/* Install the first sendmsg directly.  No chain is registered until that
+ * send's result and the permission-respecting msg_len store are known. */
+int translate_sendmmsg_start(Tracee *tracee, word_t address, word_t vlen)
+{
+	uint8_t header[7 * sizeof(word_t)];
+	struct sockaddr_un sockaddr;
+	struct sendmmsg_pending *pending;
+	word_t count = MIN((unsigned int)vlen, UIO_MAXIOV);
+	word_t i;
+	int status;
+
+	if (address == 0 || count == 0)
+		return 0;
+	if (find_sendmmsg_pending(tracee) != NULL)
+		return -EBUSY;
+
+	/* Leave the complete native syscall intact if the readable prefix
+	 * needs no destination translation.  In particular a later bad
+	 * header must not discard the kernel's already-sent prefix. */
+	for (i = 0; i < count; i++) {
+		status = read_sendmmsg_header(tracee, address, i, header);
+		if (status < 0)
+			return status == -EFAULT ? 0 : status;
+		status = translate_sendmmsg_name(tracee, header, &sockaddr);
+		if (status != 0)
+			break;
+	}
+	if (i == count)
+		return 0;
+
+	pending = talloc_zero(tracee, struct sendmmsg_pending);
+	if (pending == NULL)
+		return -ENOMEM;
+	pending->tracee = tracee;
+	pending->vector = address;
+	pending->count = count;
+	pending->fd = peek_reg(tracee, CURRENT, SYSARG_1);
+	pending->flags = (unsigned int)peek_reg(tracee, CURRENT, SYSARG_4);
+	/* This is the only alloc_mem in the lowered batch (including 1024
+	 * messages).  Subsequent exits only overwrite this fixed area. */
+	pending->scratch = alloc_mem(tracee, SIZEOF_MSGHDR(tracee) + sizeof(sockaddr));
+	if (pending->scratch == 0) {
+		talloc_free(pending);
+		return -EFAULT;
+	}
+	status = prepare_sendmmsg_message(pending);
+	if (status < 0) {
+		talloc_free(pending);
+		return status;
+	}
+
+	pending->next = sendmmsg_pending_head;
+	pending->previous = &sendmmsg_pending_head;
+	if (pending->next != NULL)
+		pending->next->previous = &pending->next;
+	sendmmsg_pending_head = pending;
+	talloc_set_destructor(pending, unlink_sendmmsg_pending);
+
+	set_sysnum(tracee, PR_sendmsg);
+	poke_reg(tracee, SYSARG_2, pending->scratch);
+	poke_reg(tracee, SYSARG_3, pending->flags);
+	tracee->restart_how = PTRACE_SYSCALL;
+	return 1;
+}
+
+static void finish_sendmmsg_batch(struct sendmmsg_pending *pending, long error)
+{
+	Tracee *tracee = pending->tracee;
+	word_t result = pending->completed != 0 ? pending->completed : (word_t)error;
+	poke_reg(tracee, SYSARG_RESULT, result);
+	if (pending->chained)
+		force_chain_final_result(tracee, result);
+	talloc_free(pending);
+}
+
+static void complete_sendmmsg_message(struct sendmmsg_pending *pending)
+{
+	Tracee *tracee = pending->tracee;
+	long result = (long)peek_reg(tracee, CURRENT, SYSARG_RESULT);
+	int status;
+
+	if (result < 0) {
+		finish_sendmmsg_batch(pending, result);
+		return;
+	}
+	status = sendmmsg_write_length(tracee,
+		pending->vector + pending->completed * SIZEOF_MMSGHDR(tracee) + SIZEOF_MSGHDR(tracee),
+		(uint32_t)result);
+	if (status < 0) {
+		finish_sendmmsg_batch(pending, status);
+		return;
+	}
+	pending->completed++;
+	if (pending->completed == pending->count) {
+		finish_sendmmsg_batch(pending, 0);
+		return;
+	}
+	status = prepare_sendmmsg_message(pending);
+	if (status >= 0)
+		status = register_chained_syscall(tracee, PR_sendmsg, pending->fd,
+			pending->scratch, pending->flags, 0, 0, 0);
+	if (status < 0) {
+		finish_sendmmsg_batch(pending, status);
+		return;
+	}
+	pending->chained = true;
+	force_chain_final_result(tracee, pending->completed);
+}
+
+bool translate_sendmmsg_finish(Tracee *tracee)
+{
+	struct sendmmsg_pending *pending = find_sendmmsg_pending(tracee);
+	if (pending == NULL || pending->chained)
+		return false;
+	complete_sendmmsg_message(pending);
+	return true;
+}
+
+void translate_sendmmsg_chained_exit(Tracee *tracee)
+{
+	struct sendmmsg_pending *pending = find_sendmmsg_pending(tracee);
+	if (pending != NULL && pending->chained)
+		complete_sendmmsg_message(pending);
 }
 
 /**

@@ -928,16 +928,8 @@ write_back:
         goto end;
 
     case PR_sendmmsg:
-        if ((int)syscall_result > 0 &&
-            peek_reg(tracee, ORIGINAL, SYSARG_2) != peek_reg(tracee, MODIFIED, SYSARG_2))
-            status = translate_sendmmsg_exit(tracee,
-                    peek_reg(tracee, ORIGINAL, SYSARG_2),
-                    peek_reg(tracee, MODIFIED, SYSARG_2), syscall_result);
-        else
-            goto end;
-        if (status >= 0)
-            goto end;
-        break;
+        (void)translate_sendmmsg_finish(tracee);
+        goto end;
 
     case PR_prctl: {
         word_t option = peek_reg(tracee, ORIGINAL, SYSARG_1);

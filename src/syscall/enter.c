@@ -2677,13 +2677,11 @@ int translate_syscall_enter(Tracee *tracee)
     case PR_sendmmsg: {
         word_t vector = peek_reg(tracee, CURRENT, SYSARG_2);
         word_t vlen = (unsigned int)peek_reg(tracee, CURRENT, SYSARG_3);
-        status = translate_sendmmsg_enter(tracee, &vector, &vlen);
-        if (status <= 0)
-            break;
-        poke_reg(tracee, SYSARG_2, vector);
-        poke_reg(tracee, SYSARG_3, vlen);
-        keep_pushed_args(tracee);
-        status = 0;
+        status = translate_sendmmsg_start(tracee, vector, vlen);
+        if (status > 0) {
+            keep_pushed_args(tracee);
+            status = 0;
+        }
         break;
     }
 

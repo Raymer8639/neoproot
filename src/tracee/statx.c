@@ -8,6 +8,7 @@
 #include <stdio.h>
 
 #include "tracee/statx.h"
+#include "syscall/compat_policy.h"
 #include "tracee/reg.h"
 #include "tracee/mem.h"
 #include "extension/extension.h"
@@ -77,6 +78,14 @@ int handle_statx_syscall(Tracee *restrict tracee, bool from_sigsys)
     status = read_string(tracee, guest_path, path_addr, PATH_MAX);
     if (UNLIKELY(status < 0)) {
         return status;
+    }
+
+    /* Both normal exit (ORIGINAL arguments) and direct SIGSYS emulation
+     * can still see the original empty pathname. AT_FDCWD names our virtual
+     * cwd, not /proc/<pid>/fd/-100 or the kernel task's unchanged cwd. */
+    if (status == 1 && empty_path_uses_guest_cwd(dirfd, guest_path, path_addr, flags)) {
+        strcpy(guest_path, ".");
+        status = 2;
     }
 
     // 空路径特殊处理（AT_EMPTY_PATH）

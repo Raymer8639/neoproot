@@ -69,6 +69,49 @@ static void paths(void)
     close(fd);
 }
 static struct sockaddr_un named(const char *path) { struct sockaddr_un sa={.sun_family=AF_UNIX}; snprintf(sa.sun_path,sizeof(sa.sun_path),"%s",path); return sa; }
+static void expect_datagrams(int receiver, int count)
+{
+    char data[8];
+    for(int i=0;i<count;i++) require(recv(receiver,data,sizeof(data),MSG_DONTWAIT)==1,"expected batch datagram");
+    errno=0; require(recv(receiver,data,sizeof(data),MSG_DONTWAIT)==-1 &&
+            (errno==EAGAIN || errno==EWOULDBLOCK),"batch sent beyond first output fault");
+}
+static void batch_permissions(int sender,int receiver,const struct msghdr *message)
+{
+    size_t page = sysconf(_SC_PAGESIZE);
+    unsigned char *memory = mmap(NULL,2*page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    require(memory!=MAP_FAILED,"batch permission mmap");
+    struct mmsghdr *batch=(void*)memory;
+    for(int i=0;i<2;i++) batch[i]=(struct mmsghdr){.msg_hdr=*message};
+    require(mprotect(memory,2*page,PROT_READ)==0,"batch readonly");
+    errno=0; require(sendmmsg(sender,batch,2,0)==-1 && errno==EFAULT,"readonly batch output errno");
+    expect_datagrams(receiver,1);
+    require(mprotect(memory,2*page,PROT_READ|PROT_WRITE)==0,"restore batch pages");
+    batch=(void*)(memory+page-sizeof(*batch));
+    for(int i=0;i<3;i++) batch[i]=(struct mmsghdr){.msg_hdr=*message};
+    require(mprotect(memory+page,page,PROT_READ)==0,"later batch readonly");
+    require(sendmmsg(sender,batch,3,0)==1 && batch[0].msg_len==1 && batch[1].msg_len==0,"later readonly batch prefix");
+    expect_datagrams(receiver,2);
+    require(mprotect(memory+page,page,PROT_READ|PROT_WRITE)==0,"restore batch pages");
+    batch=(void*)(memory+page-sizeof(*batch)); batch[0]=(struct mmsghdr){.msg_hdr=*message};
+    require(mprotect(memory+page,page,PROT_NONE)==0,"later batch inaccessible");
+    require(sendmmsg(sender,batch,2,0)==1 && batch[0].msg_len==1,"inaccessible later header prefix");
+    expect_datagrams(receiver,1);
+    require(mprotect(memory+page,page,PROT_READ|PROT_WRITE)==0,"restore batch pages");
+    batch=(void*)(memory+page-__builtin_offsetof(struct mmsghdr,msg_len));
+    *batch=(struct mmsghdr){.msg_hdr=*message};
+    require(mprotect(memory+page,page,PROT_NONE)==0,"first output inaccessible");
+    errno=0; require(sendmmsg(sender,batch,1,0)==-1 && errno==EFAULT,"inaccessible first msg_len errno");
+    expect_datagrams(receiver,1);
+    munmap(memory,2*page);
+}
+static void native_socket_permissions(void)
+{
+    int pair[2]; require(socketpair(AF_UNIX,SOCK_DGRAM,0,pair)==0,"native socketpair");
+    struct iovec iov={.iov_base=(void*)"n",.iov_len=1};
+    struct msghdr message={.msg_iov=&iov,.msg_iovlen=1};
+    batch_permissions(pair[0],pair[1],&message); close(pair[0]); close(pair[1]);
+}
 static void sockets(void)
 {
     int receiver=socket(AF_UNIX,SOCK_DGRAM,0),sender=socket(AF_UNIX,SOCK_DGRAM,0);
@@ -83,6 +126,7 @@ static void sockets(void)
     struct mmsghdr batch[2]={{.msg_hdr=msg},{.msg_hdr=msg}};
     require(sendmmsg(sender,batch,2,0)==2 && batch[0].msg_len==1 && batch[1].msg_len==1,"sendmmsg lengths");
     for(int i=0;i<2;i++) require(recv(receiver,buf,sizeof(buf),0)==1,"recv sendmmsg");
+    batch_permissions(sender,receiver,&msg);
     close(sender); close(receiver); unlink(addr.sun_path);
 }
 static int large_mapping(void)
@@ -95,7 +139,8 @@ int main(int argc,char **argv)
     require(argc>=2,"mode");
     if(strcmp(argv[1],"native-privilege")==0) { printf("%d\n",prctl(PR_GET_NO_NEW_PRIVS,0,0,0,0)); return 0; }
     if(strcmp(argv[1],"native-mapping")==0) { printf("%d\n",large_mapping()); return 0; }
-    if(strcmp(argv[1],"permissions")==0) readonly_link(argv[2]);
+    if(strcmp(argv[1],"socket-permissions")==0) native_socket_permissions();
+    else if(strcmp(argv[1],"permissions")==0) readonly_link(argv[2]);
     else if(strcmp(argv[1],"privilege")==0) privilege(atoi(argv[2]));
     else if(strcmp(argv[1],"paths")==0) paths();
     else if(strcmp(argv[1],"sockets")==0) sockets();

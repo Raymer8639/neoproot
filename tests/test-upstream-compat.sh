@@ -16,6 +16,7 @@ inherited=$("$test_directory/probe" native-privilege)
 mapping=$("$test_directory/probe" native-mapping)
 ln -s file "$fixture/relative-link"
 "$test_directory/probe" permissions "$fixture/relative-link"
+"$test_directory/probe" socket-permissions
 for traced_mode in filter all; do
     if [ "$traced_mode" = all ]; then export PROOT_NO_SECCOMP=1; else unset PROOT_NO_SECCOMP; fi
     "$PROOT" -r / -b "$fixture:/case" -w /case "$test_directory/probe" privilege "$inherited"

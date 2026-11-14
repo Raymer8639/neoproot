@@ -9,6 +9,8 @@ long tracee_test_ptrace(enum __ptrace_request request, ...);
 static Sysnum wanted_sysnum;
 static int translated, statx_events, pushes;
 static Tracee *active;
+static char guest_cwd[PATH_MAX];
+static bool normal_exit_path;
 
 long tracee_test_ptrace(enum __ptrace_request request, ...)
 {
@@ -62,9 +64,10 @@ int translate_path(Tracee *t, char path[PATH_MAX], int fd, const char *name, boo
     (void)fd; (void)follow;
     translated++;
     assert(get_sysnum(t, ORIGINAL) == wanted_sysnum);
-    assert(peek_reg(t, ORIGINAL, SYSARG_1) == peek_reg(t, CURRENT, SYSARG_1));
+    /* At ordinary exit x0 is the result; only SIGSYS entry retains arg1. */
+    assert(normal_exit_path || peek_reg(t, ORIGINAL, SYSARG_1) == peek_reg(t, CURRENT, SYSARG_1));
     assert(notify_extensions(t, GUEST_PATH, (intptr_t)name, 0) == 0);
-    strcpy(path, name);
+    strcpy(path, strcmp(name, ".") == 0 && guest_cwd[0] != '\0' ? guest_cwd : name);
     return 0;
 }
 
@@ -98,6 +101,27 @@ int main(void)
     assert(translated == 2 && pushes == 2);
     assert((long)peek_reg(&t, CURRENT, SYSARG_RESULT) == -ENOENT);
     assert(get_sysnum(&t, ORIGINAL) == PR_statfs);
-    puts("upstream tracee SIGSYS snapshots: PASS");
+    char directory[] = "/tmp/neoproot-statx-cwd.XXXXXX";
+    assert(mkdtemp(directory)); strcpy(guest_cwd,directory);
+    struct stat cwd_stat; assert(stat(directory,&cwd_stat)==0);
+    for(int sigsys=0;sigsys<2;sigsys++) {
+        memset(&sx,0,sizeof(sx)); sx.stx_mask=STATX_INO; sx.stx_ino=cwd_stat.st_ino;
+        set_sysnum(&t,PR_statx); poke_reg(&t,SYSARG_1,AT_FDCWD);
+        poke_reg(&t,SYSARG_2,(word_t)""); poke_reg(&t,SYSARG_3,AT_EMPTY_PATH);
+        poke_reg(&t,SYSARG_4,STATX_INO); poke_reg(&t,SYSARG_5,(word_t)&sx);
+        save_current_regs(&t,ORIGINAL); wanted_sysnum=PR_statx;
+        normal_exit_path = !sigsys;
+        if(sigsys) {
+            t._regs_were_changed=true;
+            assert(handle_seccomp_event(&t)==0);
+            assert((long)peek_reg(&t,CURRENT,SYSARG_RESULT)==0);
+        } else {
+            poke_reg(&t,SYSARG_RESULT,0);
+            assert(handle_statx_syscall(&t,false)==0);
+        }
+        assert(sx.stx_ino==cwd_stat.st_ino);
+    }
+    assert(rmdir(directory)==0);
+    puts("upstream tracee SIGSYS snapshots and empty guest cwd: PASS");
     return 0;
 }
