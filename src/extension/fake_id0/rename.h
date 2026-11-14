@@ -7,4 +7,6 @@
 
 int handle_rename_enter_end(Tracee *tracee, Reg oldfd_sysarg, Reg oldpath_sysarg, Reg newfd_sysarg, Reg newpath_sysarg, Config *config);
 
+int handle_rename_exit_end(Tracee *tracee, Reg oldpath_sysarg, Reg newpath_sysarg, Reg flags_sysarg, Config *config);
+
 #endif /* FAKE_ID0_RENAME_H */

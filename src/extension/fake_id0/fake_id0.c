@@ -162,6 +162,9 @@ static FilteredSysnum filtered_sysnums[] = {
     { PR_linkat,        FILTER_SYSEXIT },
     { PR_mkdir,         FILTER_SYSEXIT },
     { PR_mkdirat,       FILTER_SYSEXIT },
+    { PR_rename,        FILTER_SYSEXIT },
+    { PR_renameat,      FILTER_SYSEXIT },
+    { PR_renameat2,     FILTER_SYSEXIT },
     { PR_symlink,       FILTER_SYSEXIT },
     { PR_symlinkat,     FILTER_SYSEXIT },
     { PR_umask,         FILTER_SYSEXIT },
@@ -177,6 +180,7 @@ static FilteredSysnum filtered_sysnums[] = {
     { PR_execve,        FILTER_SYSEXIT },
     { PR_fchmod,        FILTER_SYSEXIT },
     { PR_fchmodat,      FILTER_SYSEXIT },
+    { PR_fchmodat2,     FILTER_SYSEXIT },
     { PR_fchown,        FILTER_SYSEXIT },
     { PR_fchown32,      FILTER_SYSEXIT },
     { PR_fchownat,      FILTER_SYSEXIT },
@@ -261,8 +265,11 @@ static ALWAYS_INLINE void override_permissions(const Tracee *tracee, const char 
         node->mode = perms.st_mode;
     } else {
         switch (get_sysnum((Tracee *)tracee, ORIGINAL)) {
-        case PR_chmod:   node->mode = peek_reg((Tracee *)tracee, ORIGINAL, SYSARG_2); break;
-        case PR_fchmodat: node->mode = peek_reg((Tracee *)tracee, ORIGINAL, SYSARG_3); break;
+        /* These operations change the mode themselves, even on failure their
+         * target needs no temporary read/write override. */
+        case PR_chmod:
+        case PR_fchmodat:
+        case PR_fchmodat2:
         case PR_fstatat64:
         case PR_lstat:
         case PR_lstat64:
@@ -273,7 +280,20 @@ static ALWAYS_INLINE void override_permissions(const Tracee *tracee, const char 
         case PR_stat64:
         case PR_statfs:
         case PR_statfs64:
+        case PR_statx:
             TALLOC_FREE(node); return;
+#ifdef USERLAND
+        case PR_setxattr:
+        case PR_lsetxattr: {
+            char name[sizeof("system.posix_acl_access")];
+            int size = read_string(tracee, name, peek_reg(tracee, ORIGINAL, SYSARG_2), sizeof(name));
+            if (size == sizeof(name) && memcmp(name, "system.posix_acl_access", sizeof(name)) == 0) {
+                TALLOC_FREE(node); return;
+            }
+            node->mode = perms.st_mode;
+            break;
+        }
+#endif
         default: node->mode = perms.st_mode; break;
         }
     }
@@ -347,11 +367,23 @@ static HOT int handle_sysenter_end(Tracee *restrict tracee, Config *restrict con
     case PR_unlinkat: return handle_unlink_enter_end(tracee, SYSARG_1, SYSARG_2, config);
     case PR_rmdir:
     case PR_unlink:   return handle_unlink_enter_end(tracee, IGNORE_SYSARG, SYSARG_1, config);
+    case PR_renameat2:
     case PR_renameat: return handle_rename_enter_end(tracee, SYSARG_1, SYSARG_2, SYSARG_3, SYSARG_4, config);
     case PR_rename:   return handle_rename_enter_end(tracee, IGNORE_SYSARG, SYSARG_1, IGNORE_SYSARG, SYSARG_2, config);
     case PR_chmod:    return handle_chmod_enter_end(tracee, SYSARG_1, SYSARG_2, IGNORE_SYSARG, IGNORE_SYSARG, config);
     case PR_fchmod:   return handle_chmod_enter_end(tracee, IGNORE_SYSARG, SYSARG_2, SYSARG_1, IGNORE_SYSARG, config);
+    case PR_fchmodat2: {
+        char path[2];
+        if ((peek_reg(tracee, ORIGINAL, SYSARG_4) & AT_EMPTY_PATH)
+            && read_string(tracee, path, peek_reg(tracee, CURRENT, SYSARG_2), sizeof(path)) > 0
+            && path[0] == '\0')
+            return handle_chmod_enter_end(tracee, IGNORE_SYSARG, SYSARG_3, SYSARG_1, IGNORE_SYSARG, config);
+        return handle_chmod_enter_end(tracee, SYSARG_2, SYSARG_3, IGNORE_SYSARG, SYSARG_1, config);
+    }
     case PR_fchmodat: return handle_chmod_enter_end(tracee, SYSARG_2, SYSARG_3, IGNORE_SYSARG, SYSARG_1, config);
+    case PR_setxattr:
+    case PR_lsetxattr: return handle_acl_enter_end(tracee, SYSARG_1, IGNORE_SYSARG, config);
+    case PR_fsetxattr: return handle_acl_enter_end(tracee, IGNORE_SYSARG, SYSARG_1, config);
     case PR_chown:
     case PR_chown32:
     case PR_lchown:
@@ -413,7 +445,8 @@ static HOT int handle_sysenter_end(Tracee *restrict tracee, Config *restrict con
             word_t count = peek_reg(tracee, ORIGINAL, SYSARG_1);
             word_t list_addr = peek_reg(tracee, ORIGINAL, SYSARG_2);
             if (count > 0 && list_addr != 0) {
-                if (poke_word(tracee, list_addr, (word_t)config->rgid) == 0) {
+                poke_uint32(tracee, list_addr, config->rgid);
+                if (errno == 0) {
                     poke_reg(tracee, SYSARG_RESULT, 1);
                     config->egid = config->rgid;
                     config->sgid = config->rgid;
@@ -448,40 +481,29 @@ static HOT int handle_sysexit_end(Tracee *restrict tracee, Config *restrict conf
 #ifdef USERLAND
     word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
     word_t curr_sysnum = get_sysnum(tracee, CURRENT);
-    if ((curr_sysnum == PR_fstat || curr_sysnum == PR_fstat64) && result == 0) {
-        Reg sysarg = SYSARG_2;
-        word_t address = peek_reg(tracee, ORIGINAL, sysarg);
-        uid_t uid = peek_uint32(tracee, address + offsetof_stat_uid(tracee));
-        if (errno != 0) uid = 0;
-        gid_t gid = peek_uint32(tracee, address + offsetof_stat_gid(tracee));
-        if (errno != 0) gid = 0;
-        if (uid == getuid())
-            poke_uint32(tracee, address + offsetof_stat_uid(tracee), config->suid);
-        if (gid == getgid())
-            poke_uint32(tracee, address + offsetof_stat_gid(tracee), config->sgid);
-        return 0;
-    }
     if ((sysnum == PR_fstat || sysnum == PR_fstat64) && curr_sysnum == PR_readlinkat) {
-        result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-        poke_reg(tracee, SYSARG_RESULT, 0);
-        if ((int)result <= 0) return result;
-        char path[PATH_MAX];
-        int status = read_sysarg_path(tracee, path, SYSARG_3, MODIFIED);
-        if (status < 0) return status;
-        path[result] = '\0';
-        size_t len = __builtin_strlen(path);
-        if ((len >= 10 && __builtin_memcmp(path + len - 10, " (deleted)", 10) == 0) ||
-            (len >= 4 && __builtin_memcmp(path, "pipe", 4) == 0)) {
-            register_chained_syscall(tracee, sysnum,
+        /* readlink does not terminate its result. Sockets and anonymous inodes
+         * have names which cannot be passed to fstatat. */
+        if ((long)result <= 0 || result >= PATH_MAX)
+            return register_chained_syscall(tracee, sysnum,
                 peek_reg(tracee, ORIGINAL, SYSARG_1),
                 peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0, 0);
-        } else {
-            write_data(tracee, peek_reg(tracee, MODIFIED, SYSARG_3), path, sizeof(path));
-            register_chained_syscall(tracee, PR_fstatat64, AT_FDCWD,
-                peek_reg(tracee, MODIFIED, SYSARG_3),
-                peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0);
-        }
-        return 0;
+        char path[PATH_MAX];
+        int status = read_data(tracee, path, peek_reg(tracee, MODIFIED, SYSARG_3), result);
+        if (status < 0)
+            return status;
+        path[result] = '\0';
+        poke_reg(tracee, SYSARG_RESULT, 0);
+        if (path[0] != '/' || (result >= 10 && memcmp(path + result - 10, " (deleted)", 10) == 0))
+            return register_chained_syscall(tracee, sysnum,
+                peek_reg(tracee, ORIGINAL, SYSARG_1),
+                peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0, 0);
+        status = write_data(tracee, peek_reg(tracee, MODIFIED, SYSARG_3), path, result + 1);
+        if (status < 0)
+            return status;
+        return register_chained_syscall(tracee, PR_fstatat64, AT_FDCWD,
+            peek_reg(tracee, MODIFIED, SYSARG_3),
+            peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0);
     }
 #endif
     switch (sysnum) {
@@ -534,20 +556,41 @@ static HOT int handle_sysexit_end(Tracee *restrict tracee, Config *restrict conf
     case PR_mknod:
     case PR_mknodat:
     case PR_capset:
+#ifndef USERLAND
     case PR_chmod:
-    case PR_chown:
     case PR_fchmod:
+    case PR_fchmodat:
+    case PR_fchmodat2:
+#endif
+    case PR_chown:
     case PR_fchown:
     case PR_lchown:
     case PR_chown32:
     case PR_fchown32:
     case PR_lchown32:
-    case PR_fchmodat:
     case PR_fchownat:
         return handle_perm_err_exit_end(tracee, config, false);
+#ifdef USERLAND
+    case PR_chmod:
+    case PR_fchmod:
+    case PR_fchmodat:
+    case PR_fchmodat2:
+        (void)handle_perm_err_exit_end(tracee, config, false);
+        return handle_chmod_exit_end(tracee, config);
+    case PR_renameat2:
+        return handle_rename_exit_end(tracee, SYSARG_2, SYSARG_4, SYSARG_5, config);
+    case PR_renameat:
+        return handle_rename_exit_end(tracee, SYSARG_2, SYSARG_4, IGNORE_SYSARG, config);
+    case PR_rename:
+        return handle_rename_exit_end(tracee, SYSARG_1, SYSARG_2, IGNORE_SYSARG, config);
+#endif
     case PR_setxattr:
     case PR_lsetxattr:
     case PR_fsetxattr:
+#ifdef USERLAND
+        /* A denied ACL did not change the real mode, even if we fake success. */
+        (void)handle_acl_exit_end(tracee, config);
+#endif
         return handle_perm_err_exit_end(tracee, config, true);
     case PR_socket:
         return handle_socket_exit_end(tracee, config);
@@ -709,6 +752,18 @@ HOT int fake_id0_callback(Extension *restrict extension, ExtensionEvent event,
         Config *config = talloc_get_type_abort(extension->config, Config);
         return handle_sysexit_end(tracee, config);
     }
+#ifdef USERLAND
+    case SYSCALL_CHAINED_EXIT: {
+        Tracee *tracee = TRACEE(extension);
+        word_t original = get_sysnum(tracee, ORIGINAL);
+        word_t current = get_sysnum(tracee, CURRENT);
+        if ((original == PR_fstat || original == PR_fstat64)
+            && (current == PR_fstat || current == PR_fstat64
+                || current == PR_fstatat64 || current == PR_newfstatat))
+            return handle_stat_exit_end(tracee, extension->config, original);
+        return 0;
+    }
+#endif
     case SIGSYS_OCC: {
         Tracee *tracee = TRACEE(extension);
         Config *config = talloc_get_type_abort(extension->config, Config);

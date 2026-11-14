@@ -726,6 +726,8 @@ void translate_syscall_exit(Tracee *tracee)
             break;
         }
 
+        if (old_size >= sizeof(referee))
+            goto end; /* no room to terminate; preserve the kernel buffer/result */
         status = read_data(tracee, referee, output, old_size);
         if (status < 0)
             break;
@@ -864,27 +866,19 @@ void translate_syscall_exit(Tracee *tracee)
                 }
             }
 
-            if (reread) {
-                int st = detranslate_path(tracee, full, referer);
-                if (st > 0) {
-                    size_t full_len = st - 1; /* detranslate 返回含 \0 的长度 */
-                    if (full_len + 1 <= max_size) {
-                        status = write_data(tracee, output, full, full_len + 1);
-                        if (status < 0)
-                            break;
-                        status = full_len; /* 完整返回 */
-                    } else {
-                        /* guest 路径仍超用户缓冲：保持"缓冲满"语义，
-                         * 返回 max_size 让调用方扩大缓冲重试。 */
-                        status = write_data(tracee, output, full, max_size);
-                        if (status < 0)
-                            break;
-                        status = max_size;
-                    }
-                    break;
+            /* Numeric /proc task/fd spellings and ordinary symlinks also
+             * support a complete host reread. Never shorten a truncated prefix. */
+            if (!reread && referer[0] == '/' &&
+                strncmp(referer, "/proc/self/", 11) != 0) {
+                ssize_t n = readlink(referer, full, sizeof(full) - 1);
+                if (n >= 0 && (size_t)n < sizeof(full) - 1) {
+                    full[n] = '\0';
+                    reread = true;
                 }
-                /* detranslate 失败（bind 外路径等）→ 沿用内核原结果 */
             }
+            if (!reread)
+                goto end;
+            memcpy(referee, full, strlen(full) + 1);
         }
 
         /* 让扩展替换内核上报的路径（link2symlink：fd 打开时
@@ -906,9 +900,9 @@ void translate_syscall_exit(Tracee *tracee)
         }
 
 write_back:
-        if ((size_t)status < max_size) {
+        if ((size_t)status - 1 <= max_size) {
             new_size = status - 1;
-            status = write_data(tracee, output, referee, status);
+            status = write_data(tracee, output, referee, new_size);
         } else {
             new_size = max_size;
             status = write_data(tracee, output, referee, max_size);
@@ -927,6 +921,18 @@ write_back:
         translate_execve_exit(tracee);
         goto end;
 
+    case PR_sendmmsg:
+        if ((int)syscall_result > 0 &&
+            peek_reg(tracee, ORIGINAL, SYSARG_2) != peek_reg(tracee, MODIFIED, SYSARG_2))
+            status = translate_sendmmsg_exit(tracee,
+                    peek_reg(tracee, ORIGINAL, SYSARG_2),
+                    peek_reg(tracee, MODIFIED, SYSARG_2), syscall_result);
+        else
+            goto end;
+        if (status >= 0)
+            goto end;
+        break;
+
     case PR_prctl: {
         word_t option = peek_reg(tracee, ORIGINAL, SYSARG_1);
 #ifndef PR_GET_AUXV
@@ -944,11 +950,11 @@ write_back:
             if (tracee->execfn_addr == 0)
                 goto end;
             buf_max = peek_reg(tracee, ORIGINAL, SYSARG_3);
-            if (syscall_result > buf_max)
-                goto end;
+            /* PR_GET_AUXV returns the total size even for a short buffer. */
+            word_t copied = syscall_result < buf_max ? syscall_result : buf_max;
             buf_addr   = peek_reg(tracee, ORIGINAL, SYSARG_2);
             entry_size = 2 * sizeof_word(tracee);
-            for (offset = 0; offset + entry_size <= syscall_result; offset += entry_size) {
+            for (offset = 0; offset + entry_size <= copied; offset += entry_size) {
                 errno = 0;
                 type = peek_word(tracee, buf_addr + offset);
                 if (errno != 0)
@@ -963,7 +969,7 @@ write_back:
             }
             goto end;
         }
-        break;
+        goto end; /* preserve ordinary prctl results, errors and voided GET */
     }
 
     case PR_ptrace:

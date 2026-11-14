@@ -41,9 +41,11 @@ typedef unsigned char byte_t;
 #   define OFFSETOF_STAT_UID_32 24
 #   define OFFSETOF_STAT_GID_32 28
 
-#   define LOADER_ADDRESS     0x2000000000
-#   define EXEC_PIC_ADDRESS   0x3000000000
-#   define INTERP_PIC_ADDRESS 0x3f00000000
+/* Cluster fixed mappings above the 39-bit ASan shadow and leave a
+ * contiguous 336 GiB hole for large VM reservations (Termux 37c09de3). */
+#   define LOADER_ADDRESS     0x5400000000
+#   define EXEC_PIC_ADDRESS   0x5500000000
+#   define INTERP_PIC_ADDRESS 0x5900000000
 #   define HAS_POKEDATA_WORKAROUND true
 
 #endif

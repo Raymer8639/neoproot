@@ -27,11 +27,12 @@
 static void capture_execfn_addr(Tracee *tr)
 {
     word_t sp0 = peek_reg(tr, CURRENT, STACK_POINTER);
+    tr->execfn_addr = 0;
     word_t argc0 = 0;
     errno = 0;
     if (sp0 != 0)
         argc0 = peek_word(tr, sp0);
-    if (errno == 0 && argc0 > 0 && argc0 < 4096) {
+    if (errno == 0 && argc0 > 0) {
         errno = 0;
         tr->execfn_addr = peek_word(tr, sp0 + sizeof_word(tr));
         if (errno != 0)
@@ -47,12 +48,12 @@ static int fill_file_with_auxv(const Tracee *tr, const char *path, const ElfAuxV
     size_t i, buf_off;
     uint8_t buf[PATH_MAX * 2];
 
-    fd = open(path, O_WRONLY);
+    fd = open(path, O_WRONLY | O_TRUNC);
     if (fd < 0)
         return -1;
 
     buf_off = 0;
-    for (i = 0; vectors[i].type != AT_NULL; i++) {
+    for (i = 0; ; i++) {
         if (buf_off + 2 * word_size > sizeof(buf)) {
             ret = write(fd, buf, buf_off);
             if (ret != (ssize_t)buf_off) {
@@ -65,6 +66,8 @@ static int fill_file_with_auxv(const Tracee *tr, const char *path, const ElfAuxV
         buf_off += word_size;
         memcpy(buf + buf_off, &vectors[i].value, word_size);
         buf_off += word_size;
+        if (vectors[i].type == AT_NULL)
+            break;
     }
 
     if (buf_off > 0) {
@@ -129,9 +132,11 @@ static int bind_proc_pid_auxv(Tracee *tr)
 
     /* 记下临时文件路径：enter 侧把 guest 的 open(/proc/self/auxv)
      * 直接改写为它（auxv 通道 2 修复，绕过 -b /proc 绑定优先级）。 */
-    if (tr->auxv_host_path != NULL)
-        talloc_free(tr->auxv_host_path);
-    tr->auxv_host_path = talloc_strdup(tr, host_path);
+    /* Keep a reference to the temporary file itself, including its unlink
+     * destructor.  Forked tracees may still need it after the next exec. */
+    tr->auxv_host_path = talloc_reference(tr, (char *)host_path);
+    if (!tr->auxv_host_path)
+        return -1;
 
     binding = insort_binding4((Tracee *)tr, tr->life_context, host_path, guest_path,
                               BINDING_MOUNT_INTERNAL);
@@ -291,12 +296,6 @@ void translate_execve_exit(Tracee *tr)
 {
     word_t res;
 
-    if (tr->skip_proot_loader) {
-        tr->restore_original_regs = false;
-        tr->seen_execve = true;
-        return;
-    }
-
     if (IS_NOTIFICATION_PTRACED_LOAD_DONE(tr)) {
         word_t orig_sp, orig_ip;
 
@@ -328,6 +327,20 @@ void translate_execve_exit(Tracee *tr)
     res = peek_reg(tr, CURRENT, SYSARG_RESULT);
     if ((int)res < 0)
         return;
+
+    /* A successful exec invalidates the previous program's procfs copy.
+     * Drop only this tracee's reference; a forked child may still use it. */
+    if (tr->auxv_host_path != NULL) {
+        talloc_unlink(tr, tr->auxv_host_path);
+        tr->auxv_host_path = NULL;
+    }
+    tr->execfn_addr = 0;
+
+    if (tr->skip_proot_loader) {
+        tr->restore_original_regs = false;
+        tr->seen_execve = true;
+        return;
+    }
 
     /* 上游 571a6c0：guest 程序已在跑——此后的 PR_SET_NO_NEW_PRIVS
      * 调用属于 guest，不属于 neoproot 自身的 pre-execve 设置。 */

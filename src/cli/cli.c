@@ -220,9 +220,6 @@ static int initialize_exe(Tracee *restrict tracee, const char *exe) {
     status = which(tracee, tracee->reconf.paths, path, exe ?: "/bin/sh");
     if (UNLIKELY(status < 0))
         return -1;
-    status = detranslate_path(tracee, path, NULL);
-    if (UNLIKELY(status < 0))
-        return -1;
     tracee->exe = talloc_strdup(tracee, path);
     return 0;
 }
@@ -326,6 +323,7 @@ bool exit_failure = true;
 HOT
 int proot_main(int argc, char *const argv[]) {
     Tracee *tracee;
+    pid_t launch_parent_pid;
     int status;
     talloc_set_log_fn(NULL);
     putenv("ANDROID_PRIORITY=DISPLAY");
@@ -474,9 +472,13 @@ int proot_main(int argc, char *const argv[]) {
              tracee->seccomp_notify ? "seccomp USER_NOTIF" : "");
     if (!SAFE_GETENV("PROOT_NO_MOUNTINFO"))
         initialize_extension(tracee, mountinfo_callback, NULL);
+    launch_parent_pid = getpid();
     status = launch_process(tracee, &argv[status]);
     if (UNLIKELY(status < 0)) {
         print_execve_help(tracee, tracee->exe, status);
+        /* Child syscalls are translated: only the parent owns host cleanup. */
+        if (getpid() != launch_parent_pid)
+            _exit(EXIT_FAILURE);
         goto error;
     }
     exit(event_loop());

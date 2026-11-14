@@ -434,6 +434,13 @@ static FilteredSysnum proot_sysnums[] = {
     { PR_mkdirat,       0 },
     { PR_mknod,         0 },
     { PR_mknodat,       0 },
+    { PR_open_tree,     FILTER_SYSEXIT },
+    { PR_move_mount,    0 },
+    { PR_fsopen,        0 },
+    { PR_fsconfig,      0 },
+    { PR_fsmount,       0 },
+    { PR_fspick,        0 },
+    { PR_open_tree_attr, 0 },
     { PR_mount,         FILTER_SYSEXIT },
     { PR_mount_setattr, 0 },
     { PR_name_to_handle_at, 0 },
@@ -444,7 +451,7 @@ static FilteredSysnum proot_sysnums[] = {
     { PR_openat,        0 },
     { PR_openat2,       0 },
     { PR_pivot_root,    FILTER_SYSEXIT },
-    { PR_prctl,         0 },
+    { PR_prctl,         FILTER_SYSEXIT },
     { PR_prlimit64,     FILTER_SYSEXIT },
     { PR_ptrace,        FILTER_SYSEXIT },
     { PR_readlink,      FILTER_SYSEXIT },
@@ -454,6 +461,9 @@ static FilteredSysnum proot_sysnums[] = {
     { PR_renameat,      FILTER_SYSEXIT },
     { PR_renameat2,     FILTER_SYSEXIT },
     { PR_rmdir,         0 },
+    { PR_sendto,        0 },
+    { PR_sendmsg,       0 },
+    { PR_sendmmsg,      FILTER_SYSEXIT },
     { PR_setrlimit,     FILTER_SYSEXIT },
     { PR_setxattr,      0 },
     { PR_socketcall,    FILTER_SYSEXIT },
@@ -490,6 +500,7 @@ static FilteredSysnum netlink_sysnums[] = {
     { PR_close,         0 },
     { PR_recvfrom,      0 },
     { PR_recvmsg,       0 },
+    { PR_sendmmsg,      FILTER_SYSEXIT },
     { PR_sendmsg,       0 },
     { PR_sendto,        0 },
     { PR_socket,        FILTER_SYSEXIT },
@@ -524,6 +535,28 @@ static int merge_filtered_sysnums(TALLOC_CTX *ctx,
         }
     }
     return 0;
+}
+
+int filtered_sysnum_flags(const Tracee *tracee, Sysnum sysnum)
+{
+    int flags = 0;
+    for (size_t i = 0; proot_sysnums[i].value != PR_void; ++i)
+        if (proot_sysnums[i].value == sysnum)
+            flags |= proot_sysnums[i].flags;
+    /* These extra entries are selected when Android blocks AF_NETLINK. */
+    if (host_blocks_af_netlink(tracee))
+        for (size_t i = 0; netlink_sysnums[i].value != PR_void; ++i)
+            if (netlink_sysnums[i].value == sysnum)
+                flags |= netlink_sysnums[i].flags;
+    if (tracee->extensions) {
+        Extension *ext;
+        LIST_FOREACH(ext, tracee->extensions, link)
+            if (ext->filtered_sysnums)
+                for (size_t i = 0; ext->filtered_sysnums[i].value != PR_void; ++i)
+                    if (ext->filtered_sysnums[i].value == sysnum)
+                        flags |= ext->filtered_sysnums[i].flags;
+    }
+    return flags;
 }
 
 int enable_syscall_filtering(const Tracee *restrict tracee) {
@@ -562,8 +595,12 @@ int enable_syscall_filtering(const Tracee *restrict tracee) {
 
 #else /* !HAVE_SECCOMP_FILTER */
 
+#include "syscall/seccomp.h"
 #include "tracee/tracee.h"
 #include "attribute.h"
+
+int filtered_sysnum_flags([[maybe_unused]] const Tracee *tracee,
+        [[maybe_unused]] Sysnum sysnum) { return 0; }
 
 int enable_syscall_filtering([[maybe_unused]] const Tracee *tracee) {
     return 0;

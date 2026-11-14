@@ -28,6 +28,8 @@
 #include "cli/note.h"
 #include "build.h"
 #include "compat.h"
+#include "syscall/sysnum.h"
+#include "tracee/reg.h"
 
 #define PROC_PREFIX_LEN 6
 
@@ -136,6 +138,22 @@ static int translate_proc_passthrough(Tracee *tracee, char result[PATH_MAX],
 
     map_slot = proc_map_slot(tracee, path);
     if (map_slot != NULL) {
+        Sysnum nr = get_sysnum(tracee, CURRENT);
+        int open_flags = -1;
+        if (nr == PR_open)
+            open_flags = peek_reg(tracee, CURRENT, SYSARG_2);
+        else if (nr == PR_openat)
+            open_flags = peek_reg(tracee, CURRENT, SYSARG_3);
+        /* Writable virtual maps remain available to bwrap. Readers need the
+         * real kernel mapping, even after a simulated guest map write. */
+        if (open_flags >= 0 && (open_flags & O_ACCMODE) == O_RDONLY &&
+            (open_flags & (O_CREAT | O_TRUNC | O_APPEND)) == 0) {
+            ret = snprintf(result, PATH_MAX, "/proc/%d/%s", tracee->pid,
+                    strrchr(path, '/') + 1);
+            if (ret < 0 || ret >= PATH_MAX)
+                return -ENAMETOOLONG;
+            goto translated;
+        }
         if (*map_slot == NULL)
             *map_slot = create_temp_file(tracee->fs, "proc-map");
         tmp = *map_slot;
@@ -195,76 +213,82 @@ int join_paths(int number_paths, char result[PATH_MAX], ...)
     return 0;
 }
 
-int which(Tracee *tracee, const char *paths, char host_path[PATH_MAX], const char *command)
+/* Preserve the guest namespace and final leaf while validating via host paths. */
+static int guest_realpath(Tracee *tracee, char result[PATH_MAX], const char *path)
 {
-    char path[PATH_MAX];
+    char base[PATH_MAX], joined[PATH_MAX];
+    int status;
+    if (!tracee)
+        return realpath2(NULL, result, path, false);
+    if (path[0] == '/')
+        strcpy(base, "/");
+    else if ((status = getcwd2(tracee, base)) < 0)
+        return status;
+    status = join_paths(2, joined, base, path);
+    if (status < 0)
+        return status;
+    strcpy(result, "/");
+    return canonicalize(tracee, joined, false, result, 0);
+}
+
+int which(Tracee *tracee, const char *paths, char guest_path[PATH_MAX], const char *command)
+{
+    char host_path[PATH_MAX], path[PATH_MAX];
+    struct stat st;
     const char *cursor;
-    struct stat statr;
-    bool is_explicit;
-    bool found;
-
     assert(command != NULL);
-    is_explicit = (strchr(command, '/') != NULL);
-
-    if (realpath2(tracee, host_path, command, true) == 0 &&
-        stat(host_path, &statr) == 0)
-    {
-        if (is_explicit && !S_ISREG(statr.st_mode)) {
-            note(tracee, ERROR, USER, "'%s' is not a regular file", command);
+    if (strchr(command, '/') != NULL) {
+        int status = realpath2(tracee, host_path, command, true);
+        if (status < 0 || stat(host_path, &st) < 0)
+            return -1;
+        if (!S_ISREG(st.st_mode) || !(st.st_mode & S_IXUSR))
             return -EACCES;
-        }
-        if (is_explicit && !(statr.st_mode & S_IXUSR)) {
-            note(tracee, ERROR, USER, "'%s' is not executable", command);
-            return -EACCES;
-        }
-        found = true;
-        realpath2(tracee, host_path, command, false);
-    } else
-        found = false;
-
-    if (is_explicit)
-        return found ? 0 : -1;
-
-    paths = paths ?: getenv("PATH");
-    if (!paths || !*paths)
-        goto not_found;
-
-    cursor = paths;
-    do {
+        return guest_realpath(tracee, guest_path, command);
+    }
+    cursor = paths != NULL ? paths : getenv("PATH");
+    if (cursor == NULL)
+        return -1;
+    for (;;) {
         size_t len = strcspn(cursor, ":");
-        if (len >= PATH_MAX) {
-            cursor += len + 1;
-            continue;
+        size_t prefix = len == 0 ? 1 : len;
+        if (prefix + 1 + strlen(command) < sizeof(path)) {
+            if (len == 0)
+                path[0] = '.';
+            else
+                memcpy(path, cursor, len);
+            path[prefix] = '/';
+            strcpy(path + prefix + 1, command);
+            if (realpath2(tracee, host_path, path, true) == 0 &&
+                stat(host_path, &st) == 0 && S_ISREG(st.st_mode) && (st.st_mode & S_IXUSR) &&
+                guest_realpath(tracee, guest_path, path) == 0)
+                return 0;
         }
-
-        if (len == 0)
-            path[0] = '.';
-        else
-            memcpy(path, cursor, len);
-        path[len] = '/';
-        strcpy(path + len + 1, command);
-
-        if (realpath2(tracee, host_path, path, true) == 0 &&
-            stat(host_path, &statr) == 0 &&
-            S_ISREG(statr.st_mode) &&
-            (statr.st_mode & S_IXUSR))
-            return 0;
-
+        if (cursor[len] == '\0')
+            break;
         cursor += len + 1;
-    } while (*cursor);
-
-not_found:
-    getcwd2(tracee, path);
+    }
     note(tracee, ERROR, USER, "'%s' not found", command);
     return -1;
 }
 
 int realpath2(Tracee *tracee, char host_path[PATH_MAX], const char *path, bool deref_final)
 {
-    if (!tracee)
+    char parent[PATH_MAX], resolved[PATH_MAX];
+    const char *name;
+    if (tracee)
+        return translate_path(tracee, host_path, AT_FDCWD, path, deref_final);
+    name = strrchr(path, '/');
+    name = name == NULL ? path : name + 1;
+    if (deref_final || name[0] == '\0' || strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
         return realpath(path, host_path) ? 0 : -errno;
-
-    return translate_path(tracee, host_path, AT_FDCWD, path, deref_final);
+    size_t len = name - path;
+    if (len >= sizeof(parent))
+        return -ENAMETOOLONG;
+    memcpy(parent, path, len);
+    parent[len] = '\0';
+    if (realpath(len != 0 ? parent : ".", resolved) == NULL)
+        return -errno;
+    return join_paths(2, host_path, resolved, name);
 }
 
 int getcwd2(Tracee *tracee, char guest_path[PATH_MAX])

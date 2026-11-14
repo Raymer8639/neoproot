@@ -46,7 +46,8 @@ typedef enum Comparison {
 void safe_strcat(char *dest, size_t *dest_len, const char *src, size_t src_len);
 int  safe_strcpy(char *dest, const char *src, size_t size);
 
-int which(Tracee *tracee, const char *paths, char host_path[PATH_MAX], const char *command);
+/* Return a guest path, preserving the command leaf and binding alias. */
+int which(Tracee *tracee, const char *paths, char guest_path[PATH_MAX], const char *command);
 int realpath2(Tracee *tracee, char host_path[PATH_MAX], const char *path, bool deref_final);
 int getcwd2(Tracee *tracee, char guest_path[PATH_MAX]);
 const char *get_reported_cwd(const Tracee *tracee);

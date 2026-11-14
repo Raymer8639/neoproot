@@ -1,4 +1,5 @@
 #include <linux/limits.h>
+#include <limits.h>
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
@@ -104,16 +105,55 @@ int get_fd_path(Tracee *tracee, char path[PATH_MAX], Reg fd_sysarg, RegVersion v
 		translate_path(tracee, path, AT_FDCWD, "/", true);
 	}
 
-	if(!belongs_to_guestfs(tracee, path))
+	if(path[0] != '/' || !belongs_to_guestfs(tracee, path))
 		return 1;
 
 	return 0;
+}
+
+/* Only canonical proc descriptor names are accepted by the kernel. */
+int resolve_proc_fd_path(Tracee *tracee, char path[PATH_MAX])
+{
+	char target[PATH_MAX];
+	const char *cursor = path;
+	char *end;
+	unsigned long pid, fd;
+
+	if (strncmp(cursor, "/proc/", 6) != 0)
+		return -1;
+	cursor += 6;
+	if (strncmp(cursor, "self/", 5) == 0) {
+		pid = tracee->pid;
+		cursor += 5;
+	} else {
+		if (*cursor < '1' || *cursor > '9')
+			return -1;
+		errno = 0;
+		pid = strtoul(cursor, &end, 10);
+		if (errno != 0 || pid > INT_MAX || *end != '/')
+			return -1;
+		cursor = end + 1;
+	}
+	if (strncmp(cursor, "fd/", 3) != 0)
+		return -1;
+	cursor += 3;
+	if (*cursor < '0' || *cursor > '9' || (*cursor == '0' && cursor[1] != '\0'))
+		return -1;
+	errno = 0;
+	fd = strtoul(cursor, &end, 10);
+	if (errno != 0 || fd > INT_MAX || *end != '\0')
+		return -1;
+	if (readlink_proc_pid_fd(pid, fd, target) < 0 || target[0] != '/')
+		return -1;
+	strcpy(path, target);
+	return belongs_to_guestfs(tracee, path) ? 0 : 1;
 }
 
 int read_sysarg_path(Tracee *tracee, char path[PATH_MAX], Reg path_sysarg, RegVersion version)
 {
 	int size;
 	char original[PATH_MAX];
+	path[0] = '\0';
 
 	switch(version) {
 		case MODIFIED:
@@ -124,7 +164,11 @@ int read_sysarg_path(Tracee *tracee, char path[PATH_MAX], Reg path_sysarg, RegVe
 			break;
 		case ORIGINAL:
 			size = read_string(tracee, original, peek_reg(tracee, ORIGINAL, path_sysarg), PATH_MAX);
-			translate_path(tracee, path, AT_FDCWD, original, true);
+			if (size > 0 && size < PATH_MAX) {
+				int status = translate_path(tracee, path, AT_FDCWD, original, true);
+				if (status < 0)
+					return status;
+			}
 			break;
 		default:
 			size = 0;
@@ -259,12 +303,15 @@ int get_meta_path(char orig_path[PATH_MAX], char meta_path[PATH_MAX])
 	uint64_t hash = UINT64_C(1469598103934665603);
 	uint64_t hash2 = UINT64_C(0x9e3779b97f4a7c15);
 	const unsigned char *cursor;
+	size_t length = strnlen(orig_path, PATH_MAX);
 	int written;
 
-	if (strnlen(orig_path, PATH_MAX) >= PATH_MAX)
-		return -EINVAL;
+	if (length >= PATH_MAX)
+		return -ENAMETOOLONG;
+	while (length > 1 && orig_path[length - 1] == '/')
+		length--;
 
-	for (cursor = (const unsigned char *)orig_path; *cursor != '\0'; ++cursor) {
+	for (cursor = (const unsigned char *)orig_path; (size_t)(cursor - (const unsigned char *)orig_path) < length; ++cursor) {
 		hash ^= *cursor;
 		hash *= UINT64_C(1099511628211);
 		hash2 ^= *cursor;
@@ -311,7 +358,7 @@ int write_meta_file(char path[PATH_MAX], mode_t mode, uid_t owner, gid_t group,
 	if(is_creat)
 		mode = (mode & ~(config->umask) & 0777);
 
-	record->mode = mode;
+	record->mode = mode & 07777;
 	record->owner = owner;
 	record->group = group;
 	return 0;

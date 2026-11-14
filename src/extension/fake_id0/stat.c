@@ -1,4 +1,6 @@
 #include <linux/limits.h>
+#include <fcntl.h>
+#include "path/path.h"
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -71,7 +73,11 @@ int handle_stat_enter_end(Tracee *tracee, Reg fd_sysarg)
     word_t link_addr = alloc_mem(tracee, sizeof(link_path));
     word_t path_addr = alloc_mem(tracee, PATH_MAX);
 
-    write_data(tracee, link_addr, link_path, sizeof(link_path));
+    if (link_addr == 0 || path_addr == 0)
+        return -EFAULT;
+    int status = write_data(tracee, link_addr, link_path, strlen(link_path) + 1);
+    if (status < 0)
+        return status;
 
     set_sysnum(tracee, PR_readlinkat);
     poke_reg(tracee, SYSARG_1, AT_FDCWD);
@@ -92,14 +98,22 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum)
     int ret;
 
     if (sysnum == PR_fstat || sysnum == PR_fstat64)
-        ret = read_sysarg_path(tracee, path, SYSARG_2, CURRENT);
+        ret = get_fd_path(tracee, path, SYSARG_1, ORIGINAL);
     else if (sysnum == PR_fstatat64 || sysnum == PR_newfstatat)
         ret = read_sysarg_path(tracee, path, SYSARG_2, MODIFIED);
     else
         ret = read_sysarg_path(tracee, path, SYSARG_1, MODIFIED);
 
+    /* An empty path names dirfd itself; non-path descriptors still get the
+     * normal id mapping instead of failing an already successful stat. */
+    if ((sysnum == PR_fstatat64 || sysnum == PR_newfstatat) && ret == 0
+        && path[0] == '\0' && (peek_reg(tracee, MODIFIED, SYSARG_4) & AT_EMPTY_PATH)) {
+        char fd_path[PATH_MAX];
+        if (get_fd_path(tracee, fd_path, SYSARG_1, MODIFIED) == 0)
+            strcpy(path, fd_path);
+    }
     if (ret != 0)
-        return ret;
+        path[0] = '\0';
 
     Reg stat_arg;
     if (sysnum == PR_fstatat64 || sysnum == PR_newfstatat)
@@ -108,21 +122,22 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum)
         stat_arg = SYSARG_2;
 
     char meta_path[PATH_MAX];
-    if (get_meta_path(path, meta_path) == 0 && path_exists(meta_path) == 0) {
+    if (path[0] == '/' && get_meta_path(path, meta_path) == 0 && path_exists(meta_path) == 0) {
         mode_t mode;
         uid_t uid;
         gid_t gid;
         read_meta_file(meta_path, &mode, &uid, &gid, config);
 
         struct stat st;
-        read_data(tracee, &st, peek_reg(tracee, ORIGINAL, stat_arg), sizeof(st));
+        int status = read_data(tracee, &st, peek_reg(tracee, ORIGINAL, stat_arg), sizeof(st));
+        if (status < 0)
+            return status;
 
-        st.st_mode = mode | (st.st_mode & (S_IFMT | 07000));
+        st.st_mode = (mode & 07777) | (st.st_mode & (S_IFMT | 07000));
         st.st_uid = uid;
         st.st_gid = gid;
 
-        write_data(tracee, peek_reg(tracee, ORIGINAL, stat_arg), &st, sizeof(st));
-        return 0;
+        return write_data(tracee, peek_reg(tracee, ORIGINAL, stat_arg), &st, sizeof(st));
     }
 
     word_t addr = peek_reg(tracee, ORIGINAL, stat_arg);
@@ -148,8 +163,28 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum)
 
 int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config, uintptr_t statx_state_raw)
 {
-    (void)tracee;
     struct statx_syscall_state *state = (struct statx_syscall_state *)statx_state_raw;
+#ifdef USERLAND
+    char meta_path[PATH_MAX];
+    mode_t mode;
+    uid_t uid;
+    gid_t gid;
+    if (state->host_path[0] == '/' && belongs_to_guestfs(tracee, state->host_path)
+        && get_meta_path(state->host_path, meta_path) == 0 && path_exists(meta_path) == 0) {
+        read_meta_file(meta_path, &mode, &uid, &gid, config);
+        if (state->statx_buf.stx_mask & STATX_MODE)
+            state->statx_buf.stx_mode = (mode & 07777)
+                | (state->statx_buf.stx_mode & (S_IFMT | 07000));
+        if (state->statx_buf.stx_mask & STATX_UID)
+            state->statx_buf.stx_uid = uid;
+        if (state->statx_buf.stx_mask & STATX_GID)
+            state->statx_buf.stx_gid = gid;
+        state->updated_stats = true;
+        return 0;
+    }
+#else
+    (void)tracee;
+#endif
 
     if (state->statx_buf.stx_mask & STATX_UID) {
         if (state->statx_buf.stx_uid == getuid()) {

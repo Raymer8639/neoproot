@@ -44,7 +44,13 @@
 
 #define DELETED_SUFFIX " (deleted)"
 #define DELETED_SUFFIX_LEN (sizeof(DELETED_SUFFIX)-1)
-#define MAX_LINK_SUFFIX 1000
+#define MAX_LINK_SUFFIX 10000
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE (1 << 0)
+#endif
+#ifndef RENAME_EXCHANGE
+#define RENAME_EXCHANGE (1 << 1)
+#endif
 /* final 编号（%04d）上限：9999 = 数据本体 1 + 链接数 9998。
  * 超限（第 9999 个链接）时 %04d 溢出为 5 位，parse_4digit 取尾 4 位
  * 错乱（0000→0）→ 后续 unlink 误判计数归零删数据——必须提前拒绝。
@@ -56,7 +62,11 @@
 #define LINUX_DIRENT64_NAME_OFFSET 19
 #define MAX_DIRENT_BUFFER (16U * 1024U * 1024U)
 
-static int decrement_link_count(Tracee *tracee, Reg sysarg);
+static int decrement_intermediate_count(Tracee *tracee, const char *original,
+                                       const char *intermediate);
+static int read_intermediate(const char *intermediate, char final[PATH_MAX]);
+static int find_intermediate(const char *final, char intermediate[PATH_MAX]);
+static bool is_l2s_file(const char *path);
 static bool is_l2s_internal_path(const char *path);
 static bool parse_l2s_final_count(const char *path, int *count);
 
@@ -348,8 +358,19 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
         filename = get_filename(intermediate, NULL);
         if (is_l2s_internal_path(intermediate))
             first_link = false;
-        else if (strncmp(filename, PREFIX, PREFIX_LEN) == 0)
-            return -EINVAL;
+        else {
+            /* link(2) links the symbolic link itself. Moving it to the backing
+             * directory would change the meaning of relative contents. */
+            status = read_path(tracee, dest_path, peek_reg(tracee, CURRENT, dest_sysarg));
+            if (status < 0) return status;
+            if (symlink(intermediate, dest_path) < 0) return -errno;
+            poke_reg(tracee, SYSARG_RESULT, 0);
+            set_sysnum(tracee, PR_void);
+            return 0;
+        }
+    } else if (is_l2s_file(original) && find_intermediate(original, intermediate) == 0) {
+        /* linkat(AT_SYMLINK_FOLLOW) has already resolved the visible name. */
+        first_link = false;
     } else {
         filename = get_filename(original, &path_len);
         prefix_len = path_len - strlen(filename);
@@ -380,74 +401,40 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
     }
 
     if (LIKELY(first_link)) {
-        struct stat l2s_st;
-        do {
-            snprintf(new_intermediate, PATH_MAX, "%s%04d", intermediate, suffix++);
-        } while (l2s_lstat(new_intermediate, &l2s_st) == 0 && suffix < MAX_LINK_SUFFIX);
-        /* 用 lstat（不跟随）替代 access：access 跟随 symlink，旧残留断链
-         * （.l2s.xxxNNNN → 不存在的 final）会被误判为"名字可用"，随后
-         * symlink 报 EEXIST（symlink 不跟随，能看见断链本身） */
+        /* Reserve the intermediate atomically before moving anything. Dangling
+         * intermediates and orphan final files both occupy their slots. */
+        for (suffix = 1; ; suffix++) {
+            if (suffix >= MAX_LINK_SUFFIX) return -EMLINK;
+            status = snprintf(final, PATH_MAX, "%s%04d.0002", intermediate, suffix);
+            if (status < 0 || status >= PATH_MAX) return -ENAMETOOLONG;
+            status = snprintf(new_intermediate, PATH_MAX, "%s%04d", intermediate, suffix);
+            if (status < 0 || status >= PATH_MAX) return -ENAMETOOLONG;
+            if (l2s_lstat(final, &statl) == 0) continue;
+            if (errno != ENOENT) return -errno;
+            if (l2s_symlink(final, new_intermediate) == 0) break;
+            if (errno != EEXIST) return -errno;
+        }
         strcpy(intermediate, new_intermediate);
-        snprintf(final, PATH_MAX, "%s.0002", intermediate);
-        status = l2s_rename(original, final);
-        if (UNLIKELY(status < 0)) {
-            /* 并发竞态：pnpm 多 worker 同时 link 同一 store 文件（内容寻址，
-             * 多包共享同内容）。数据已被其他 worker rename 走（同 hash 链
-             * 已建好）→ 直接把 dest 链接到已存在的中间链接，链内容相同安全 */
-            if (errno == ENOENT) {
-                status = read_path(tracee, dest_path, peek_reg(tracee, CURRENT, dest_sysarg));
-                if (LIKELY(status >= 0) && l2s_lstat(intermediate, &l2s_st) == 0) {
-                    status = symlink(intermediate, dest_path);
-                    if (LIKELY(status == 0)) {
-                        poke_reg(tracee, SYSARG_RESULT, 0);
-                        set_sysnum(tracee, PR_void);
-                        return 0;
-                    }
-                }
-            }
-            return -errno;
+        if (l2s_rename(original, final) < 0) {
+            status = -errno;
+            (void) l2s_unlink(intermediate);
+            return status;
         }
-        status = notify_extensions(tracee, LINK2SYMLINK_RENAME, (intptr_t)original, (intptr_t)final);
-        if (UNLIKELY(status < 0)) return status;
-        status = l2s_symlink(final, intermediate);
-        if (UNLIKELY(status < 0)) {
-            if (errno == EEXIST) {
-                /* 并发或残留：中间链接名已存在。检查它是否可用：
-                 * lstat 确认存在 + readlink 目标存在 → 复用（同 hash 内容相同）；
-                 * 断链（目标不存在）→ 删除重建 */
-                char existing[PATH_MAX] ALIGNED;
-                if (l2s_lstat(intermediate, &l2s_st) == 0 &&
-                    my_readlink(intermediate, existing, PATH_MAX) >= 0 &&
-                    l2s_access(existing) == 0) {
-                    /* 有效链：复用。数据同 hash 内容相同（我们的 rename
-                     * 覆盖同内容无害）。重建 original 链接 + dest 链接 */
-                    if (access(original, F_OK) != 0)
-                        symlink(intermediate, original);
-                    status = read_path(tracee, dest_path, peek_reg(tracee, CURRENT, dest_sysarg));
-                    if (LIKELY(status >= 0)) {
-                        status = symlink(intermediate, dest_path);
-                        if (LIKELY(status == 0)) {
-                            poke_reg(tracee, SYSARG_RESULT, 0);
-                            set_sysnum(tracee, PR_void);
-                            return 0;
-                        }
-                    }
-                } else {
-                    /* 断链残留：删除后重建自己的链 */
-                    l2s_unlink(intermediate);
-                    if (l2s_symlink(final, intermediate) == 0) {
-                        status = symlink(intermediate, original);
-                        if (UNLIKELY(status < 0 && errno != EEXIST)) return -errno;
-                        goto dest_link;
-                    }
-                }
+        status = notify_extensions(tracee, LINK2SYMLINK_RENAME,
+                                   (intptr_t)original, (intptr_t)final);
+        if (status >= 0 && symlink(intermediate, original) < 0)
+            status = -errno;
+        if (status < 0) {
+            /* Do not overwrite a name concurrently taken by another creator. */
+            if (status != -EEXIST && l2s_rename(final, original) == 0) {
+                (void) notify_extensions(tracee, LINK2SYMLINK_RENAME,
+                                         (intptr_t)final, (intptr_t)original);
+                (void) l2s_unlink(intermediate);
             }
-            return -errno;
+            return status;
         }
-        status = symlink(intermediate, original);
-        if (UNLIKELY(status < 0 && errno != EEXIST)) return -errno;
     } else {
-        status = my_readlink(intermediate, final, PATH_MAX);
+        status = read_intermediate(intermediate, final);
         if (UNLIKELY(status < 0)) return status;
         size_t final_len = strlen(final);
         if (UNLIKELY(!parse_l2s_final_count(final, &link_count)))
@@ -470,14 +457,13 @@ static HOT int move_and_symlink_path(Tracee *restrict tracee, Reg src_sysarg, Re
         if (UNLIKELY(status < 0)) return -errno;
     }
 
-dest_link:
     status = read_path(tracee, dest_path, peek_reg(tracee, CURRENT, dest_sysarg));
     if (LIKELY(status >= 0)) {
         status = symlink(intermediate, dest_path);
         if (UNLIKELY(status < 0)) status = -errno;
     }
     if (UNLIKELY(status < 0)) {
-        decrement_link_count(tracee, src_sysarg);
+        (void) decrement_intermediate_count(tracee, original, intermediate);
         return status;
     }
     poke_reg(tracee, SYSARG_RESULT, 0);
@@ -485,29 +471,14 @@ dest_link:
     return 0;
 }
 
-static HOT int decrement_link_count(Tracee *restrict tracee, Reg path_sysarg) {
-    if (UNLIKELY(!tracee)) return -EINVAL;
-    char original[PATH_MAX] ALIGNED;
-    char intermediate[PATH_MAX] ALIGNED;
+static HOT int decrement_intermediate_count(Tracee *restrict tracee,
+                                          const char *original, const char *intermediate) {
     char final[PATH_MAX] ALIGNED;
     char new_final[PATH_MAX] ALIGNED;
-    struct stat statl;
     size_t final_len;
-    ssize_t size;
     int status, link_count;
 
-    size = read_string(tracee, original, peek_reg(tracee, CURRENT, path_sysarg), PATH_MAX);
-    if (UNLIKELY(size < 0)) return size;
-    if (UNLIKELY(size >= PATH_MAX)) return -ENAMETOOLONG;
-
-    status = l2s_lstat(original, &statl);
-    if (UNLIKELY(status < 0 || !S_ISLNK(statl.st_mode))) return 0;
-
-    status = my_readlink(original, intermediate, PATH_MAX);
-    if (UNLIKELY(status < 0)) return status;
-    if (UNLIKELY(!is_l2s_internal_path(intermediate))) return 0;
-
-    status = my_readlink(intermediate, final, PATH_MAX);
+    status = read_intermediate(intermediate, final);
     if (UNLIKELY(status < 0)) {
         VERBOSE(tracee, 1, "Skipping broken link2symlink \"%s\" -> \"%s\"", original, intermediate);
         return 0;
@@ -547,7 +518,6 @@ static HOT int handle_sysexit_end(Extension *extension) {
     word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
     struct stat final_stat, statl;
     char original[PATH_MAX] ALIGNED, intermediate[PATH_MAX] ALIGNED, final[PATH_MAX] ALIGNED;
-    char *filename;
     Reg stat_reg, path_reg;
     ssize_t size;
     int status;
@@ -595,7 +565,6 @@ static HOT int handle_sysexit_end(Extension *extension) {
         if (UNLIKELY(size < 0 || size >= PATH_MAX)) return size;
     }
 
-    filename = get_filename(original, NULL);
     status = l2s_lstat(original, &statl);
     if (UNLIKELY(status < 0)) return 0;
     if (is_l2s_internal_path(original)) {
@@ -610,17 +579,16 @@ static HOT int handle_sysexit_end(Extension *extension) {
     if (UNLIKELY(!S_ISLNK(statl.st_mode))) return 0;
 
     size = my_readlink(original, intermediate, PATH_MAX);
-    if (UNLIKELY(size < 0)) return size;
-    filename = get_filename(intermediate, NULL);
-    if (UNLIKELY(strncmp(filename, PREFIX, PREFIX_LEN) != 0)) return 0;
+    if (UNLIKELY(size < 0)) return 0;
+    if (UNLIKELY(!is_l2s_internal_path(intermediate))) return 0;
 
 proc_intermediate:
-    size = my_readlink(intermediate, final, PATH_MAX);
-    if (UNLIKELY(size < 0)) return size;
+    if (UNLIKELY(read_intermediate(intermediate, final) < 0)) return 0;
 
 proc_final:
+    if (UNLIKELY(!is_l2s_file(final))) return 0;
     status = l2s_lstat(final, &final_stat);
-    if (UNLIKELY(status < 0)) return -errno;
+    if (UNLIKELY(status < 0)) return 0;
     int final_count;
     if (UNLIKELY(!parse_l2s_final_count(final, &final_count))) return 0;
     final_stat.st_nlink = final_count;
@@ -763,16 +731,10 @@ int link2symlink_disguise_statx(Tracee *tracee, const char *host_path,
 }
 
 static FORCE_INLINE void link2symlink_handle_statx(struct statx_syscall_state *state) {
+    int count;
     if (UNLIKELY(!state || !(state->statx_buf.stx_mask & STATX_NLINK))) return;
-    const char *name = strrchr(state->host_path, '/');
-    if (UNLIKELY(!name)) return;
-    size_t name_len = strlen(name);
-    if (UNLIKELY(name_len < PREFIX_LEN + 6)) return;
-    if (UNLIKELY(strncmp(name + 1, PREFIX, PREFIX_LEN) != 0)) return;
-    if (UNLIKELY(name[name_len - 5] != '.')) return;
-    if (UNLIKELY(!isdigit(name[name_len-4]) || !isdigit(name[name_len-3]) ||
-                 !isdigit(name[name_len-2]) || !isdigit(name[name_len-1]))) return;
-    state->statx_buf.stx_nlink = parse_4digit(name + name_len - 4);
+    if (parse_l2s_final_count(state->host_path, &count))
+        state->statx_buf.stx_nlink = count;
 }
 
 /* 判断文件名是否为 link2symlink 内部文件名：
@@ -805,6 +767,11 @@ typedef struct {
 	/* 正在翻译路径的最后一个组件被解引用前的 host 路径（链名）；
 	 * 空 = 本次路径的末组件不是 l2s 链。 */
 	char final_component[PATH_MAX];
+	/* Host name reached after ordinary symbolic links, before the L2S hops. */
+	char dereferenced_link[PATH_MAX];
+	/* Defer count changes until a successful syscall actually removes a name. */
+	char removed_link[PATH_MAX];
+	char removed_intermediate[PATH_MAX];
 
 	/* 当前 syscall 被重定向走的假硬链接名；exit 阶段拿到 fd 号后
 	 * 登记进 fd_cache，然后清空。 */
@@ -867,15 +834,21 @@ static FORCE_INLINE bool is_l2s_stat_syscall(Sysnum sysnum) {
 
 /* host_path 是否为 l2s 目录里的【最终数据文件】".l2s.<name><NNNN>.0002"
  * （中间链接 ".l2s.<name><NNNN>" 数字前无点，这里排除） */
-static FORCE_INLINE bool is_l2s_file(const char *host_path) {
-	char *name = get_filename((char *)host_path, NULL);
-	size_t len = strlen(name);
-	if (UNLIKELY(strncmp(name, PREFIX, PREFIX_LEN) != 0)) return false;
-	if (UNLIKELY(len < PREFIX_LEN + 5)) return false; /* 5 = strlen(".0002") */
-	if (UNLIKELY(name[len - 5] != '.')) return false;
-	for (int i = 1; i <= 4; i++)
-		if (UNLIKELY(!isdigit((unsigned char)name[len - i]))) return false;
-	return true;
+static bool is_l2s_file(const char *host_path) {
+    const char *name, *dot;
+    size_t i;
+    if (host_path == NULL) return false;
+    name = get_filename((char *)host_path, NULL);
+    if (strncmp(name, PREFIX, PREFIX_LEN) != 0) return false;
+    dot = strrchr(name, '.');
+    if (dot == NULL || (size_t)(dot - name) < PREFIX_LEN + 5 || strlen(dot + 1) != 4)
+        return false;
+    /* Subtract the unsigned index: negating it is undefined pointer arithmetic
+     * under Clang's non-wrapping optimizations (Termux clang 21). */
+    for (i = 1; i <= 4; i++)
+        if (!isdigit((unsigned char)*(dot - i)) ||
+            !isdigit((unsigned char)dot[i])) return false;
+    return parse_4digit(dot + 1) > 0;
 }
 
 static bool is_l2s_internal_path(const char *path) {
@@ -933,15 +906,126 @@ static bool parse_l2s_final_count(const char *path, int *count) {
     return true;
 }
 
+static int read_faked_hard_link(const char *link, char intermediate[PATH_MAX]) {
+    int status = my_readlink(link, intermediate, PATH_MAX);
+    if (status < 0) return status;
+    return is_l2s_internal_path(intermediate) ? 0 : -EINVAL;
+}
+
+static int read_intermediate(const char *intermediate, char final[PATH_MAX]) {
+    int status = my_readlink(intermediate, final, PATH_MAX);
+    if (status < 0) return status;
+    return parse_l2s_final_count(final, &(int){0}) ? 0 : -ENOENT;
+}
+
 /* 解假硬链接链：link(链) -> intermediate(中间链) -> final(数据文件) */
-static FORCE_INLINE int resolve_faked_hard_link(const char link[PATH_MAX], char final[PATH_MAX]) {
-	char intermediate[PATH_MAX] ALIGNED;
-	int status = my_readlink(link, intermediate, PATH_MAX);
-	if (UNLIKELY(status < 0)) return status;
-    if (UNLIKELY(!is_l2s_internal_path(intermediate))) return -EINVAL;
-    status = my_readlink(intermediate, final, PATH_MAX);
-    if (UNLIKELY(status < 0)) return status;
-    return parse_l2s_final_count(final, &(int){0}) ? 0 : -EINVAL;
+static int resolve_faked_hard_link(const char *link, char final[PATH_MAX]) {
+    char intermediate[PATH_MAX] ALIGNED;
+    int status = read_faked_hard_link(link, intermediate);
+    return status < 0 ? status : read_intermediate(intermediate, final);
+}
+
+static int find_intermediate(const char *final, char intermediate[PATH_MAX]) {
+    char pointee[PATH_MAX];
+    struct stat st_final, st_pointee;
+    size_t length;
+    int status;
+    if (!is_l2s_file(final)) return -ENOENT;
+    length = strrchr(final, '.') - final;
+    memcpy(intermediate, final, length);
+    intermediate[length] = '\0';
+    status = read_intermediate(intermediate, pointee);
+    if (status < 0) return status;
+    if (l2s_lstat(final, &st_final) < 0 || l2s_lstat(pointee, &st_pointee) < 0)
+        return -errno;
+    return st_final.st_dev == st_pointee.st_dev && st_final.st_ino == st_pointee.st_ino
+        ? 0 : -ENOENT;
+}
+
+static int remember_removed_link(Extension *extension, Reg sysarg) {
+    Tracee *tracee = TRACEE(extension);
+    Link2SymlinkConfig *config;
+    char link[PATH_MAX], intermediate[PATH_MAX];
+    ssize_t size = read_string(tracee, link, peek_reg(tracee, CURRENT, sysarg), PATH_MAX);
+    if (size < 0) return size;
+    if (size >= PATH_MAX) return -ENAMETOOLONG;
+    if (read_faked_hard_link(link, intermediate) < 0) return 0;
+    config = get_config(extension, true);
+    if (config == NULL) return -ENOMEM;
+    strcpy(config->removed_link, link);
+    strcpy(config->removed_intermediate, intermediate);
+    return 0;
+}
+
+static int prepare_rename(Extension *extension, Reg old_arg, Reg new_arg, word_t flags) {
+    Tracee *tracee = TRACEE(extension);
+    Link2SymlinkConfig *config;
+    char old_path[PATH_MAX], old_intermediate[PATH_MAX];
+    ssize_t size;
+    int status;
+    if (flags & (RENAME_NOREPLACE | RENAME_EXCHANGE)) return 0;
+    status = remember_removed_link(extension, new_arg);
+    if (status < 0) return status;
+    config = get_config(extension, false);
+    if (config == NULL || config->removed_link[0] == '\0') return 0;
+    size = read_string(tracee, old_path, peek_reg(tracee, CURRENT, old_arg), PATH_MAX);
+    if (size < 0) return size;
+    if (size >= PATH_MAX) return -ENAMETOOLONG;
+    if (read_faked_hard_link(old_path, old_intermediate) < 0 ||
+        strcmp(old_intermediate, config->removed_intermediate) != 0) return 0;
+    /* The kernel sees two symlinks, but rename between two hard links of the
+     * same file is a no-op. Keep its permission and flag checks intact. */
+    poke_reg(tracee, new_arg, peek_reg(tracee, CURRENT, old_arg));
+    config->removed_link[0] = '\0';
+    return 0;
+}
+
+static int decrement_removed_link_count(Tracee *tracee, const char *link,
+                                        const char *intermediate) {
+    char directory[PATH_MAX], *slash;
+    struct stat st;
+    int status = decrement_intermediate_count(tracee, link, intermediate);
+    int fd;
+    if (status != -EACCES) return status;
+    strcpy(directory, intermediate);
+    slash = strrchr(directory, '/');
+    if (slash == NULL) return status;
+    if (slash == directory) slash++;
+    *slash = '\0';
+    /* Use the checked backing descriptor rather than following its pathname. */
+    if (get_l2s_directory() && strcmp(directory, l2s_directory) == 0) {
+        fd = open_l2s_directory();
+        if (fd >= 0) fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    } else fd = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return status;
+    if (fstat(fd, &st) < 0 || fchmod(fd, (st.st_mode & 07777) | S_IWUSR) < 0) {
+        close(fd);
+        return status;
+    }
+    status = decrement_intermediate_count(tracee, link, intermediate);
+    (void) fchmod(fd, st.st_mode & 07777);
+    close(fd);
+    return status;
+}
+
+static void forget_removed_link(Extension *extension) {
+    Tracee *tracee = TRACEE(extension);
+    Link2SymlinkConfig *config = get_config(extension, false);
+    char value[PATH_MAX];
+    int status;
+    if (config == NULL || config->removed_link[0] == '\0') return;
+    /* A rejected outer-seccomp call may have a false successful result. Verify
+     * the name is gone or now points to the other rename operand as well. */
+    if (peek_reg(tracee, CURRENT, SYSARG_RESULT) == 0 &&
+        (my_readlink(config->removed_link, value, PATH_MAX) < 0 ||
+         strcmp(value, config->removed_intermediate) != 0)) {
+        status = decrement_removed_link_count(tracee, config->removed_link,
+                                               config->removed_intermediate);
+        if (status < 0)
+            VERBOSE(tracee, 1, "link2symlink: cannot decrement removed link %s: %d",
+                    config->removed_link, status);
+    }
+    config->removed_link[0] = '\0';
 }
 
 static const FilteredSysnum link2symlink_filtered_sysnums[] = {
@@ -996,7 +1080,7 @@ static const FilteredSysnum link2symlink_dirent_filtered_sysnums[] = {
 	FILTERED_SYSNUM_END,
 };
 
-static bool is_l2s_fake_entry(const char *directory, const char *name,
+static unsigned char l2s_fake_entry_type(const char *directory, const char *name,
 				      size_t name_len)
 {
 	char candidate[PATH_MAX] ALIGNED;
@@ -1006,19 +1090,19 @@ static bool is_l2s_fake_entry(const char *directory, const char *name,
 	size_t directory_len;
 
 	if (UNLIKELY(directory == NULL || name == NULL || name_len == 0))
-		return false;
+		return DT_LNK;
 	if (UNLIKELY(name_len == 1 && name[0] == '.'))
-		return false;
+		return DT_LNK;
 	if (UNLIKELY(name_len == 2 && name[0] == '.' && name[1] == '.'))
-		return false;
+		return DT_LNK;
 	if (UNLIKELY(memchr(name, '/', name_len) != NULL))
-		return false;
+		return DT_LNK;
 
 	directory_len = strlen(directory);
 	if (UNLIKELY(directory_len == 0))
-		return false;
+		return DT_LNK;
 	if (UNLIKELY(directory_len + 1 + name_len >= PATH_MAX))
-		return false;
+		return DT_LNK;
 	memcpy(candidate, directory, directory_len);
 	if (candidate[directory_len - 1] != '/')
 		candidate[directory_len++] = '/';
@@ -1026,11 +1110,12 @@ static bool is_l2s_fake_entry(const char *directory, const char *name,
 	candidate[directory_len + name_len] = '\0';
 
     if (UNLIKELY(l2s_lstat(candidate, &statl) < 0 || !S_ISLNK(statl.st_mode)))
-		return false;
+		return DT_LNK;
 	status = resolve_faked_hard_link(candidate, final);
 	if (UNLIKELY(status < 0))
-		return false;
-    return l2s_lstat(final, &statl) == 0 && S_ISREG(statl.st_mode);
+		return DT_LNK;
+    if (l2s_lstat(final, &statl) < 0) return DT_LNK;
+    return (statl.st_mode & S_IFMT) >> 12;
 }
 
 static int fix_getdents64_dirent_types(Extension *extension)
@@ -1081,12 +1166,14 @@ static int fix_getdents64_dirent_types(Extension *extension)
 			break;
 		name = record + LINUX_DIRENT64_NAME_OFFSET;
 		nul = memchr(name, '\0', reclen - LINUX_DIRENT64_NAME_OFFSET);
-		if (nul != NULL && record[LINUX_DIRENT64_D_TYPE_OFFSET] == DT_LNK &&
-		    is_l2s_fake_entry(directory, (const char *)name,
-				      (size_t)(nul - name))) {
-			record[LINUX_DIRENT64_D_TYPE_OFFSET] = DT_REG;
-			changed = true;
-		}
+        if (nul != NULL && record[LINUX_DIRENT64_D_TYPE_OFFSET] == DT_LNK) {
+            unsigned char type = l2s_fake_entry_type(directory, (const char *)name,
+                                                     (size_t)(nul - name));
+            if (type != DT_LNK) {
+                record[LINUX_DIRENT64_D_TYPE_OFFSET] = type;
+                changed = true;
+            }
+        }
 		offset += reclen;
 	}
 
@@ -1157,77 +1244,82 @@ static void remember_fd(pid_t pid, int fd, const char link[PATH_MAX]) {
 	fd_cache[slot].fd   = fd;
 }
 
-/* 返回 pid 进程的 fd 打开时用的链名；未知返回 NULL。线程共享描述符但
- * 不共享 pid——兄弟线程的条目作兜底返回，调用方负责校验文件仍一致。 */
-static const char *recall_fd(pid_t pid, int fd) {
-	const char *fallback = NULL;
-	size_t index;
-
-	for (index = 0; index < FD_CACHE_SIZE; index++) {
-		if (fd_cache[index].link == NULL || fd_cache[index].fd != fd)
-			continue;
-		if (fd_cache[index].pid == pid)
-			return fd_cache[index].link;
-		fallback = fd_cache[index].link;
-	}
-	return fallback;
+/* Match by the resolved file after dup/fork, preferring the exact descriptor.
+ * Rank 3 is a valid last resort too (upstream's initial bound skipped it). */
+static const char *recall_fd(pid_t pid, int fd, const char *host_path) {
+    const char *best = NULL;
+    int best_rank = 4;
+    char final[PATH_MAX];
+    for (size_t i = 0; i < FD_CACHE_SIZE; i++) {
+        int rank;
+        if (fd_cache[i].link == NULL) continue;
+        rank = fd_cache[i].pid == pid ? (fd_cache[i].fd == fd ? 0 : 1)
+                                      : (fd_cache[i].fd == fd ? 2 : 3);
+        if (rank >= best_rank) continue;
+        if (resolve_faked_hard_link(fd_cache[i].link, final) < 0 ||
+            strcmp(final, host_path) != 0) continue;
+        best = fd_cache[i].link;
+        best_rank = rank;
+        if (rank == 0) break;
+    }
+    return best;
 }
 
-/* READLINK_PROC_FD：把内核上报的 l2s 存储名替换为 tracee 打开时用的名字 */
-static FORCE_INLINE void readlink_proc_fd(struct readlink_proc_fd_state *state) {
-	char final[PATH_MAX] ALIGNED;
-	const char *link;
-
-	if (!is_l2s_file(state->host_path))
-		return;
-
-	link = recall_fd(state->pid, state->fd);
-	if (link == NULL)
-		return;
-
-	/* fd 号会复用、链可能已删——确认记住的名字仍指向同一文件 */
-	if (resolve_faked_hard_link(link, final) < 0)
-		return;
-	if (strcmp(final, state->host_path) != 0)
-		return;
-
-	strcpy(state->host_path, link);
-	state->substituted = true;
+static void readlink_proc_fd(struct readlink_proc_fd_state *state) {
+    const char *link;
+    if (!is_l2s_file(state->host_path)) return;
+    link = recall_fd(state->pid, state->fd, state->host_path);
+    if (link == NULL) return;
+    strcpy(state->host_path, link);
+    state->substituted = true;
 }
 
-/* open 类 syscall 被重定向到 l2s 数据文件时，记住 tracee 用的链名
- * （canonicalize 期间记录在 final_component），并强制 exit 停靠拿 fd 号。 */
-static FORCE_INLINE void remember_opened_link(Extension *extension, const char host_path[PATH_MAX]) {
-	Tracee *tracee = TRACEE(extension);
-	Link2SymlinkConfig *config;
-	char link_host[PATH_MAX] ALIGNED;
-	char final[PATH_MAX] ALIGNED;
+static void remember_dereferenced_link(Extension *extension, const char *link,
+                                       const char *referee) {
+    Link2SymlinkConfig *config;
+    const char *name = get_filename((char *)referee, NULL);
+    const char *link_name = get_filename((char *)link, NULL);
+    size_t length = strlen(link_name);
+    if (!is_l2s_internal_path(referee)) return;
+    /* The intermediate points to its own name followed by the count. */
+    if (is_l2s_file(referee) && strlen(name) == length + 5 &&
+        strncmp(name, link_name, length) == 0 && name[length] == '.') return;
+    config = get_config(extension, true);
+    if (config != NULL) strcpy(config->dereferenced_link, link);
+}
 
-	if (!is_l2s_file(host_path))
-		return;
+static const char *l2s_link_to_host_path(Extension *extension, const char *host_path) {
+    Link2SymlinkConfig *config = get_config(extension, false);
+    char final[PATH_MAX], fallback[PATH_MAX];
+    if (!is_l2s_file(host_path) || config == NULL) return NULL;
+    if (config->dereferenced_link[0] != '\0' &&
+        resolve_faked_hard_link(config->dereferenced_link, final) == 0 &&
+        strcmp(final, host_path) == 0) return config->dereferenced_link;
+    /* Retain the custom GUEST_PATH fallback for glue paths that aren't emitted
+     * by canonicalize. Normal chains use the actual dereferenced host name. */
+    if (config->final_component[0] == '\0') return NULL;
+    strcpy(fallback, config->final_component);
+    if (substitute_binding(TRACEE(extension), GUEST, fallback) < 0 ||
+        resolve_faked_hard_link(fallback, final) < 0 || strcmp(final, host_path) != 0)
+        return NULL;
+    strcpy(config->dereferenced_link, fallback);
+    return config->dereferenced_link;
+}
 
-	config = get_config(extension, false);
-	if (config == NULL || config->final_component[0] == '\0')
-		return;
+static void execve_proc_exe(Extension *extension, struct execve_proc_exe_state *state) {
+    const char *link = l2s_link_to_host_path(extension, state->host_path);
+    char guest[PATH_MAX];
+    if (link == NULL) return;
+    strcpy(guest, link);
+    if (detranslate_path(TRACEE(extension), guest, NULL) < 0) return;
+    strcpy(state->guest_path, guest);
+    state->substituted = true;
+}
 
-	/* final_component 记录的是 tracee 视角的 guest 路径（GUEST_PATH
-	 * 事件采集；HOST_PATH 在 glue_type!=0 时不发，手机 /proc glue 即此）。
-	 * 转成 host 路径后才能 readlink 解析链。 */
-	strcpy(link_host, config->final_component);
-	if (UNLIKELY(substitute_binding(tracee, GUEST, link_host) < 0))
-		return;
-
-	/* tracee 可能直接点名 l2s 内部文件——链解析失败，跳过 */
-	if (resolve_faked_hard_link(link_host, final) < 0)
-		return;
-	if (strcmp(final, host_path) != 0)
-		return;
-
-	/* 存 host 形态：替换进 referee 后还会经 detranslate 剥前缀 */
-	strcpy(config->pending_link, link_host);
-	/* exit 停靠由 FILTER_SYSEXIT（INITIALIZATION 过滤表）保证——
-	 * 不在此设 sysexit_pending/restart_how：旧 seccomp 模式下会触发
-	 * event.c 的 IS_IN_SYSENTER 断言（2026-08-15 真机复现）。 */
+static void remember_opened_link(Extension *extension, const char *host_path) {
+    const char *link = l2s_link_to_host_path(extension, host_path);
+    if (link != NULL) strcpy(get_config(extension, false)->pending_link, link);
+    /* FILTER_SYSEXIT supplies the descriptor stop; do not force restart_how. */
 }
 
 /* open/execve 物化（tsgo/tsc 7.0 兼容，方案 C）：
@@ -1373,6 +1465,8 @@ static FORCE_INLINE int materialize_executable(Tracee *restrict tracee, char *pa
 static FORCE_INLINE void translated_path(Extension *restrict extension, char *restrict translated_path) {
     if (UNLIKELY(!extension || !translated_path)) return;
     Tracee *restrict tracee = TRACEE(extension);
+    /* Keep the visible name while which() looks up the initial executable. */
+    if (tracee->exe == NULL) return;
     Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
     bool is_readlink_syscall = false;
     switch (sysnum) {
@@ -1442,6 +1536,9 @@ static FORCE_INLINE void translated_path(Extension *restrict extension, char *re
     status = my_readlink(link_target, final_target, PATH_MAX);
     if (UNLIKELY(status < 0)) return;
     if (UNLIKELY(!parse_l2s_final_count(final_target, &(int){0}))) return;
+    struct stat final_st;
+    if (l2s_lstat(final_target, &final_st) < 0) return;
+    remember_dereferenced_link(extension, translated_path, link_target);
     /* 上游 7ff389a1：open 被重定向到 l2s 数据文件时，记下 tracee 用的链名
      * （供 /proc/<pid>/fd/<fd> readlink 换名），并强制 exit 停靠拿 fd 号。 */
     if (UNLIKELY(is_open_syscall(sysnum)))
@@ -1545,7 +1642,6 @@ static FORCE_INLINE int handle_linkat_from_proc_fd(Tracee *restrict tracee) {
     if (UNLIKELY(size < 0 || size >= PATH_MAX)) return 0;
     int src_fd = open(proc_path, O_RDONLY);
     if (UNLIKELY(src_fd < 0)) return 0;
-    unlink(dest_path);
     int dest_fd = open(dest_path, O_WRONLY | O_CREAT | O_EXCL, statl.st_mode & 0777);
     if (UNLIKELY(dest_fd < 0)) {
         int ret = -errno;
@@ -1559,17 +1655,20 @@ static FORCE_INLINE int handle_linkat_from_proc_fd(Tracee *restrict tracee) {
         while (pos < nread) {
             nwrite = write(dest_fd, buf + pos, nread - pos);
             if (UNLIKELY(nwrite <= 0)) {
-                int ret = -errno;
+                int ret = nwrite == 0 ? -EIO : -errno;
                 close(src_fd);
                 close(dest_fd);
+                (void) unlink(dest_path);
                 return ret;
             }
             pos += nwrite;
         }
     }
+    int ret = nread < 0 ? -errno : 1;
     close(src_fd);
-    close(dest_fd);
-    return 1;
+    if (close(dest_fd) < 0 && ret == 1) ret = -errno;
+    if (ret < 0) (void) unlink(dest_path);
+    return ret;
 }
 
 HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
@@ -1584,27 +1683,29 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
         Link2SymlinkConfig *config = get_config(extension, false);
         if (config != NULL) {
             config->pending_link[0] = '\0';
+            config->dereferenced_link[0] = '\0';
+            config->removed_link[0] = '\0';
             config->stat_exit_disposition = L2S_STAT_EXIT_FALLBACK;
         }
         return 0;
     }
     case SYSCALL_ENTER_END: {
+        /* Failed translation leaves some registers holding guest paths, which
+         * must never be used for host-side emulation. */
+        if ((int)data1 < 0) return 0;
         Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
         switch (sysnum) {
         case PR_rename:
-            status = decrement_link_count(tracee, SYSARG_2);
-            return UNLIKELY(status < 0) ? status : 0;
+            return prepare_rename(extension, SYSARG_1, SYSARG_2, 0);
         case PR_renameat: case PR_renameat2:
-            status = decrement_link_count(tracee, SYSARG_4);
-            return UNLIKELY(status < 0) ? status : 0;
+            return prepare_rename(extension, SYSARG_2, SYSARG_4,
+                sysnum == PR_renameat2 ? peek_reg(tracee, CURRENT, SYSARG_5) : 0);
         case PR_unlink:
-            status = decrement_link_count(tracee, SYSARG_1);
-            return UNLIKELY(status < 0) ? status : 0;
+            return remember_removed_link(extension, SYSARG_1);
         case PR_unlinkat:
             if ((peek_reg(tracee, CURRENT, SYSARG_3) & AT_REMOVEDIR) != 0)
                 return 0;
-            status = decrement_link_count(tracee, SYSARG_2);
-            return UNLIKELY(status < 0) ? status : 0;
+            return remember_removed_link(extension, SYSARG_2);
         case PR_link:
             status = move_and_symlink_path(tracee, SYSARG_1, SYSARG_2);
             if (status == 1)
@@ -1633,11 +1734,19 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
 		if (config != NULL && config->dirent_enabled
 		    && get_sysnum(tracee, ORIGINAL) == PR_getdents64)
 			return fix_getdents64_dirent_types(extension);
+#ifdef USERLAND
+        Sysnum original = get_sysnum(tracee, ORIGINAL);
+        Sysnum chained = get_sysnum(tracee, CURRENT);
+        if ((original == PR_fstat || original == PR_fstat64) &&
+            (chained == PR_fstatat64 || chained == PR_newfstatat))
+            return handle_sysexit_end(extension);
+#endif
 		return 0;
 	}
     case SYSCALL_EXIT_END: {
 		Link2SymlinkConfig *config = get_config(extension, false);
 		Sysnum sysnum = get_sysnum(tracee, ORIGINAL);
+        forget_removed_link(extension);
 		if (config != NULL && config->dirent_enabled &&
 		    sysnum == PR_getdents64) {
 			status = fix_getdents64_dirent_types(extension);
@@ -1688,8 +1797,10 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
          * （上游 7ff389a1 的 HOST_PATH 消费配对） */
         {
             Link2SymlinkConfig *config = get_config(extension, false);
-            if (config != NULL)
+            if (config != NULL) {
                 config->final_component[0] = '\0';
+                config->dereferenced_link[0] = '\0';
+            }
         }
         /* 上游 7ff389a1 适配：记录 open 类 syscall 的原始 guest 路径
          * （= tracee 打开时用的名字）。用 GUEST_PATH 而非 HOST_PATH：
@@ -1796,6 +1907,12 @@ HOT int link2symlink_callback(Extension *extension, ExtensionEvent event,
         }
         return 0;
     }
+    case SYMLINK_DEREFERENCED:
+        remember_dereferenced_link(extension, (const char *)data1, (const char *)data2);
+        return 0;
+    case EXECVE_PROC_EXE:
+        execve_proc_exe(extension, (struct execve_proc_exe_state *)data1);
+        return 0;
     case TRANSLATED_PATH:
         translated_path(extension, (char *)data1);
         return 0;

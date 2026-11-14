@@ -50,8 +50,21 @@ typedef enum {
 	 * files it hides in the l2s directory.  */
 	READLINK_PROC_FD,
 
-	EXT_EVENT_COUNT  // <--- 只加这一行（事件总数）
+	/* data1: host symlink path; data2: unmodified host symlink content. */
+	SYMLINK_DEREFERENCED,
+	/* data1: struct execve_proc_exe_state *, below. */
+	EXECVE_PROC_EXE,
+
+	EXT_EVENT_COUNT
 } ExtensionEvent;
+
+/* Shared with execve translation, which emits EXECVE_PROC_EXE before storing
+ * the guest executable name. Kept here to avoid an execve/extension include cycle. */
+struct execve_proc_exe_state {
+	const char *host_path;
+	char *guest_path;
+	bool substituted;
+};
 
 #define CLONE_RECONF ((word_t)-1)
 
