@@ -13,6 +13,7 @@
 #include <stdint.h>
 
 #include "execve/execve.h"
+#include "extension/extension.h"
 #include "execve/shebang.h"
 #include "execve/aoxp.h"
 #include "execve/ldso.h"
@@ -662,8 +663,18 @@ int translate_execve_enter(Tracee *tr)
 	talloc_unlink(tr, tr->host_exe);
 	tr->host_exe = talloc_strdup(tr, host);
 
-	snprintf(new_exe, PATH_MAX, "%s", host);
-	detranslate_path(tr, new_exe, NULL);
+	struct execve_proc_exe_state proc_exe = {
+		.host_path = host, .guest_path = new_exe, .substituted = false
+	};
+	ret = notify_extensions(tr, EXECVE_PROC_EXE, (intptr_t)&proc_exe, 0);
+	if (ret < 0)
+		return ret;
+	if (!proc_exe.substituted) {
+		snprintf(new_exe, PATH_MAX, "%s", host);
+		ret = detranslate_path(tr, new_exe, NULL);
+		if (ret < 0)
+			return ret;
+	}
 	talloc_unlink(tr, tr->new_exe);
 	tr->new_exe = talloc_strdup(tr, new_exe);
 

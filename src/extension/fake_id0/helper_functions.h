@@ -20,6 +20,8 @@ int initialize_meta_store(void);
 
 int get_fd_path(Tracee *tracee, char path[PATH_MAX], Reg fd_sysarg, RegVersion version);
 
+int resolve_proc_fd_path(Tracee *tracee, char path[PATH_MAX]);
+
 int read_sysarg_path(Tracee *tracee, char path[PATH_MAX], Reg path_sysarg, RegVersion version);
 
 char *get_name(char path[PATH_MAX]);
@@ -38,5 +40,8 @@ int write_meta_file(char path[PATH_MAX], mode_t mode, uid_t owner, gid_t group, 
 
 int remove_meta_file(char path[PATH_MAX]);
 int rename_meta_file(char old_path[PATH_MAX], char new_path[PATH_MAX]);
+
+/* Rekey canonical host path subtrees atomically; exchange swaps both trees. */
+int rename_meta_tree(const char *old_path, const char *new_path, bool exchange);
 
 #endif

@@ -215,6 +215,11 @@ typedef struct tracee {
 	} seccomp;
 
 	bool sysexit_pending;
+	/* A fork event lost its child PID. Resolve it from the parent's
+	 * syscall result, or the held vfork child's first stop. */
+	bool pending_child;
+	word_t pending_clone_flags;
+	word_t pending_child_sp;
 	bool seccomp_already_handled_enter;
 
 	/* 上游 61681c648（适配）：sysenter 阶段把 syscall 改成了会被
@@ -260,6 +265,9 @@ extern Tracee *get_stopped_ptracee(const Tracee *ptracer, pid_t pid,
 				bool only_with_pevent, word_t wait_options);
 extern bool has_ptracees(const Tracee *ptracer, pid_t pid, word_t wait_options);
 extern int new_child(Tracee *parent, word_t clone_flags);
+extern Tracee *get_execve_tracee(Tracee *leader);
+extern void resolve_pending_child(Tracee *parent);
+extern void adopt_held_children(void);
 extern int unshare_file_system_namespace(Tracee *tracee);
 extern Tracee *new_dummy_tracee(TALLOC_CTX *context);
 extern void terminate_tracee(Tracee *tracee);

@@ -17,10 +17,6 @@ int handle_rename_enter_end(Tracee *tracee, Reg oldfd_sysarg, Reg oldpath_sysarg
 	char newpath[PATH_MAX];
 	char rel_oldpath[PATH_MAX];
 	char rel_newpath[PATH_MAX];
-	char meta_path[PATH_MAX];
-	mode_t mode;
-	uid_t uid;
-	gid_t gid;
 	int ret;
 
 	// 读取旧路径
@@ -52,25 +48,41 @@ int handle_rename_enter_end(Tracee *tracee, Reg oldfd_sysarg, Reg oldpath_sysarg
 	if (ret < 0)
 		return ret;
 
-	// 获取旧 meta 路径
-	ret = get_meta_path(oldpath, meta_path);
-	if (ret < 0)
-		return ret;
+	return 0;
+}
 
-	// 没有 meta 就直接退出
-	if (path_exists(meta_path) != 0)
-		return 0;
+#ifndef RENAME_EXCHANGE
+#define RENAME_EXCHANGE (1U << 1)
+#endif
+#ifndef RENAME_WHITEOUT
+#define RENAME_WHITEOUT (1U << 2)
+#endif
 
-	// 读取并删除旧 meta
-	ret = read_meta_file(meta_path, &mode, &uid, &gid, config);
-	if (ret < 0)
-		return ret;
-	remove_meta_file(meta_path);
-
-	// 写入新 meta
-	ret = get_meta_path(newpath, meta_path);
-	if (ret < 0)
-		return ret;
-
-	return write_meta_file(meta_path, mode, uid, gid, 0, config);
+/* The kernel decides whether a rename happens. Read back its translated paths
+ * only after success; failed and same-inode renames leave records untouched. */
+int handle_rename_exit_end(Tracee *tracee, Reg oldpath_sysarg, Reg newpath_sysarg,
+    Reg flags_sysarg, Config *config)
+{
+    char oldpath[PATH_MAX], newpath[PATH_MAX];
+    struct stat old_st, new_st;
+    unsigned int flags = flags_sysarg == IGNORE_SYSARG ? 0 :
+        peek_reg(tracee, ORIGINAL, flags_sysarg);
+    (void)config;
+    if (tracee->status < 0 || peek_reg(tracee, CURRENT, SYSARG_RESULT) != 0)
+        return 0;
+    if (read_sysarg_path(tracee, oldpath, oldpath_sysarg, MODIFIED) != 0
+        || read_sysarg_path(tracee, newpath, newpath_sysarg, MODIFIED) != 0)
+        return 0;
+    if (lstat(oldpath, &old_st) == 0) {
+        if (!(flags & (RENAME_EXCHANGE | RENAME_WHITEOUT)))
+            return 0;
+        /* EXCHANGE on two names of the same inode is also a kernel no-op. */
+        if (lstat(newpath, &new_st) == 0 && old_st.st_dev == new_st.st_dev
+            && old_st.st_ino == new_st.st_ino)
+            return 0;
+    }
+    /* The syscall has already succeeded; a staging failure leaves all metadata
+     * intact and must not change the result reported to the tracee. */
+    (void)rename_meta_tree(oldpath, newpath, (flags & RENAME_EXCHANGE) != 0);
+    return 0;
 }

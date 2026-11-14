@@ -20,6 +20,7 @@
 #include <string.h>
 #include <time.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <sys/param.h>
 
 #ifdef __ANDROID__
@@ -498,7 +499,17 @@ int sysvipc_shm_namespace_destructor(struct SysVIpcNamespace *ns) {
 
 static ALWAYS_INLINE int sysvipc_shm_do_allocate(size_t size, int shmid) {
 #ifdef __ANDROID__
-    int fd = open("/dev/ashmem", O_RDWR, 0);
+    char memfd_name[32];
+    int fd;
+    /* Android applications targeting API 29+ cannot open /dev/ashmem. */
+    snprintf(memfd_name, sizeof(memfd_name), "sysvshm_0x%X", shmid);
+    fd = syscall(SYS_memfd_create, memfd_name, 0);
+    if (fd >= 0) {
+        if (ftruncate(fd, size) == 0)
+            return fd;
+        close(fd);
+    }
+    fd = open("/dev/ashmem", O_RDWR, 0);
     if (UNLIKELY(fd < 0)) return -ENOSPC;
     char name[ASHMEM_NAME_LEN];
     snprintf(name, sizeof(name)-1, "sysvshm_0x%X", shmid);

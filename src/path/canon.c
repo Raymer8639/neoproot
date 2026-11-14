@@ -209,6 +209,11 @@ int canonicalize(Tracee *restrict tracee, const char *restrict user_path,
         }
         if (UNLIKELY((size_t)res >= PATH_MAX)) return -ENAMETOOLONG;
         scratch_path[res] = '\0';
+        if (tracee->glue_type == 0) {
+            res = notify_extensions(tracee, SYMLINK_DEREFERENCED,
+                                    (intptr_t)host_path, (intptr_t)scratch_path);
+            if (UNLIKELY(res < 0)) return res;
+        }
         res = detranslate_path(tracee, scratch_path, host_path);
         if (UNLIKELY(res < 0)) return res;
         /* The symlink target may point into an external L2S backing directory.

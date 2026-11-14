@@ -20,7 +20,7 @@ trap cleanup EXIT INT TERM
 cp "$SCRIPT_DIR/test-link2symlink-node-workflow.js" "$ROOT/probe.js"
 
 if ! output=$(PROOT_L2S_DIR= PROOT_UNSET_DONE=1 "$PROOT" -r "$ROOT" \
-	-b "$PREFIX:$PREFIX" -b /system -b /apex --link2symlink \
+	-b "$PREFIX:$PREFIX" -b /system -b /apex -b /dev --link2symlink \
 	"$PREFIX/bin/node" /probe.js 2>&1); then
 	printf '%s\n' "$output"
 	exit 1

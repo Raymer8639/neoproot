@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -52,6 +53,9 @@ static_assert(PTRACE_SYSCALL != 0, "PTRACE_SYSCALL must not be 0 (fixes restart 
 static _Atomic bool seccomp_after_ptrace_enter = false;
 static _Atomic bool seccomp_detected = false;
 static _Atomic bool seccomp_after_ptrace_enter_checked = false;
+/* Some Android kernels clear ptrace_message even for GETEVENTMSG. */
+enum eventmsg_reliability { EVENTMSG_UNKNOWN, EVENTMSG_RELIABLE, EVENTMSG_LOST };
+static _Atomic int eventmsg_state = EVENTMSG_UNKNOWN;
 static _Atomic int last_exit_status = -1;
 static _Atomic bool is_exiting_normally = false;
 static _Atomic bool root_exited = false;
@@ -399,6 +403,8 @@ int launch_process(Tracee *tracee, char *const argv[])
     pid_t pid;
     int notify_socks[2] = { -1, -1 };
 
+    /* Observe the caller before the child enables our seccomp filter. */
+    tracee->no_new_privs = prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1;
     mem_prepare_before_first_execve(tracee);
 
     if (tracee->verbose > 0)
@@ -578,6 +584,11 @@ int event_loop(void)
             unlock_user_notif_if_ready();
             continue;
         }
+        /* A nonleader exec is reported under the leader's PID. Select
+         * the entry carrying the exec syscall before dispatching events. */
+        if (WIFSTOPPED(tracee_status)
+            && (tracee_status & 0xfff00) >> 8 == (SIGTRAP | PTRACE_EVENT_EXEC << 8))
+            tracee = get_execve_tracee(tracee);
         tracee->running = false;
 
         if (notify_extensions(tracee, NEW_STATUS, tracee_status, 0) != 0) {
@@ -706,6 +717,8 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
                         {
                             const bool was_sysenter = IS_IN_SYSENTER(tracee);
                             translate_syscall(tracee);
+                            if (!was_sysenter && tracee->pending_child)
+                                resolve_pending_child(tracee);
                             /* Android GKI 5.15 内核：NO_SYSCALL(AVOIDER) 后 seccomp
                              * filter 链（zygote 的 app filter）仍会继续检查，看到
                              * syscall 号 -1 会返回 TRAP → SIGSYS(si_syscall=-1)。
@@ -752,6 +765,24 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
                 if (status < 0) {
                     VERBOSE(tracee, 1, "failed to get seccomp event msg, skipping");
                     break;
+                }
+
+                /* Reconstruct filter data until a FILTER_SYSEXIT stop proves
+                 * GETEVENTMSG reliable. On affected kernels use the syscall
+                 * lists at this stop and all subsequent stops. */
+                int reliability = atomic_load_explicit(&eventmsg_state, memory_order_acquire);
+                if (reliability != EVENTMSG_RELIABLE && fetch_regs(tracee) >= 0) {
+                    const int expected = filtered_sysnum_flags(tracee, get_sysnum(tracee, CURRENT));
+                    if (reliability == EVENTMSG_UNKNOWN && (expected & FILTER_SYSEXIT) != 0) {
+                        reliability = (flags & FILTER_SYSEXIT) != 0
+                            ? EVENTMSG_RELIABLE : EVENTMSG_LOST;
+                        atomic_store_explicit(&eventmsg_state, reliability, memory_order_release);
+                        if (reliability == EVENTMSG_LOST)
+                            VERBOSE(tracee, 1, "this kernel loses ptrace event messages "
+                                    "(PTRACE_GETEVENTMSG reads 0), working around it");
+                    }
+                    if (reliability != EVENTMSG_RELIABLE)
+                        flags |= expected;
                 }
 
                 /* 2026-08-15 修复：after_enter 在函数顶部读取，首次 seccomp
@@ -841,6 +872,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
                 if (tracee->exe == NULL) {
                     tracee->sigstop = SIGSTOP_PENDING;
                     signal = -1;
+                    adopt_held_children();
                 }
                 if (tracee->sigstop == SIGSTOP_IGNORED) {
                     tracee->sigstop = SIGSTOP_ALLOWED;

@@ -1957,7 +1957,9 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
      * the same sequence for everybody else.
      *
      * DHCP is the path that gets the resolver from the server.  If udhcpc is
-     * missing or gets nothing, the static fallback uses the very address and
+     * missing or leaves no global IPv4 address/default route on vec0 (a lease
+     * without a working configuration hook can still return zero), the static
+     * fallback uses the very address and
      * gateway the server was told to hand out, so the link still ends up
      * usable.  Neither failure stops the command: a container whose network
      * did not come up is still a container, and refusing to start would take
@@ -1965,6 +1967,12 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
      */
     if (config->network_auto) {
         if (um_write_text(fd,
+                          "um_net_ready() {\n"
+                          "    ip -4 addr show dev vec0 scope global 2>/dev/null |\n"
+                          "        grep -q 'inet ' || return 1\n"
+                          "    ip -4 route show default dev vec0 2>/dev/null |\n"
+                          "        grep -q '^default '\n"
+                          "}\n"
                           "um_net_auto() {\n"
                           "    [ -e /proc/net/dev ] || return 0\n"
                           "    if ! grep -q '^ *vec0:' /proc/net/dev; then\n"
@@ -1972,10 +1980,10 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
                           "        return 0\n"
                           "    fi\n"
                           "    ip link set vec0 up 2>/dev/null\n"
-                          "    if command -v udhcpc >/dev/null 2>&1 &&\n"
-                          "       udhcpc -n -q -t 3 -T 1 -i vec0 >/dev/null 2>&1; then\n"
-                          "        :\n"
-                          "    else\n"
+                          "    if command -v udhcpc >/dev/null 2>&1; then\n"
+                          "        udhcpc -n -q -t 3 -T 1 -i vec0 >/dev/null 2>&1\n"
+                          "    fi\n"
+                          "    if ! um_net_ready; then\n"
                           "        ip addr add ") < 0)
             goto failed;
         /*
@@ -1989,7 +1997,7 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
             um_write_text(fd, "/") < 0 ||
             um_write_text(fd, config->net_mask) < 0 ||
             um_write_text(fd, " dev vec0 2>/dev/null\n"
-                              "        ip route add default via ") < 0)
+                              "        ip route replace default via ") < 0)
             goto failed;
         if (um_write_shell_word(fd, config->net_gateway) < 0 ||
             um_write_text(fd, " dev vec0 2>/dev/null\n"
@@ -2031,7 +2039,12 @@ static int um_write_wrapper(const char *wrapper_path, const char *cwd,
             if (um_write_text(fd, " dev vec0 2>/dev/null\n") < 0)
                 goto failed;
         }
-        if (um_write_text(fd, "}\num_net_auto\n") < 0)
+        if (um_write_text(fd,
+                          "    if ! um_net_ready; then\n"
+                          "        printf '%s\\n' 'neoproot-um: --net-auto: vec0 has no global IPv4 address or default route after configuration' >&2\n"
+                          "    fi\n"
+                          "    return 0\n"
+                          "}\num_net_auto\n") < 0)
             goto failed;
     }
 

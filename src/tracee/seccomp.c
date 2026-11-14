@@ -54,6 +54,15 @@ void set_result_after_seccomp(Tracee *restrict tracee, word_t result) {
     push_specific_regs(tracee, false);
 }
 
+/* Path translation extensions inspect ORIGINAL to identify the syscall.
+ * A direct SIGSYS emulation has no sysenter snapshot; preserve pending
+ * register changes (not save_current_regs(), which clears that flag). */
+static void set_original_regs_after_seccomp(Tracee *tracee)
+{
+    memcpy(&tracee->_regs[ORIGINAL], &tracee->_regs[CURRENT],
+           sizeof(tracee->_regs[CURRENT]));
+}
+
 static int handle_seccomp_event_common(Tracee *restrict tracee);
 
 int handle_seccomp_event(Tracee* restrict tracee) {
@@ -252,12 +261,14 @@ static int handle_seccomp_event_common(Tracee *restrict tracee) {
             break;
         }
         case PR_statx:
+            set_original_regs_after_seccomp(tracee);
             set_result_after_seccomp(tracee, handle_statx_syscall(tracee, true));
             break;
         case PR_set_robust_list:
             set_result_after_seccomp(tracee, -ENOSYS);
             break;
         case PR_statfs: {
+            set_original_regs_after_seccomp(tracee);
             char original[PATH_MAX], path[PATH_MAX], devshm_path[PATH_MAX];
             const int size = read_string(tracee, original, peek_reg(tracee, CURRENT, SYSARG_1), PATH_MAX);
             if (UNLIKELY(size < 0 || size >= PATH_MAX)) {

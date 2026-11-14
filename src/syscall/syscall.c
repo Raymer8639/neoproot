@@ -8,6 +8,7 @@
 
 #include "syscall/syscall.h"
 #include "syscall/chain.h"
+#include "syscall/socket.h"
 #include "extension/extension.h"
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
@@ -368,8 +369,10 @@ svc_direct_done:
 		else if (tracee->chain.sysnum_workaround_state == SYSNUM_WORKAROUND_PROCESS_FAULTY_CALL) {
 			tracee->chain.sysnum_workaround_state = SYSNUM_WORKAROUND_PROCESS_REPLACED_CALL;
 		}
-		else
+		else {
 			(void) notify_extensions(tracee, SYSCALL_CHAINED_EXIT, 0, 0);
+			translate_sendmmsg_chained_exit(tracee);
+		}
 
 		/* Reset the tracee's status. */
 		tracee->status = 0;

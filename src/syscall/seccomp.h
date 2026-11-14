@@ -29,6 +29,7 @@ typedef struct {
 #define NEOPROOT_STAT_SHIM_FLAG 0x40000000u
 
 extern int enable_syscall_filtering(const Tracee *tracee);
+extern int filtered_sysnum_flags(const Tracee *tracee, Sysnum sysnum);
 /* Implemented in seccomp_notify.c. 0 if NEW_LISTENER+USER_NOTIF can be
  * installed; -errno otherwise. Uses a throwaway child so the tracer is
  * not filtered. */

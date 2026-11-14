@@ -1,6 +1,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <errno.h>
+#include <unistd.h>
 
 #include "tracee/reg.h"
 #include "tracee/mem.h"
@@ -42,6 +43,9 @@ int handle_getsockopt_exit_end(Tracee *tracee)
         return 0;
 
     Config *cfg = get_fake_id_for_pid(cred.pid);
+    /* Peers in another instance still share our real user identity. */
+    if (cfg == NULL && cred.uid == getuid())
+        cfg = get_fake_id_for_pid(tracee->pid);
     if (!cfg)
         return 0;
 

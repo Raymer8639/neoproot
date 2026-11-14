@@ -103,4 +103,23 @@ status=$(run_install "$WORK/no-um.log" "$P3" --without-um)
 ls "$P3/bin"/neoproot-um.stale-* >/dev/null 2>&1 ||
 	fail 'the stale neoproot-um was not renamed'
 
+# 4. Updating a different release preserves the recorded fast-only choice.
+P4="$WORK/prefix-update-no-um"
+mkdir -p "$P4/libexec/neoproot"
+cat >"$P4/libexec/neoproot/install-state" <<EOF
+version=vOLD
+prefix=$P4
+portable=0
+with_um=0
+um_kernel_tag=old
+um_passt_tag=old
+EOF
+status=$(run_install "$WORK/update-no-um.log" "$P4" --update)
+[ "$status" = 0 ] || { cat "$WORK/update-no-um.log" >&2; fail "fast-only update failed ($status)"; }
+[ ! -e "$P4/bin/neoproot-um" ] && [ ! -L "$P4/bin/neoproot-um" ] ||
+	fail 'fast-only update created neoproot-um'
+[ ! -d "$P4/libexec/neoproot/um" ] || fail 'fast-only update fetched a runtime'
+grep -qx 'version=vTEST' "$P4/libexec/neoproot/install-state" || fail 'version was not updated'
+grep -qx 'with_um=0' "$P4/libexec/neoproot/install-state" || fail 'fast-only choice was lost'
+
 printf '%s\n' 'installer link tests passed'

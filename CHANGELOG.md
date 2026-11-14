@@ -3,6 +3,55 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v6.0.3.0] - 2026-11-14
+
+**上游兼容性同步、UM 网络实态检查与一键安装更新**
+
+- 按 Neoproot 的四段版本规则 `x.y.z.a` 将新功能位 z 从 2 增至 3，版本为
+  **v6.0.3.0**。品牌保持 Neoproot，ARM64/Android、fast/UM、stat shim/USER_NOTIF
+  和 L2S 定制继续保留。
+- 逐项核对 termux/proot `52d65a4dc140ca554d241a1438ddd4f6b00c9813`
+  （v5.1.107.102，自旧基点 77 提交）和 proot-me/proot
+  `25dc6a3134891f98a79f57ce1c2c1b23ff15cad1`（v5.5.0），采用适用修复与已有等价实现，
+  保留架构和策略差异，没有用上游整树替换本地实现。
+- fast 兼容性更新涵盖 fork/exec 生命周期与丢事件恢复、ARM64 映射布局、Unix socket
+  目的路径翻译与 sendmmsg 部分发送、readlink 返回长度及只读页保护、AT_EMPTY_PATH/statx、
+  AT_EXECFN/auxv、no_new_privs 参数校验与继承，以及 Android SysV SHM 的 memfd 优先/ashmem 回退。
+- L2S 仅在内核操作成功后提交计数与覆盖迁移，保留失败、同 family no-op、EXCHANGE 的语义；
+  保留 9999 容量上限和 `--link2symlink-dirent` 独立 opt-in，不给默认目录枚举增加停靠。
+  可选 `-DUSERLAND` 元数据仍存 tracer 内存，chmod 失败不污染状态，目录 rename/EXCHANGE
+  按子树迁移，不向 guest 写 sidecar。
+- UM 一次性 hostfs/ext4 wrapper 的 `--net-auto` 改按实态确认：vec0 必须同时具备全局
+  IPv4 地址和该接口的默认 IPv4 路由；udhcpc 返回 0 本身不算配网成功。缺项则尝试静态回退，
+  仍失败会诊断但继续执行 guest 命令；IPv6 配置继续执行，不被 DHCP 返回提前截断。
+- 已包含 `tools/benchmark-first-output.py`：在未被追踪宿主上交错执行 fast/UM JSON argv，
+  只认 stdout 的唯一完整 guest marker 行，按 monotonic 时钟记录首输出、退出/超时和双流字节数，
+  并回收独立进程组。10 项 host 工具回归已接入 Make/CI；工具自测不代表新增真机延迟数据。
+- 一键安装器 `scripts/install.sh` 默认固定 UM `um-arm64-v0.4.1` 和 passt `v0.4.0`，
+  两者由各自仓库发布。优先取 UM Release 配套的 passt-bionic，下载失败才取指定 standalone
+  passt。Termux 在 Neoproot 已是目标版本时，也会刷新旧 runtime pin 或补齐缺失/不可执行的
+  kernel、stub、umnet、passt；完整且 pin 相同时跳过，不重编译 tracer，fast-only 安装保持禁用 UM。
+  下载先暂存再替换；不完整时不记录为新 runtime pin，后续更新会重试。
+- guest shim 继续拒绝未知或不匹配 ABI（包括 bionic 缓存进入 glibc/musl guest），tracer/shim
+  必须来自同一 Release，更新后重启容器。一键脚本支持 `--update`、版本选择及自动 runtime 下载；
+  仓库根目录源码安装器仍使用本地 runtime 路径参数，不接受 `--update`。
+
+**已有隔离验证与边界**
+
+- 默认候选在未被追踪 Termux 宿主原生构建成功；23 个相关 host 脚本最终为 **21 PASS、2 SKIP125**。
+  两项跳过分别因缺少 Linux runtime-bindings 布局和宿主不支持 fchmodat2，不写成全项通过。
+  readlink canary/只读页、sendmmsg 部分发送与页权限、statx 空 cwd 等新增兼容性回归均通过。
+- USERLAND 独立构建与真实单 tracee 元数据集成通过，涵盖 stat/fstat/statx、自定义 UID/GID、
+  chmod 失败、rename/no-op/EXCHANGE、子树迁移、native owner 可写和无 sidecar；仅 raw452 能力
+  子项因宿主 SIGSYS/ENOSYS 跳过，其余继续执行。Bionic fchmod(O_PATH) 的 libc 包装行为与 raw
+  SYS_fchmod 断言分开验证。
+- 网络生成器的 8 个 host 场景通过，范围是一次性 wrapper，未扩展成常驻 session 结论。
+  本次发布准备仅新增安装器/脚本检查，不重跑已通过核心测试；既有网络实测使用隔离的旧 UP 内核
+  与候选 passt，不冒充新 runtime Release 的完整组合验收。没有新增长 soak、真实故障注入或
+  当前 fast/UM 首输出性能对比。
+- guest 自设 seccomp 拒绝合法 SET_NO_NEW_PRIVS 时，既有入口乐观更新虚拟位的边界仍存在；
+  本次 GET/继承/非法参数回归不宣称覆盖该条件。UM 的默认 UP/ptrace 与安全边界保持原口径。
+
 ## [v6.0.2.2] - 2026-11-08
 
 **`--shim-rootfs` 不再把 bionic 库装进 glibc guest**

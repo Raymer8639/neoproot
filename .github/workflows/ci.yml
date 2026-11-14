@@ -132,6 +132,10 @@ jobs:
           PROOT=../src/neoproot sh test-seccomp-notify-pipe.sh
           PROOT=../src/neoproot sh test-stat-shim-raw-stat.sh
           sh test-shim-abi.sh
+          sh test-installer-links.sh
+          python3 test-installer-update.py
+          sh test-um-supervisor-net-auto.sh
+          python3 test-benchmark-first-output.py
           PROOT=../src/neoproot sh test-exec-env-stack.sh
           PROOT=../src/neoproot sh test-version-branding.sh
           PROOT=../src/neoproot sh test-mount-setattr.sh

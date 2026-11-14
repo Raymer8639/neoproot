@@ -23,6 +23,10 @@ GitHub Release assets are **ARM64 Linux (glibc)** CI builds. Termux needs a **lo
 - [Build notes](#build-notes)
 - [Contributing and support](#contributing-and-support)
 
+Current release: **v6.0.3.0** (`x.y.z.a`). It includes upstream compatibility updates,
+UM network configuration checks and the first guest output benchmark tool. See the
+[CHANGELOG](CHANGELOG.md) for verified coverage and remaining boundaries.
+
 ## Install (one command)
 
 ```sh
@@ -31,7 +35,7 @@ curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/insta
 
 On Termux it needs `pkg install clang make llvm binutils pkg-config libtalloc` and a couple of minutes for the bionic build; on ARM64 Linux it only downloads and verifies a binary.
 
-The script detects the platform and does the right thing: on **Termux** it installs the build dependencies, builds the bionic binary from the tagged source, backs up the previous binary and installs the new one into `$PREFIX/bin`; on **ARM64 Linux** it downloads the release binary, verifies it against `SHA256SUMS`, and installs it into your `PATH`. It never touches a running container's rootfs. Read [scripts/install.sh](scripts/install.sh) before piping it to a shell if you prefer; `sh scripts/install.sh --help` lists every option, including `--version`, `--prefix`, `--portable`, `--lang`, `--update` and the UM/shim toggles.
+The script detects the platform and does the right thing: on **Termux** it installs the build dependencies, builds the bionic binary from the tagged source, backs up the previous binary and installs the new one into `$PREFIX/bin`; on **ARM64 Linux** it downloads the release binary, verifies it against `SHA256SUMS`, and installs it into your `PATH`. It changes a guest rootfs only when you explicitly pass `--shim-rootfs`. Read [scripts/install.sh](scripts/install.sh) before piping it to a shell if you prefer; `sh scripts/install.sh --help` lists every option, including `--version`, `--prefix`, `--portable`, `--lang`, `--update` and the UM/shim toggles.
 
 `neoproot-um` is installed (or refreshed) as a relative link to `neoproot`, because the supervisor is the same binary under another name; an older separate `neoproot-um` is kept as `neoproot-um.prev-<timestamp>` first, and an existing `uproot` alias is pointed at the new binary too.
 
@@ -90,18 +94,18 @@ sh scripts/install.sh --update --prefix DIR # when the prefix is not the default
 ```
 
 `--update` belongs to the one-command installer (the release asset); the source
-installer has no `--update`. It replaces the binary and the UML runtime and keeps every choice the
-previous install made. A normal install writes those choices to
+installer has no `--update`. It replaces the binary and the UML runtime, retaining
+the recorded prefix, portable choice and UM choice. A normal install writes those choices to
 `<prefix>/libexec/neoproot/install-state`:
 
 ```
-version=v6.0.0.0
+version=v6.0.3.0
 prefix=/data/data/com.termux/files/usr
 portable=0
 with_um=1
-um_kernel_tag=um-arm64-v0.3.0
-um_passt_tag=v0.3.1
-installed_at=2026-10-31T04:58:29Z
+um_kernel_tag=um-arm64-v0.4.1
+um_passt_tag=v0.4.0
+installed_at=2026-11-14T04:30:00Z
 ```
 
 What that buys:
@@ -110,10 +114,24 @@ What that buys:
   the build is portable all come from the record.
 - **nothing to do when current.** The version is compared against the record,
   not the file timestamp, so a restored backup or a copy does not look new.
+  Runtime pins and all four executable runtime files must also be current.
 - **the runtime can move on its own.** A kernel has its own tag; if only that
-  changed, the binary is left alone and the runtime is refreshed.
+  changed, the binary is left alone and the runtime is refreshed on Termux and
+  Linux alike. Missing or non-executable helpers are fetched again.
 - **a stale `neoproot-um` is not left behind.** If the um backend was not
   installed, a leftover link from an earlier install is not resurrected.
+
+To update using the v6.0.3.0 release installer directly:
+
+```sh
+curl -fsSL https://github.com/Raymer8639/neoproot/releases/download/v6.0.3.0/install.sh | sh -s -- --update --version v6.0.3.0
+```
+
+A failed runtime download preserves the old destination file and leaves runtime
+pins unconfirmed so the next update retries. Guest shim paths are not saved in
+the state: pass `--shim-rootfs DIR` for each guest being updated. The tracer and
+guest shim must come from the same release; restart containers after updating.
+Use `--force --shim-rootfs DIR` to refresh the shim when the tracer tag is already current.
 
 Running with no state file is not an error: the update says so and proceeds,
 because the file is a convenience, not the source of truth.
@@ -125,11 +143,11 @@ None of those are built or published here, because they are not this project:
 
 | Artifact | Published by | Release |
 | --- | --- | --- |
-| `linux-bionic`, `linux-bionic-smp` | [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) | `um-arm64-v0.3.0` |
+| `linux-bionic`, `linux-bionic-smp` | [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) | `um-arm64-v0.4.1` |
 | `stub_exe` | same release | |
 | `umnet` | same release | |
 | `passt-bionic` | same release (matched with the kernel) | |
-| `passt-android-arm64` | [passt-android](https://github.com/Raymer8639/passt-android) | `v0.3.1` |
+| `passt-android-arm64` (fallback if the bundled passt cannot be fetched) | [passt-android](https://github.com/Raymer8639/passt-android) | `v0.4.0` |
 
 Each project releases its own build. That is deliberate: compiling a kernel on
 every neoproot commit would make this CI slow, and it would put the version of
@@ -149,7 +167,7 @@ them from its own path, so nothing needs exporting:
 When you build from source, `sh install.sh` asks for the same four files instead;
 `--um-kernel=`, `--um-stub=`, `--um-net=` and `--um-passt=` skip the questions.
 
-The versions are pinned to the pair this neoproot was tested against. A kernel
+This release pins UM `um-arm64-v0.4.1` and standalone passt `v0.4.0`. A kernel
 has to agree with the `um-init`, `umnet` and `passt` it runs with, so
 "latest" is not the right default; override with `NEOPROOT_UM_KERNEL_TAG` or
 `NEOPROOT_UM_PASST_TAG` if you know the set you want.
@@ -157,9 +175,9 @@ has to agree with the `um-init`, `umnet` and `passt` it runs with, so
 The one-command installer downloads that runtime from the releases above, so
 nothing has to be built to get started. Build the kernel from source only when
 you need a configuration or device profile the published UP/SMP builds do not
-cover -- linux-um-arm64's README is the starting point. A newer runtime,
-`um-arm64-v0.4.0` (Linux 7.3.1), is published; this release still pins the
-tested `um-arm64-v0.3.0` set.
+cover -- linux-um-arm64's README is the starting point. The runtime projects
+release and validate their own artifacts; the pins do not imply that every
+UP/SMP or device configuration was retested for this Neoproot release.
 
 ### The stat shim configures itself
 
@@ -181,9 +199,9 @@ Alpine's musl headers. A rootfs with both loaders or neither is an error rather
 than a guess: pass `--shim-abi=musl|glibc` to resolve it.
 
 The one-command installer (`scripts/install.sh`, shipped as the release asset
-`install.sh`) downloads both `libstatfast.so` and `libstatfast-musl.so` — the
-release workflow builds the musl variant alongside the glibc one — and picks
-whichever matches the guest loader. Releases published before that change have
+`install.sh`) downloads the `libstatfast.so` or `libstatfast-musl.so` asset that
+matches the guest loader; the release workflow builds both variants. Unknown or
+mismatched ABIs, including bionic cache files, are refused. Releases published before that change have
 no musl asset: the installer says so, and a musl root then needs the source
 build above or a manual copy of the library into the rootfs.
 
@@ -300,7 +318,7 @@ the SMP/container kernel profile used by `--cpus`.
 
 The UML kernel's default userspace mode is `ptrace`. `--seccomp=auto` lets it
 use the kernel's seccomp mode when the host allows it, and `--seccomp=on`
-requires that mode; both are opt-in. In two device A/B runs on the same image,
+requires that mode; both are opt-in. In two historical device A/B runs on the same image,
 kernel and probe, a syscall-heavy probe took 43-61 s with ptrace and 4.2-5.1 s
 with seccomp: `getpid` fell from 158-221 to 12.5-13.0 us, `open`+`close`
 from 501-503 to 14-50 us, and `read` from 209-222 to 5.9-13.7 us. Boot time
@@ -313,6 +331,66 @@ seccomp mode is **not** a security boundary. The kernel documentation states
 that its filter is not restrictive enough: guest userspace can read and write
 all physical memory and can trick the stub into disabling the timer signal.
 Use it only with a guest you trust; the default stays `ptrace`.
+
+### Measuring startup separately from execution
+
+Fast syscall execution does not imply fast startup. A one-shot UM command
+includes supervisor setup, a kernel boot, guest initialization and command
+execution; a syscall loop inside an already running guest measures a different
+interval. Historical figures in this README (including 827/751 ms, 10.1-13.7 s,
+and session timings) came from different device/configuration experiments and
+are not current latency guarantees or directly comparable measurements.
+
+Use [tools/benchmark-first-output.py](tools/benchmark-first-output.py) on the
+untraced host with Python 3.8+ (POSIX). Both commands are configurable JSON argv
+arrays; no host shell expansion is performed. Replace these example paths and
+supply the kernel/stub configuration required by your UM installation:
+
+```sh
+python3 tools/benchmark-first-output.py --runs=5 --timeout=60 \
+  --fast-command '["neoproot","--backend=fast","-r","/path/to/rootfs","/bin/sh","-c","printf \"%s\\n\" \"$1\"","bench","{marker}"]' \
+  --um-command '["neoproot","--backend=um","--rootfs=/path/to/rootfs.img","--cow-file=/path/to/rootfs.img.cow","--","/bin/sh","-c","printf \"%s\\n\" \"$1\"","bench","{marker}"]' \
+  > first-output.jsonl
+```
+
+Put `{marker}` in a guest command that prints it as a separate stdout line
+ending in LF (CRLF also works). The tool substitutes a fresh UUID marker for
+every sample. Kernel boot lines, stderr, embedded marker text and an incomplete
+line at EOF do not count. Do not print the marker from a host wrapper or enable
+shell tracing: this is a guest-output protocol, not authentication of its source.
+The tool drains both streams concurrently without copying logs to its own stdout.
+
+Each JSONL row records the backend, sample, expanded argv, marker, byte counts,
+removed environment variable names, and host-observed durations measured with `time.monotonic_ns`:
+
+- `first_output_ms`: launch to receipt of the complete guest marker line.
+- `total_ms`: launch to observed launcher exit, including UM shutdown; null if
+  launch failed. Exit observation may lag by one polling interval (up to 50 ms
+  plus host scheduling).
+- `elapsed_ms`: the whole sample, including pipe draining and cleanup.
+
+These are host observations, affected by pipe buffering and scheduling;
+`total_ms - first_output_ms` is not pure guest execution time. A timeout may
+retain a valid marker time but still invalidates the sample.
+
+The default is five samples per backend, alternating fast/UM order each round,
+with no hidden warmup; `--timeout` applies to each sample (30 seconds by default).
+Record device, binary/kernel versions, rootfs/COW, syscall mode, CPU count and
+cache conditions alongside the JSONL when comparing runs. Each command starts
+in its own process group; timeout sends SIGKILL to that group and reaps the
+launcher, including when descendants keep its pipes open after it exits.
+Remaining group members are also killed at sample completion; commands must not
+start persistent services or escape the group with setsid. The tool removes
+`LD_PRELOAD`, `LD_AUDIT` and `NEOPROOT_STATSHIM_*` from the supplied child
+environment and records their names; an outer tracer can still inject its own
+environment, so run real benchmarks outside PRoot.
+
+The tool exits 0 only if every sample has a complete marker, exit code 0 and no
+timeout/error; it exits 1 for any failed sample, or 2 for invalid CLI arguments.
+JSONL retains each launcher's raw Python returncode (negative for a signal),
+positive signal number, timeout flag and launch/I/O error; failed samples must
+not be averaged as successful timings. Run the host-only self-tests with
+`python3 tests/test-benchmark-first-output.py -v`.
 
 ### CPUs and ext4 mount options
 
@@ -332,9 +410,9 @@ base image) and appends the caller's options after it.
 
 ### Persistent sessions
 
-A one-shot `--backend=um` run pays a full kernel boot per command. On the phone
-this was developed on that is 10.1-13.7 s, which is fine for `docker run` and
-painful for a shell you type into. `neoproot-um session` boots the guest once
+A one-shot `--backend=um` run pays a full kernel boot per command. A historical
+measurement on the development phone was 10.1-13.7 s; interactive shells feel
+this startup cost on every launch. `neoproot-um session` boots the guest once
 and keeps it:
 
 ```sh
@@ -356,7 +434,7 @@ neoproot-um session stop
 arrive later through `run`. `run` takes `--cwd=DIR` and
 `--timeout=SECONDS`.
 
-Measured on the same phone, one vCPU, ext4 root: **15.3 s** to start a session
+Historically measured on the same phone, one vCPU, ext4 root: **15.3 s** to start a session
 and **0.54-0.68 s per command** afterwards. The break-even against one boot per
 command is about three commands; a fifteen-command batch drops from roughly
 178 s to 28 s.

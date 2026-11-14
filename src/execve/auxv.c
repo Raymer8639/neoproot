@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <talloc.h>
 
 #include "syscall/sysnum.h"
@@ -103,6 +104,60 @@ ElfAuxVector *fetch_elf_aux_vectors(const Tracee *tracee, word_t addr)
 error:
 	talloc_free(vecs);
 	return NULL;
+}
+
+/** Load a possibly unaligned word from a kernel-format auxiliary vector. */
+static word_t load_auxv_word(const Tracee *tracee, const uint8_t *address)
+{
+	uint32_t word32;
+	uint64_t word64;
+
+	if (sizeof_word(tracee) == sizeof(word32)) {
+		memcpy(&word32, address, sizeof(word32));
+		return word32;
+	}
+
+	memcpy(&word64, address, sizeof(word64));
+	return word64;
+}
+
+static void store_auxv_word(const Tracee *tracee, uint8_t *address, word_t value)
+{
+	uint32_t word32 = value;
+	uint64_t word64 = value;
+
+	if (sizeof_word(tracee) == sizeof(word32))
+		memcpy(address, &word32, sizeof(word32));
+	else
+		memcpy(address, &word64, sizeof(word64));
+}
+
+/**
+ * Correct AT_EXECFN in the complete entries copied by PR_GET_AUXV or read
+ * from procfs.  Ignore an incomplete trailing entry in a short buffer.
+ */
+bool fix_up_execfn(const Tracee *tracee, void *vectors, size_t size)
+{
+	if (tracee == NULL || vectors == NULL || tracee->execfn_addr == 0)
+		return false;
+
+	const size_t word_size = sizeof_word(tracee);
+	const size_t entry_size = 2 * word_size;
+	uint8_t *entry = vectors;
+
+	while (size >= entry_size) {
+		word_t type = load_auxv_word(tracee, entry);
+
+		if (type == AT_NULL)
+			break;
+		if (type == AT_EXECFN) {
+			store_auxv_word(tracee, entry + word_size, tracee->execfn_addr);
+			return true;
+		}
+		entry += entry_size;
+		size -= entry_size;
+	}
+	return false;
 }
 
 int push_elf_aux_vectors(const Tracee *tracee, ElfAuxVector *vecs, word_t addr)

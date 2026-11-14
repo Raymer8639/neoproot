@@ -13,7 +13,10 @@ TEST_PROGS = test_argv test_echo test_file_ops test_dir_ops
 CHECK_PROGS = test-auto-backend
 
 # 测试脚本列表
-TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
+TEST_SCRIPTS = test-upstream-core.sh test-upstream-readlink.sh test-upstream-sendmmsg.sh test-upstream-proot-me.sh \
+	test-upstream-tracee.sh test-upstream-l2s-logic.sh test-upstream-fake-id.sh test-upstream-meta-tree.sh \
+	test-upstream-compat.sh test-upstream-l2s-integration.sh test-upstream-meta-integration.sh \
+	test-build-script.sh basic_test.sh advanced_test.sh \
 	test-runtime-bindings.sh test-security-regressions.sh \
 	test-link2symlink-dirent.sh test-link2symlink-stat-guard.sh \
 	test-link2symlink-mmap.sh \
@@ -51,6 +54,7 @@ TEST_SCRIPTS = test-build-script.sh basic_test.sh advanced_test.sh \
 	test-um-supervisor-cli.sh test-um-supervisor-bind-cli.sh \
 	test-um-supervisor-ext4-cli.sh test-um-supervisor-net-argv.sh \
 	test-um-supervisor-seccomp-argv.sh \
+	test-um-supervisor-net-auto.sh \
 	test-um-supervisor-optimizations-argv.sh \
 	test-um-supervisor-cow-file-cli.sh \
 	test-um-supervisor-ext4-binds-cli.sh \
@@ -84,7 +88,13 @@ test-auto-backend: test-auto-backend.c ../src/cli/auto_backend.c \
 		../src/cli/auto_backend.c ../src/cli/backend.c
 
 # 运行所有测试
-test: all
+test-host-tools:
+	python3 test-benchmark-first-output.py
+	python3 test-installer-update.py
+
+.PHONY: test-host-tools
+
+test: all test-host-tools
 	@echo "运行 SciCat PRoot 测试..."
 	@for prog in $(CHECK_PROGS); do \
 		echo "运行 $$prog..."; \

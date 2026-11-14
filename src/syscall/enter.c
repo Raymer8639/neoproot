@@ -37,6 +37,8 @@
 #include "syscall/pipe_shadow.h"
 #include "extension/extension.h"
 #include "compat.h"
+#include "syscall/compat_policy.h"
+#include "syscall/readlink_result.h"
 #include "execve/execve.h"
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
@@ -2149,6 +2151,34 @@ int lower_openat2_to_openat(Tracee *tracee)
     return 0;
 }
 
+/* Keep translated stack arguments alive until the syscall completes. */
+static void keep_pushed_args(Tracee *tracee)
+{
+    tracee->sysexit_pending = true;
+    tracee->restart_how = PTRACE_SYSCALL;
+}
+
+static void empty_path_at_cwd(const Tracee *tracee, int dirfd,
+        char path[PATH_MAX], Reg reg, word_t flags)
+{
+    if (empty_path_uses_guest_cwd(dirfd, path, peek_reg(tracee, CURRENT, reg), flags))
+        strcpy(path, ".");
+}
+
+static bool redirect_own_auxv(Tracee *tracee, const char *path, int flags)
+{
+    Binding *binding;
+    if ((flags & O_ACCMODE) != O_RDONLY || (flags & (O_CREAT | O_TRUNC | O_APPEND)) != 0 ||
+        tracee->auxv_host_path == NULL || !is_proc_self_auxv(tracee, path))
+        return false;
+    binding = get_binding(tracee, GUEST, path);
+    if (binding != NULL && strcmp(binding->guest.path, "/") != 0 &&
+        !(strcmp(binding->guest.path, "/proc") == 0 && strcmp(binding->host.path, "/proc") == 0) &&
+        strcmp(binding->host.path, tracee->auxv_host_path) != 0)
+        return false;
+    return true;
+}
+
 static int translate_openat_enter(Tracee *tracee, bool from_openat2)
 {
     unsigned long long resolve;
@@ -2182,7 +2212,7 @@ static int translate_openat_enter(Tracee *tracee, bool from_openat2)
 
     /* auxv 通道 2 修复：同 PR_open（openat2 已改写为 openat，
      * 也走这里） */
-    if (is_proc_self_auxv(tracee, path) && tracee->auxv_host_path != NULL)
+    if (resolve == 0 && redirect_own_auxv(tracee, path, flags))
         return set_sysarg_path(tracee, tracee->auxv_host_path, SYSARG_2);
 
     if ((flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) != 0) {
@@ -2350,6 +2380,7 @@ int translate_syscall_enter(Tracee *tracee)
                 tracee->clone_stripped_newnet = true;
             poke_reg(tracee, SYSARG_1, flags & ~(word_t)CLONE_NS_MASK);
         }
+        keep_pushed_args(tracee); /* fork must reach its sysexit on 4.14 kernels */
         status = 0;
         break;
     }
@@ -2368,9 +2399,16 @@ int translate_syscall_enter(Tracee *tracee)
                 poke_word(tracee, args_addr, flags & ~(word_t)CLONE_NS_MASK);
             }
         }
+        keep_pushed_args(tracee);
         status = 0;
         break;
     }
+
+    case PR_fork:
+    case PR_vfork:
+        keep_pushed_args(tracee);
+        status = 0;
+        break;
 
     case PR_execve:
         status = translate_execve_enter(tracee);
@@ -2593,6 +2631,14 @@ int translate_syscall_enter(Tracee *tracee)
             break;
         }
         note_netns_netlink_request(tracee, fd, buf, len);
+        word_t address = peek_reg(tracee, CURRENT, SYSARG_5);
+        status = translate_send_address(tracee, &address,
+                (int)peek_reg(tracee, CURRENT, SYSARG_6));
+        if (status <= 0)
+            break;
+        poke_reg(tracee, SYSARG_5, address);
+        poke_reg(tracee, SYSARG_6, sizeof(struct sockaddr_un));
+        keep_pushed_args(tracee);
         status = 0;
         break;
     }
@@ -2619,7 +2665,23 @@ int translate_syscall_enter(Tracee *tracee)
         if (   is_netns_netlink_fd(tracee, fd)
             && msghdr_first_iovec(tracee, msghdr_addr, &base, &len))
             note_netns_netlink_request(tracee, fd, base, len);
+        status = translate_sendmsg_enter(tracee, &msghdr_addr);
+        if (status <= 0)
+            break;
+        poke_reg(tracee, SYSARG_2, msghdr_addr);
+        keep_pushed_args(tracee);
         status = 0;
+        break;
+    }
+
+    case PR_sendmmsg: {
+        word_t vector = peek_reg(tracee, CURRENT, SYSARG_2);
+        word_t vlen = (unsigned int)peek_reg(tracee, CURRENT, SYSARG_3);
+        status = translate_sendmmsg_start(tracee, vector, vlen);
+        if (status > 0) {
+            keep_pushed_args(tracee);
+            status = 0;
+        }
         break;
     }
 
@@ -2876,6 +2938,32 @@ int translate_syscall_enter(Tracee *tracee)
         status = 0;
         break;
 
+    /* Keep the existing emulated mount_setattr. Other fd-mount calls must
+     * fall back to our virtual mount(2), never mutate the host mount tree. */
+    case PR_fsopen:
+    case PR_fsconfig:
+    case PR_fsmount:
+    case PR_fspick:
+    case PR_move_mount:
+    case PR_open_tree_attr:
+        status = -ENOSYS;
+        break;
+
+    case PR_open_tree:
+        dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
+        flags = peek_reg(tracee, CURRENT, SYSARG_3);
+        if ((flags & 1 /* OPEN_TREE_CLONE */) != 0) {
+            status = -ENOSYS;
+            break;
+        }
+        status = get_sysarg_path(tracee, path, SYSARG_2);
+        if (status < 0)
+            break;
+        empty_path_at_cwd(tracee, dirfd, path, SYSARG_2, flags);
+        status = translate_path2(tracee, dirfd, path, SYSARG_2,
+                (flags & AT_SYMLINK_NOFOLLOW) ? SYMLINK : REGULAR);
+        break;
+
     case PR_open:
         flags = peek_reg(tracee, CURRENT, SYSARG_2);
 
@@ -2885,7 +2973,7 @@ int translate_syscall_enter(Tracee *tracee)
         status = get_sysarg_path(tracee, path, SYSARG_1);
         if (status < 0)
             break;
-        if (is_proc_self_auxv(tracee, path) && tracee->auxv_host_path != NULL) {
+        if (redirect_own_auxv(tracee, path, flags)) {
             status = set_sysarg_path(tracee, tracee->auxv_host_path, SYSARG_1);
             if (status < 0)
                 break;
@@ -2917,6 +3005,7 @@ int translate_syscall_enter(Tracee *tracee)
             ? peek_reg(tracee, CURRENT, SYSARG_5)
             : peek_reg(tracee, CURRENT, SYSARG_4);
 
+        empty_path_at_cwd(tracee, dirfd, path, SYSARG_2, flags);
         if ((flags & AT_SYMLINK_NOFOLLOW) != 0)
             status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
         else
@@ -2938,6 +3027,7 @@ int translate_syscall_enter(Tracee *tracee)
         flags = (syscall_number == PR_fchownat)
             ? peek_reg(tracee, CURRENT, SYSARG_5)
             : peek_reg(tracee, CURRENT, SYSARG_4);
+        empty_path_at_cwd(tracee, dirfd, path, SYSARG_2, flags);
         if ((flags & AT_SYMLINK_NOFOLLOW) != 0)
             status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
         else
@@ -2961,6 +3051,7 @@ int translate_syscall_enter(Tracee *tracee)
          * openat2→openat, keeping AT_SYMLINK_NOFOLLOW. */
         if (syscall_number == PR_faccessat2) {
             word_t access_flags = peek_reg(tracee, CURRENT, SYSARG_4);
+            empty_path_at_cwd(tracee, dirfd, path, SYSARG_2, access_flags);
 
             set_sysnum(tracee, PR_faccessat);
             poke_reg(tracee, SYSARG_4, access_flags & AT_SYMLINK_NOFOLLOW);
@@ -2988,6 +3079,7 @@ int translate_syscall_enter(Tracee *tracee)
         flags = (syscall_number == PR_fchmodat2)
             ? peek_reg(tracee, CURRENT, SYSARG_4)
             : 0;
+        empty_path_at_cwd(tracee, dirfd, path, SYSARG_2, flags);
         if ((flags & AT_SYMLINK_NOFOLLOW) != 0)
             status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
         else
@@ -3004,6 +3096,11 @@ int translate_syscall_enter(Tracee *tracee)
         break;
 
     case PR_readlink:
+        status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
+        if (status >= 0)
+            status = prepare_readlink_output(tracee, SYSARG_2, SYSARG_3);
+        break;
+
     case PR_lgetxattr:
     case PR_llistxattr:
     case PR_lstat:
@@ -3062,6 +3159,7 @@ int translate_syscall_enter(Tracee *tracee)
         if (status < 0)
             break;
 
+        empty_path_at_cwd(tracee, olddirfd, oldpath, SYSARG_2, flags);
         if ((flags & AT_SYMLINK_FOLLOW) != 0)
             status = translate_path2(tracee, olddirfd, oldpath, SYSARG_2, REGULAR);
         else
@@ -3097,6 +3195,8 @@ int translate_syscall_enter(Tracee *tracee)
             break;
 
         status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
+        if (status >= 0)
+            status = prepare_readlink_output(tracee, SYSARG_3, SYSARG_4);
         break;
 
     /* 写操作：先做 ro bind 只读检查 */
@@ -3231,6 +3331,8 @@ int translate_syscall_enter(Tracee *tracee)
         if (status < 0)
             break;
 
+        empty_path_at_cwd(tracee, newdirfd, newpath, SYSARG_2,
+                peek_reg(tracee, CURRENT, SYSARG_3));
         status = translate_path2(
             tracee,
             newdirfd,
@@ -3241,6 +3343,8 @@ int translate_syscall_enter(Tracee *tracee)
         break;
 
     case PR_prctl:
+        if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_GET_AUXV)
+            keep_pushed_args(tracee);
         if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_SET_DUMPABLE) {
             poke_reg(tracee, SYSARG_RESULT, 0);
             set_sysnum(tracee, PR_void);
@@ -3249,7 +3353,10 @@ int translate_syscall_enter(Tracee *tracee)
         /* 上游 571a6c0：neoproot 在 execve 前必设 PR_SET_NO_NEW_PRIVS
          * （seccomp 过滤器前提），真实标志恒为 1——按 guest 自身意图
          * 回答 PR_GET_NO_NEW_PRIVS，并观察 guest 自发的 SET。 */
-        if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_GET_NO_NEW_PRIVS) {
+        if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_GET_NO_NEW_PRIVS &&
+            valid_no_new_privs_request(PR_GET_NO_NEW_PRIVS,
+                peek_reg(tracee, CURRENT, SYSARG_2), peek_reg(tracee, CURRENT, SYSARG_3),
+                peek_reg(tracee, CURRENT, SYSARG_4), peek_reg(tracee, CURRENT, SYSARG_5))) {
             poke_reg(tracee, SYSARG_RESULT, tracee->no_new_privs ? 1 : 0);
             set_sysnum(tracee, PR_void);
             status = 0;
@@ -3261,7 +3368,9 @@ int translate_syscall_enter(Tracee *tracee)
              * 停靠：旧 seccomp 模式下会触发 IS_IN_SYSENTER 断言，改此
              * 安全写法。）seen_execve 守卫：loader 在初始 execve 前也调
              * SET，那次不算 guest 意图。 */
-            if (tracee->seen_execve)
+            if (tracee->seen_execve && valid_no_new_privs_request(PR_SET_NO_NEW_PRIVS,
+                    peek_reg(tracee, CURRENT, SYSARG_2), peek_reg(tracee, CURRENT, SYSARG_3),
+                    peek_reg(tracee, CURRENT, SYSARG_4), peek_reg(tracee, CURRENT, SYSARG_5)))
                 tracee->no_new_privs = true;
         }
         break;

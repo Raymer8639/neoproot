@@ -14,6 +14,7 @@
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "syscall/socket.h"
+#include "syscall/readlink_result.h"
 #include "syscall/chain.h"
 #include "syscall/heap.h"
 #include "syscall/rlimit.h"
@@ -314,6 +315,7 @@ void translate_syscall_exit(Tracee *tracee)
 {
     word_t syscall_number;
     word_t syscall_result;
+    bool copy_raw_readlink = false;
     int status;
 
     status = notify_extensions(tracee, SYSCALL_EXIT_START, 0, 0);
@@ -698,7 +700,7 @@ void translate_syscall_exit(Tracee *tracee)
                         ? (size_t)translated_len - 1 : strlen(failed_target);
                     if (write_len > failed_max)
                         write_len = failed_max;
-                    if (write_data(tracee, failed_output, failed_target, write_len) >= 0) {
+                    if (write_readlink_output(tracee, failed_output, failed_target, write_len) >= 0) {
                         status = (int)write_len;
                         break;
                     }
@@ -726,7 +728,11 @@ void translate_syscall_exit(Tracee *tracee)
             break;
         }
 
-        status = read_data(tracee, referee, output, old_size);
+        copy_raw_readlink = true;
+        if (old_size >= sizeof(referee))
+            goto end; /* no room to terminate; preserve the kernel buffer/result */
+        status = read_data(tracee, referee,
+                peek_reg(tracee, MODIFIED, syscall_number == PR_readlink ? SYSARG_2 : SYSARG_3), old_size);
         if (status < 0)
             break;
         referee[old_size] = '\0';
@@ -812,10 +818,11 @@ void translate_syscall_exit(Tracee *tracee)
                     break;
                 }
                 write_size = len < max_size ? len : max_size;
-                status = write_data(tracee, output, reported_cwd, write_size);
+                status = write_readlink_output(tracee, output, reported_cwd, write_size);
                 if (status < 0)
                     break;
                 status = write_size;
+                copy_raw_readlink = false;
                 break;
             }
         }
@@ -864,27 +871,19 @@ void translate_syscall_exit(Tracee *tracee)
                 }
             }
 
-            if (reread) {
-                int st = detranslate_path(tracee, full, referer);
-                if (st > 0) {
-                    size_t full_len = st - 1; /* detranslate 返回含 \0 的长度 */
-                    if (full_len + 1 <= max_size) {
-                        status = write_data(tracee, output, full, full_len + 1);
-                        if (status < 0)
-                            break;
-                        status = full_len; /* 完整返回 */
-                    } else {
-                        /* guest 路径仍超用户缓冲：保持"缓冲满"语义，
-                         * 返回 max_size 让调用方扩大缓冲重试。 */
-                        status = write_data(tracee, output, full, max_size);
-                        if (status < 0)
-                            break;
-                        status = max_size;
-                    }
-                    break;
+            /* Numeric /proc task/fd spellings and ordinary symlinks also
+             * support a complete host reread. Never shorten a truncated prefix. */
+            if (!reread && referer[0] == '/' &&
+                strncmp(referer, "/proc/self/", 11) != 0) {
+                ssize_t n = readlink(referer, full, sizeof(full) - 1);
+                if (n >= 0 && (size_t)n < sizeof(full) - 1) {
+                    full[n] = '\0';
+                    reread = true;
                 }
-                /* detranslate 失败（bind 外路径等）→ 沿用内核原结果 */
             }
+            if (!reread)
+                goto end;
+            memcpy(referee, full, strlen(full) + 1);
         }
 
         /* 让扩展替换内核上报的路径（link2symlink：fd 打开时
@@ -906,17 +905,18 @@ void translate_syscall_exit(Tracee *tracee)
         }
 
 write_back:
-        if ((size_t)status < max_size) {
+        if ((size_t)status - 1 <= max_size) {
             new_size = status - 1;
-            status = write_data(tracee, output, referee, status);
+            status = write_readlink_output(tracee, output, referee, new_size);
         } else {
             new_size = max_size;
-            status = write_data(tracee, output, referee, max_size);
+            status = write_readlink_output(tracee, output, referee, max_size);
         }
         if (status < 0)
             break;
 
         status = new_size;
+        copy_raw_readlink = false;
         break;
     }
 
@@ -925,6 +925,10 @@ write_back:
         if ((int)syscall_result >= 0)
             clear_proc_fd_paths(tracee->pid);
         translate_execve_exit(tracee);
+        goto end;
+
+    case PR_sendmmsg:
+        (void)translate_sendmmsg_finish(tracee);
         goto end;
 
     case PR_prctl: {
@@ -944,11 +948,11 @@ write_back:
             if (tracee->execfn_addr == 0)
                 goto end;
             buf_max = peek_reg(tracee, ORIGINAL, SYSARG_3);
-            if (syscall_result > buf_max)
-                goto end;
+            /* PR_GET_AUXV returns the total size even for a short buffer. */
+            word_t copied = syscall_result < buf_max ? syscall_result : buf_max;
             buf_addr   = peek_reg(tracee, ORIGINAL, SYSARG_2);
             entry_size = 2 * sizeof_word(tracee);
-            for (offset = 0; offset + entry_size <= syscall_result; offset += entry_size) {
+            for (offset = 0; offset + entry_size <= copied; offset += entry_size) {
                 errno = 0;
                 type = peek_word(tracee, buf_addr + offset);
                 if (errno != 0)
@@ -963,7 +967,7 @@ write_back:
             }
             goto end;
         }
-        break;
+        goto end; /* preserve ordinary prctl results, errors and voided GET */
     }
 
     case PR_ptrace:
@@ -1085,6 +1089,12 @@ write_back:
     poke_reg(tracee, SYSARG_RESULT, (word_t)status);
 
 end:
+    if (copy_raw_readlink && (int)peek_reg(tracee, CURRENT, SYSARG_RESULT) >= 0) {
+        status = copy_raw_readlink_output(tracee,
+                syscall_number == PR_readlink ? SYSARG_2 : SYSARG_3, syscall_result);
+        if (status < 0)
+            poke_reg(tracee, SYSARG_RESULT, (word_t)status);
+    }
     status = notify_extensions(tracee, SYSCALL_EXIT_END, 0, 0);
     if (status < 0)
         poke_reg(tracee, SYSARG_RESULT, (word_t)status);
