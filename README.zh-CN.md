@@ -23,6 +23,8 @@ GitHub Release 资产是 **ARM64 Linux（glibc）** CI 产物。Termux 必须用
 - [构建说明](#构建说明)
 - [贡献与支持](#贡献与支持)
 
+当前版本：**v6.0.3.0**（`x.y.z.a`）。本版包含上游兼容性同步、UM 网络实态检查和首条 guest 输出基准工具；已验证范围与保留边界见 [CHANGELOG](CHANGELOG.md)。
+
 ## 安装（一条命令）
 
 ```sh
@@ -31,7 +33,7 @@ curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/insta
 
 在 Termux 上需要 `pkg install clang make llvm binutils pkg-config libtalloc`，编译 bionic 二进制还要几分钟；ARM64 Linux 上无需编译。
 
-脚本会自动识别平台：在 **Termux** 上安装编译依赖，用对应 tag 的源码编译出 bionic 二进制，备份旧二进制后装进 `$PREFIX/bin`；在 **ARM64 Linux** 上下载 release 二进制、用 `SHA256SUMS` 校验后放进 `PATH`。它**不会**改动正在运行的容器 rootfs。不放心管道执行可以先看 [scripts/install.sh](scripts/install.sh)，`sh scripts/install.sh --help` 可看全部参数：常用的是 `--version`、`--prefix`、`--portable`、`--lang`、`--update` 和 UM/shim 开关。
+脚本会自动识别平台：在 **Termux** 上安装编译依赖，用对应 tag 的源码编译出 bionic 二进制，备份旧二进制后装进 `$PREFIX/bin`；在 **ARM64 Linux** 上下载 release 二进制、用 `SHA256SUMS` 校验后放进 `PATH`。只有显式传 `--shim-rootfs` 时才会修改指定的 guest rootfs。不放心管道执行可以先看 [scripts/install.sh](scripts/install.sh)，`sh scripts/install.sh --help` 可看全部参数：常用的是 `--version`、`--prefix`、`--portable`、`--lang`、`--update` 和 UM/shim 开关。
 
 `neoproot-um` 会安装（或刷新）成指向 `neoproot` 的相对链接，因为 supervisor 就是同一个二进制的另一个名字；旧版本留下的独立 `neoproot-um` 会先备份成 `neoproot-um.prev-<时间戳>`，已有的 `uproot` 别名也会一并指向新二进制。
 
@@ -93,25 +95,33 @@ sh scripts/install.sh --update --force      # 版本相同也强制重装
 sh scripts/install.sh --update --prefix DIR # 前缀不在默认位置时
 ```
 
-`--update` 属于一键脚本（Release 里的 `install.sh`）；源码安装器没有 `--update`。它只替换二进制和运行时，**沿用上次的每一个选择**。普通安装会把选择记到
+`--update` 属于一键脚本（Release 里的 `install.sh`）；源码安装器没有 `--update`。它替换二进制和运行时，沿用记录里的前缀、portable 和 UM 选择。普通安装会把这些选择记到
 `<prefix>/libexec/neoproot/install-state`：
 
 ```
-version=v6.0.0.0
+version=v6.0.3.0
 prefix=/data/data/com.termux/files/usr
 portable=0
 with_um=1
-um_kernel_tag=um-arm64-v0.3.0
-um_passt_tag=v0.3.1
-installed_at=2026-10-31T19:30:00Z
+um_kernel_tag=um-arm64-v0.4.1
+um_passt_tag=v0.4.0
+installed_at=2026-11-14T04:30:00Z
 ```
 
 这样做的好处：
 
 - **不再问问题。** 前缀、要不要保留 um 后端、是不是 portable 构建，全部来自记录。
-- **已是最新就什么都不做。** 版本比的是记录里的值，不是文件时间戳，所以从备份恢复或复制一份不会被误认为刚装过。
-- **运行时能独立前进。** 内核有自己的 tag；只有它变了就只刷新运行时，二进制不动。
+- **版本与运行时完整且最新才跳过。** 版本比的是记录里的值，不是文件时间戳；运行时 pin 和四个可执行文件也都必须齐全。
+- **运行时能独立前进。** 内核有自己的 tag；Termux 和 Linux 都能在 Neoproot 版本相同时只刷新运行时，不重编译/替换二进制；缺失或不可执行的 helper 也会补装。
 - **不会复活过期的 `neoproot-um`。** 当初没装 um 后端，就不会被更新凭空装回来。
+
+直接用 v6.0.3.0 Release 的一键安装器更新：
+
+```sh
+curl -fsSL https://github.com/Raymer8639/neoproot/releases/download/v6.0.3.0/install.sh | sh -s -- --update --version v6.0.3.0
+```
+
+运行时下载失败会保留旧目标文件，runtime pin 不记为已确认，下一次更新会重试。状态文件不保存 guest shim 路径；更新每个 guest 时须传 `--shim-rootfs DIR`。tracer 与 guest shim 必须来自同一 Release，更新后重启容器。tracer tag 已相同时，用 `--force --shim-rootfs DIR` 刷新 shim。
 
 没有状态文件不算错误：脚本会说明情况然后继续装 —— 那只是便利，不是真相来源。
 
@@ -122,11 +132,11 @@ installed_at=2026-10-31T19:30:00Z
 
 | 产物 | 由谁发布 | Release |
 | --- | --- | --- |
-| `linux-bionic`、`linux-bionic-smp` | [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) | `um-arm64-v0.3.0` |
+| `linux-bionic`、`linux-bionic-smp` | [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) | `um-arm64-v0.4.1` |
 | `stub_exe` | 同一 Release | |
 | `umnet` | 同一 Release | |
 | `passt-bionic` | 同一 Release（与内核配套） | |
-| `passt-android-arm64` | [passt-android](https://github.com/Raymer8639/passt-android) | `v0.3.1` |
+| `passt-android-arm64`（配套 passt 下载失败时的后备） | [passt-android](https://github.com/Raymer8639/passt-android) | `v0.4.0` |
 
 各项目发各自的构建。这是有意为之：每提交一次 neoproot 就编一次内核会让 CI 变慢，
 也会把一个项目的版本号塞进另一个项目的发布说明里。
@@ -144,13 +154,13 @@ installed_at=2026-10-31T19:30:00Z
 
 源码安装时 `sh install.sh` 改为询问这四个文件的本地路径（也可用 `--um-kernel=`/`--um-stub=`/`--um-net=`/`--um-passt=` 直接给）。
 
-版本钉在本 neoproot 测试过的组合上。内核必须和它运行的 `um-init`、`umnet`、`passt`
+本版本固定 UM `um-arm64-v0.4.1` 和 standalone passt `v0.4.0`。内核必须和它运行的 `um-init`、`umnet`、`passt`
 版本一致，所以「取最新」不是合适的默认值；知道自己在做什么可以用
 `NEOPROOT_UM_KERNEL_TAG` 或 `NEOPROOT_UM_PASST_TAG` 覆盖。
 
 一键脚本会从上面的 Release 下载运行时，所以**开箱不需要编译内核**。只有在需要已发布的 UP/SMP 构建之外的配置或设备 profile 时才从源码构建 —— 起点是 linux-um-arm64 的 README。
 
-更新的运行时 `um-arm64-v0.4.0`（Linux 7.3.1）已经发布；本版本仍钉在测试过的 `um-arm64-v0.3.0` 组合上。
+运行时项目独立发布并验证自己的资产；指定 pin 不代表本次 Neoproot 发布重新测试了每种 UP/SMP 或设备配置。
 
 ### stat shim 自动生效
 
@@ -158,7 +168,7 @@ shim 是**guest ABI** 的库：装在宿主上对 guest 没有任何作用。把
 
 guest 的 libc 也必须对上。带 `--shim-rootfs` 时安装器会看 rootfs 的 loader —— `lib/ld-musl-aarch64.so.1` 是 musl，`lib/ld-linux-aarch64.so.1` 或 `lib64/ld-linux-aarch64.so.1` 是 glibc —— 并复制对应的构建：Alpine/musl 用 `libstatfast-musl.so`，glibc 用 `libstatfast.so`。两者在 guest 里都叫 `/opt/neoproot/libstatfast.so`，tracer 的自动发现路径不变。`stat-shim/build.sh` 编 glibc 版；`stat-shim/build-musl.sh` 编 musl 版（需要联网取 Alpine 的 musl 头文件）。rootfs 同时有两种 loader 或都没有时安装器会报错而不是猜，可用 `--shim-abi=musl|glibc` 指定。
 
-一键安装器（`scripts/install.sh`，Release 资产 `install.sh`）会同时下载 `libstatfast.so` 与 `libstatfast-musl.so`（发布 workflow 现在两者都构建），再按 guest 的 loader 选。更早发布的版本没有 musl 资产：安装器会明确说明，此时 musl rootfs 需要源码构建或手动放置。
+一键安装器（`scripts/install.sh`，Release 资产 `install.sh`）按 guest loader 下载对应的 `libstatfast.so` 或 `libstatfast-musl.so`（发布 workflow 构建两种资产）。未知或不匹配的 ABI（包括 bionic 缓存）会被拒绝。更早发布的版本没有 musl 资产：安装器会明确说明，此时 musl rootfs 需要源码构建或手动放置。
 
 ```sh
 # 以前：要记两个参数和一个 guest 路径

@@ -173,7 +173,9 @@ case "$url" in
 */libstatfast-musl.so)
 	[ "${FAKE_MUSL_ASSET:-1}" = 1 ] && cp "$FAKE_MUSL_SO" "$out" || exit 22
 	;;
-*/libstatfast.so) cp "$FAKE_GLIBC_SO" "$out" ;;
+*/libstatfast.so)
+	[ "${FAKE_GLIBC_ASSET:-1}" = 1 ] && cp "$FAKE_GLIBC_SO" "$out" || exit 22
+	;;
 *) exit 22 ;;
 esac
 EOF
@@ -185,8 +187,8 @@ run_release_install() { # run_release_install LOG ROOTFS PREFIX MUSL_ASSET
 		FAKE_SHA256SUMS="$WORK/release/SHA256SUMS" \
 		FAKE_NEOPROOT="$WORK/release/neoproot" \
 		FAKE_MUSL_SO="$WORK/fixtures/libstatfast-musl.so" \
-		FAKE_GLIBC_SO="$WORK/fixtures/libstatfast-glibc.so" \
-		FAKE_MUSL_ASSET="$4" \
+		FAKE_GLIBC_SO="${6:-$WORK/fixtures/libstatfast-glibc.so}" \
+		FAKE_MUSL_ASSET="$4" FAKE_GLIBC_ASSET="${5:-1}" \
 		sh "$REPO_ROOT/scripts/install.sh" --version vTEST --mode linux -y \
 		--prefix "$3" --without-um --shim-rootfs "$2" >"$1" 2>&1
 	_run_status=$?
@@ -232,5 +234,37 @@ grep -F 'shim (glibc) installed into' "$WORK/rel-refresh.log" >/dev/null ||
 	fail 'release installer did not report refreshing an existing guest shim'
 cmp -s "$WORK/rel-rootfs-glibc/opt/neoproot/libstatfast.so" "$WORK/fixtures/libstatfast-glibc.so" ||
 	fail 'release installer did not replace the stale guest shim'
+
+# Download failures must not put bionic, unknown or musl cache files into glibc.
+"$CC" -shared -fPIC -nostdlib -Wl,-soname,libc.so \
+	-o "$WORK/fixtures/libc.so" "$WORK/fixtures/stub.c"
+"$CC" -shared -fPIC -nostdlib -Wl,--no-as-needed \
+	-o "$WORK/fixtures/libstatfast-bionic.so" "$WORK/fixtures/fixture.c" \
+	-L"$WORK/fixtures" -l:libc.so
+printf 'truncated' >"$WORK/fixtures/libstatfast-unknown.so"
+mkdir -p "$WORK/empty-prefix/libexec/neoproot"
+for kind in bionic unknown musl; do
+	guard_root="$WORK/guard-$kind"
+	mkdir -p "$guard_root/lib"
+	: >"$guard_root/lib/ld-linux-aarch64.so.1"
+	cp "$WORK/fixtures/libstatfast-$kind.so" "$WORK/empty-prefix/libexec/neoproot/libstatfast.so"
+	status=$(run_release_install "$WORK/guard-$kind.log" "$guard_root" "$WORK/guard-prefix-$kind" 1 0)
+	[ "$status" = 0 ] || fail "guard install failed ($kind, $status)"
+	[ ! -e "$guard_root/opt/neoproot/libstatfast.so" ] || fail "$kind cache entered glibc guest"
+	grep -F 'ignoring it' "$WORK/guard-$kind.log" >/dev/null || fail "$kind rejection was silent"
+done
+
+# A downloaded file with an unconfirmed ABI is refused too.
+status=$(run_release_install "$WORK/guard-download.log" "$WORK/guard-bionic" "$WORK/guard-download-prefix" 1 1 "$WORK/fixtures/libstatfast-bionic.so")
+[ "$status" = 0 ] || fail "download guard failed ($status)"
+[ ! -e "$WORK/guard-bionic/opt/neoproot/libstatfast.so" ] || fail 'bionic download entered glibc guest'
+grep -F 'refusing to install' "$WORK/guard-download.log" >/dev/null || fail 'download rejection was silent'
+
+# A confirmed glibc cache remains a valid fallback when the release is offline.
+cp "$WORK/fixtures/libstatfast-glibc.so" "$WORK/empty-prefix/libexec/neoproot/libstatfast.so"
+status=$(run_release_install "$WORK/guard-cache.log" "$WORK/guard-bionic" "$WORK/guard-cache-prefix" 1 0)
+[ "$status" = 0 ] || fail "matching cache failed ($status)"
+check_installed "$WORK/guard-bionic" glibc "$WORK/guard-cache.log"
+grep -F 'from cached' "$WORK/guard-cache.log" >/dev/null || fail 'matching cache was not used'
 
 printf '%s\n' 'shim ABI install tests passed'

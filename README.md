@@ -23,6 +23,10 @@ GitHub Release assets are **ARM64 Linux (glibc)** CI builds. Termux needs a **lo
 - [Build notes](#build-notes)
 - [Contributing and support](#contributing-and-support)
 
+Current release: **v6.0.3.0** (`x.y.z.a`). It includes upstream compatibility updates,
+UM network configuration checks and the first guest output benchmark tool. See the
+[CHANGELOG](CHANGELOG.md) for verified coverage and remaining boundaries.
+
 ## Install (one command)
 
 ```sh
@@ -31,7 +35,7 @@ curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/insta
 
 On Termux it needs `pkg install clang make llvm binutils pkg-config libtalloc` and a couple of minutes for the bionic build; on ARM64 Linux it only downloads and verifies a binary.
 
-The script detects the platform and does the right thing: on **Termux** it installs the build dependencies, builds the bionic binary from the tagged source, backs up the previous binary and installs the new one into `$PREFIX/bin`; on **ARM64 Linux** it downloads the release binary, verifies it against `SHA256SUMS`, and installs it into your `PATH`. It never touches a running container's rootfs. Read [scripts/install.sh](scripts/install.sh) before piping it to a shell if you prefer; `sh scripts/install.sh --help` lists every option, including `--version`, `--prefix`, `--portable`, `--lang`, `--update` and the UM/shim toggles.
+The script detects the platform and does the right thing: on **Termux** it installs the build dependencies, builds the bionic binary from the tagged source, backs up the previous binary and installs the new one into `$PREFIX/bin`; on **ARM64 Linux** it downloads the release binary, verifies it against `SHA256SUMS`, and installs it into your `PATH`. It changes a guest rootfs only when you explicitly pass `--shim-rootfs`. Read [scripts/install.sh](scripts/install.sh) before piping it to a shell if you prefer; `sh scripts/install.sh --help` lists every option, including `--version`, `--prefix`, `--portable`, `--lang`, `--update` and the UM/shim toggles.
 
 `neoproot-um` is installed (or refreshed) as a relative link to `neoproot`, because the supervisor is the same binary under another name; an older separate `neoproot-um` is kept as `neoproot-um.prev-<timestamp>` first, and an existing `uproot` alias is pointed at the new binary too.
 
@@ -90,18 +94,18 @@ sh scripts/install.sh --update --prefix DIR # when the prefix is not the default
 ```
 
 `--update` belongs to the one-command installer (the release asset); the source
-installer has no `--update`. It replaces the binary and the UML runtime and keeps every choice the
-previous install made. A normal install writes those choices to
+installer has no `--update`. It replaces the binary and the UML runtime, retaining
+the recorded prefix, portable choice and UM choice. A normal install writes those choices to
 `<prefix>/libexec/neoproot/install-state`:
 
 ```
-version=v6.0.0.0
+version=v6.0.3.0
 prefix=/data/data/com.termux/files/usr
 portable=0
 with_um=1
-um_kernel_tag=um-arm64-v0.3.0
-um_passt_tag=v0.3.1
-installed_at=2026-10-31T04:58:29Z
+um_kernel_tag=um-arm64-v0.4.1
+um_passt_tag=v0.4.0
+installed_at=2026-11-14T04:30:00Z
 ```
 
 What that buys:
@@ -110,10 +114,24 @@ What that buys:
   the build is portable all come from the record.
 - **nothing to do when current.** The version is compared against the record,
   not the file timestamp, so a restored backup or a copy does not look new.
+  Runtime pins and all four executable runtime files must also be current.
 - **the runtime can move on its own.** A kernel has its own tag; if only that
-  changed, the binary is left alone and the runtime is refreshed.
+  changed, the binary is left alone and the runtime is refreshed on Termux and
+  Linux alike. Missing or non-executable helpers are fetched again.
 - **a stale `neoproot-um` is not left behind.** If the um backend was not
   installed, a leftover link from an earlier install is not resurrected.
+
+To update using the v6.0.3.0 release installer directly:
+
+```sh
+curl -fsSL https://github.com/Raymer8639/neoproot/releases/download/v6.0.3.0/install.sh | sh -s -- --update --version v6.0.3.0
+```
+
+A failed runtime download preserves the old destination file and leaves runtime
+pins unconfirmed so the next update retries. Guest shim paths are not saved in
+the state: pass `--shim-rootfs DIR` for each guest being updated. The tracer and
+guest shim must come from the same release; restart containers after updating.
+Use `--force --shim-rootfs DIR` to refresh the shim when the tracer tag is already current.
 
 Running with no state file is not an error: the update says so and proceeds,
 because the file is a convenience, not the source of truth.
@@ -125,11 +143,11 @@ None of those are built or published here, because they are not this project:
 
 | Artifact | Published by | Release |
 | --- | --- | --- |
-| `linux-bionic`, `linux-bionic-smp` | [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) | `um-arm64-v0.3.0` |
+| `linux-bionic`, `linux-bionic-smp` | [linux-um-arm64](https://github.com/Raymer8639/linux-um-arm64) | `um-arm64-v0.4.1` |
 | `stub_exe` | same release | |
 | `umnet` | same release | |
 | `passt-bionic` | same release (matched with the kernel) | |
-| `passt-android-arm64` | [passt-android](https://github.com/Raymer8639/passt-android) | `v0.3.1` |
+| `passt-android-arm64` (fallback if the bundled passt cannot be fetched) | [passt-android](https://github.com/Raymer8639/passt-android) | `v0.4.0` |
 
 Each project releases its own build. That is deliberate: compiling a kernel on
 every neoproot commit would make this CI slow, and it would put the version of
@@ -149,7 +167,7 @@ them from its own path, so nothing needs exporting:
 When you build from source, `sh install.sh` asks for the same four files instead;
 `--um-kernel=`, `--um-stub=`, `--um-net=` and `--um-passt=` skip the questions.
 
-The versions are pinned to the pair this neoproot was tested against. A kernel
+This release pins UM `um-arm64-v0.4.1` and standalone passt `v0.4.0`. A kernel
 has to agree with the `um-init`, `umnet` and `passt` it runs with, so
 "latest" is not the right default; override with `NEOPROOT_UM_KERNEL_TAG` or
 `NEOPROOT_UM_PASST_TAG` if you know the set you want.
@@ -157,9 +175,9 @@ has to agree with the `um-init`, `umnet` and `passt` it runs with, so
 The one-command installer downloads that runtime from the releases above, so
 nothing has to be built to get started. Build the kernel from source only when
 you need a configuration or device profile the published UP/SMP builds do not
-cover -- linux-um-arm64's README is the starting point. A newer runtime,
-`um-arm64-v0.4.0` (Linux 7.3.1), is published; this release still pins the
-tested `um-arm64-v0.3.0` set.
+cover -- linux-um-arm64's README is the starting point. The runtime projects
+release and validate their own artifacts; the pins do not imply that every
+UP/SMP or device configuration was retested for this Neoproot release.
 
 ### The stat shim configures itself
 
@@ -181,9 +199,9 @@ Alpine's musl headers. A rootfs with both loaders or neither is an error rather
 than a guess: pass `--shim-abi=musl|glibc` to resolve it.
 
 The one-command installer (`scripts/install.sh`, shipped as the release asset
-`install.sh`) downloads both `libstatfast.so` and `libstatfast-musl.so` — the
-release workflow builds the musl variant alongside the glibc one — and picks
-whichever matches the guest loader. Releases published before that change have
+`install.sh`) downloads the `libstatfast.so` or `libstatfast-musl.so` asset that
+matches the guest loader; the release workflow builds both variants. Unknown or
+mismatched ABIs, including bionic cache files, are refused. Releases published before that change have
 no musl asset: the installer says so, and a musl root then needs the source
 build above or a manual copy of the library into the rootfs.
 

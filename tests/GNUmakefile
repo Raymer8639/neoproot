@@ -90,6 +90,7 @@ test-auto-backend: test-auto-backend.c ../src/cli/auto_backend.c \
 # 运行所有测试
 test-host-tools:
 	python3 test-benchmark-first-output.py
+	python3 test-installer-update.py
 
 .PHONY: test-host-tools
 

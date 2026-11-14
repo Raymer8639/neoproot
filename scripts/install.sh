@@ -12,7 +12,7 @@
 #
 # Usage:
 #   curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/install.sh | sh
-#   sh install.sh --version v5.10.7 --prefix "$HOME/.local" --portable
+#   sh install.sh --version v6.0.3.0 --prefix "$HOME/.local" --portable
 set -eu
 
 REPO="Raymer8639/neoproot"
@@ -199,10 +199,10 @@ fetch_stdout() { # fetch_stdout URL
 resolve_tag() {
 	if [ "$VERSION" != "latest" ]; then printf '%s' "$VERSION"; return 0; fi
 	json=$(fetch_stdout "https://api.github.com/repos/$REPO/releases/latest") \
-		|| die "cannot reach the GitHub API; pass --version vX.Y.Z instead"
+		|| die "cannot reach the GitHub API; pass --version vX.Y.Z.A instead"
 	tag=$(printf '%s\n' "$json" \
 		| sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-	[ -n "$tag" ] || die "could not determine the latest release; pass --version vX.Y.Z"
+	[ -n "$tag" ] || die "could not determine the latest release; pass --version vX.Y.Z.A"
 	printf '%s' "$tag"
 }
 
@@ -289,13 +289,13 @@ install_binary() { # install_binary NEW_BINARY PREFIX
 # on every neoproot commit is slow and puts the version of one project in the
 # release of another.
 #
-# The pins below are what this neoproot release was tested against.  A mismatch
-# is a real problem (the kernel has to agree with um-init, umnet and passt), so
-# they are constants rather than "latest".
+# Release pins are explicit rather than "latest": the kernel must agree with
+# um-init, its stub, umnet and passt. Runtime releases are validated and
+# published independently of neoproot.
 UM_KERNEL_REPO=Raymer8639/linux-um-arm64
-UM_KERNEL_TAG=${NEOPROOT_UM_KERNEL_TAG:-um-arm64-v0.3.0}
+UM_KERNEL_TAG=${NEOPROOT_UM_KERNEL_TAG:-um-arm64-v0.4.1}
 PASST_REPO=Raymer8639/passt-android
-PASST_TAG=${NEOPROOT_UM_PASST_TAG:-v0.3.1}
+PASST_TAG=${NEOPROOT_UM_PASST_TAG:-v0.4.0}
 
 # Record what this install chose, for --update.
 #
@@ -316,8 +316,13 @@ write_state() { # write_state PREFIX TAG PORTABLE
 		printf 'prefix=%s\n' "$_ws_prefix"
 		printf 'portable=%s\n' "$_ws_portable"
 		printf 'with_um=%s\n' "$_ws_with_um"
-		printf 'um_kernel_tag=%s\n' "$UM_KERNEL_TAG"
-		printf 'um_passt_tag=%s\n' "$PASST_TAG"
+		# A partial download must be retried by the next --update.
+		if [ "$_ws_with_um" = 1 ] && [ "${UM_RUNTIME_COMPLETE:-0}" != 1 ]; then
+			printf 'um_kernel_tag=\num_passt_tag=\n'
+		else
+			printf 'um_kernel_tag=%s\n' "$UM_KERNEL_TAG"
+			printf 'um_passt_tag=%s\n' "$PASST_TAG"
+		fi
 		printf 'installed_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	} >"$_ws_file.tmp" 2>/dev/null && mv -f "$_ws_file.tmp" "$_ws_file"
 	return 0
@@ -359,7 +364,7 @@ _rootfs_abi() { # _rootfs_abi ROOTFS -> musl|glibc, or 1 with a reason
 }
 
 # Read the ABI a .so was linked against, when readelf is available.  "unknown"
-# means "cannot tell", not "wrong": the download is still used by file name.
+# means "cannot confirm": downloads and cached files are both refused.
 _shim_file_abi() { # _shim_file_abi FILE -> musl|glibc|unknown
 	_sfa_needed=$(readelf -d "$1" 2>/dev/null || true)
 	case "$_sfa_needed" in
@@ -481,6 +486,8 @@ install_um_runtime() {
 	_prefix=$1
 	_um_dir=$_prefix/libexec/neoproot/um
 	_missing=
+	UM_RUNTIME_COMPLETE=0
+	_um_passt_ok=0
 
 	mkdir -p "$_um_dir" 2>/dev/null || true
 
@@ -499,33 +506,40 @@ install_um_runtime() {
 		# Skip what the override already provided.
 		[ "$_name" = linux-bionic ] && [ -n "${UM_KERNEL_OVERRIDE:-}" ] &&
 			[ -f "${UM_KERNEL_OVERRIDE:-}" ] && continue
-		if fetch "$_kernel_base/$_name" "$_um_dir/$_name" 2>/dev/null; then
-			chmod 755 "$_um_dir/$_name"
+		# Stage beside the destination so a failed download preserves the old file.
+		_um_stage=$_um_dir/.$_name.new.$$
+		if fetch "$_kernel_base/$_name" "$_um_stage" 2>/dev/null &&
+		   chmod 755 "$_um_stage" && mv -f "$_um_stage" "$_um_dir/$_name"; then
+			[ "$_name" != passt-bionic ] || _um_passt_ok=1
 			log "UML runtime: $_name"
 		else
-			_missing="$_missing $_name"
+			rm -f "$_um_stage"
+			[ "$_name" = passt-bionic ] || _missing="$_missing $_name"
 		fi
 	done
 
 	if [ -n "$_missing" ]; then
 		warn "could not fetch from $UM_KERNEL_REPO@$UM_KERNEL_TAG:$_missing"
 		warn "put them in $_um_dir, or set NEOPROOT_UM_KERNEL_TAG to a release that has them"
-	else
-		log "UML runtime installed into $_um_dir"
 	fi
 
-	# passt also has a release of its own.  passt-bionic above is the copy that
-	# linux-um-arm64 shipped with its kernel; this one is the standalone build,
-	# and it is only a fallback for a caller who wants the newest passt rather
-	# than the matched set.
-	if [ ! -e "$_um_dir/passt-bionic" ]; then
+	# Prefer the matched passt bundled with the kernel. If that fetch failed,
+	# try the pinned standalone release even when an older passt is on disk.
+	if [ "$_um_passt_ok" != 1 ]; then
 		_passt_base="https://github.com/$PASST_REPO/releases/download/$PASST_TAG"
-		if fetch "$_passt_base/passt-android-arm64" "$_um_dir/passt-bionic" 2>/dev/null; then
-			chmod 755 "$_um_dir/passt-bionic"
+		_um_stage=$_um_dir/.passt-bionic.new.$$
+		if fetch "$_passt_base/passt-android-arm64" "$_um_stage" 2>/dev/null &&
+		   chmod 755 "$_um_stage" && mv -f "$_um_stage" "$_um_dir/passt-bionic"; then
+			_um_passt_ok=1
 			log "passt-bionic from $PASST_REPO@$PASST_TAG"
 		else
+			rm -f "$_um_stage"
 			warn "--net needs passt-bionic; could not fetch it from $PASST_REPO@$PASST_TAG"
 		fi
+	fi
+	if [ -z "$_missing" ] && [ "$_um_passt_ok" = 1 ]; then
+		UM_RUNTIME_COMPLETE=1
+		log "UML runtime installed into $_um_dir"
 	fi
 	return 0
 }
@@ -601,7 +615,7 @@ if [ "$ACTION" = "update" ]; then
 	for _line in $_saved; do
 		case "$_line" in
 		portable=1) [ "$PORTABLE" = 0 ] && PORTABLE=1 ;;
-		with_um=0) FORCE_NO_UM=1 ;;
+		with_um=0) FORCE_NO_UM=1; WITH_UM=0 ;;
 		esac
 	done
 
@@ -612,13 +626,20 @@ if [ "$ACTION" = "update" ]; then
 	if [ "$_installed_version" = "$tag" ] && [ "$FORCE_UPDATE" != 1 ]; then
 		log "already at $tag (use --force to reinstall anyway)"
 		# The runtime has its own tags, so it can be behind even when the
-		# binary is current.  Only fetch it when the record says it differs.
+		# binary is current, on Termux as well as Linux. Keep fast-only installs
+		# fast-only; refresh when pins differ or any required helper is missing.
+		if [ "${FORCE_NO_UM:-0}" = 1 ] || [ "${WITH_UM:-1}" = 0 ]; then
+			log "runtime: disabled for this install"
+			exit 0
+		fi
 		_saved_kernel=$(sed -n 's/^um_kernel_tag=//p' "$(state_file "$PREFIX_DIR")" 2>/dev/null)
 		_saved_passt=$(sed -n 's/^um_passt_tag=//p' "$(state_file "$PREFIX_DIR")" 2>/dev/null)
-		if [ "$MODE" != "termux" ] &&
-		   { [ "$_saved_kernel" != "$UM_KERNEL_TAG" ] ||
-		     [ "$_saved_passt" != "$PASST_TAG" ] ||
-		     [ ! -e "$PREFIX_DIR/libexec/neoproot/um/linux-bionic" ]; }; then
+		_um_incomplete=0
+		for _name in linux-bionic stub_exe umnet passt-bionic; do
+			[ -x "$PREFIX_DIR/libexec/neoproot/um/$_name" ] || _um_incomplete=1
+		done
+		if [ "$_saved_kernel" != "$UM_KERNEL_TAG" ] ||
+		   [ "$_saved_passt" != "$PASST_TAG" ] || [ "$_um_incomplete" = 1 ]; then
 			log "runtime: ${_saved_kernel:-none} -> $UM_KERNEL_TAG"
 			install_um_runtime "$PREFIX_DIR"
 			write_state "$PREFIX_DIR" "$tag" "$PORTABLE"
