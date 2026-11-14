@@ -63,42 +63,26 @@ int handle_rename_enter_end(Tracee *tracee, Reg oldfd_sysarg, Reg oldpath_sysarg
 int handle_rename_exit_end(Tracee *tracee, Reg oldpath_sysarg, Reg newpath_sysarg,
     Reg flags_sysarg, Config *config)
 {
-    char oldpath[PATH_MAX], newpath[PATH_MAX], old_meta[PATH_MAX], new_meta[PATH_MAX];
-    struct stat st;
+    char oldpath[PATH_MAX], newpath[PATH_MAX];
+    struct stat old_st, new_st;
     unsigned int flags = flags_sysarg == IGNORE_SYSARG ? 0 :
         peek_reg(tracee, ORIGINAL, flags_sysarg);
+    (void)config;
     if (tracee->status < 0 || peek_reg(tracee, CURRENT, SYSARG_RESULT) != 0)
         return 0;
     if (read_sysarg_path(tracee, oldpath, oldpath_sysarg, MODIFIED) != 0
-        || read_sysarg_path(tracee, newpath, newpath_sysarg, MODIFIED) != 0
-        || get_meta_path(oldpath, old_meta) < 0 || get_meta_path(newpath, new_meta) < 0
-        || strcmp(old_meta, new_meta) == 0)
+        || read_sysarg_path(tracee, newpath, newpath_sysarg, MODIFIED) != 0)
         return 0;
-    if (flags & RENAME_EXCHANGE) {
-        bool old_exists = path_exists(old_meta) == 0;
-        bool new_exists = path_exists(new_meta) == 0;
-        mode_t old_mode, new_mode;
-        uid_t old_uid, new_uid;
-        gid_t old_gid, new_gid;
-        if (old_exists)
-            read_meta_file(old_meta, &old_mode, &old_uid, &old_gid, config);
-        if (new_exists)
-            read_meta_file(new_meta, &new_mode, &new_uid, &new_gid, config);
-        if (old_exists)
-            write_meta_file(new_meta, old_mode, old_uid, old_gid, false, config);
-        else
-            remove_meta_file(new_meta);
-        if (new_exists)
-            write_meta_file(old_meta, new_mode, new_uid, new_gid, false, config);
-        else
-            remove_meta_file(old_meta);
-        return 0;
+    if (lstat(oldpath, &old_st) == 0) {
+        if (!(flags & (RENAME_EXCHANGE | RENAME_WHITEOUT)))
+            return 0;
+        /* EXCHANGE on two names of the same inode is also a kernel no-op. */
+        if (lstat(newpath, &new_st) == 0 && old_st.st_dev == new_st.st_dev
+            && old_st.st_ino == new_st.st_ino)
+            return 0;
     }
-    if (!(flags & RENAME_WHITEOUT) && lstat(oldpath, &st) == 0)
-        return 0;
-    if (path_exists(old_meta) == 0)
-        (void)rename_meta_file(old_meta, new_meta);
-    else
-        (void)remove_meta_file(new_meta);
+    /* The syscall has already succeeded; a staging failure leaves all metadata
+     * intact and must not change the result reported to the tracee. */
+    (void)rename_meta_tree(oldpath, newpath, (flags & RENAME_EXCHANGE) != 0);
     return 0;
 }

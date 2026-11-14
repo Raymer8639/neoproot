@@ -41,4 +41,7 @@ int write_meta_file(char path[PATH_MAX], mode_t mode, uid_t owner, gid_t group, 
 int remove_meta_file(char path[PATH_MAX]);
 int rename_meta_file(char old_path[PATH_MAX], char new_path[PATH_MAX]);
 
+/* Rekey canonical host path subtrees atomically; exchange swaps both trees. */
+int rename_meta_tree(const char *old_path, const char *new_path, bool exchange);
+
 #endif

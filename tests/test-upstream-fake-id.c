@@ -186,7 +186,8 @@ int main(int argc, char **argv) {
 
     /* A same-inode rename is a no-op; unrecorded replacement drops stale metadata. */
     assert(link(b, a) == 0); record(a, 0700, 777777, 888888, cfg);
-    assert(rename(a, b) == 0); assert(handle_sysexit_end(caller, cfg) == 0);
+    /* Model the kernel no-op result directly: an outer PRoot may emulate link(). */
+    poke_reg(caller, SYSARG_RESULT, 0); assert(handle_sysexit_end(caller, cfg) == 0);
     expect_record(a, 0700, 777777, 888888, cfg); expect_record(b, 0644, 555555, 666666, cfg);
     assert(unlink(a) == 0); assert(get_meta_path(a, key) == 0); remove_meta_file(key);
     int fresh = open(a, O_RDWR | O_CREAT, 0600); assert(fresh >= 0); close(fresh);

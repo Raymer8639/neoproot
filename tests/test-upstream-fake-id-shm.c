@@ -47,6 +47,21 @@ static int test_ioctl(int fd, unsigned long request, ...) {
 #undef close
 #undef ioctl
 
+/* UBSan can retain exported functions in this included translation unit.
+ * Any unexpected call into the tracer boundary is a test failure. */
+word_t peek_reg(const Tracee *t, RegVersion v, Reg r) { (void)t; (void)v; (void)r; abort(); }
+void poke_reg(Tracee *t, Reg r, word_t value) { (void)t; (void)r; (void)value; abort(); }
+void set_sysnum(Tracee *t, Sysnum n) { (void)t; (void)n; abort(); }
+int write_data(Tracee *t, word_t dest, const void *src, word_t size) { (void)t; (void)dest; (void)src; (void)size; abort(); }
+int read_data(const Tracee *t, void *dest, word_t src, word_t size) { (void)t; (void)dest; (void)src; (void)size; abort(); }
+Tracees *get_tracees_list_head(void) { abort(); }
+struct SysVIpcConfig *sysvipc_get_config(Tracee *t) { (void)t; abort(); }
+void sysvipc_wake_tracee(Tracee *t, struct SysVIpcConfig *cfg, int status) { (void)t; (void)cfg; (void)status; abort(); }
+word_t detranslate_sysnum(Abi abi, Sysnum n) { (void)abi; (void)n; abort(); }
+int register_chained_syscall(Tracee *t, Sysnum n, word_t a, word_t b, word_t c, word_t d, word_t e, word_t f) { (void)t; (void)n; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; abort(); }
+void force_chain_final_result(Tracee *t, word_t value) { (void)t; (void)value; abort(); }
+char *create_temp_name(TALLOC_CTX *ctx, const char *prefix) { (void)ctx; (void)prefix; abort(); }
+
 static void reset_faults(void) { fail_create = fail_resize = fail_ashmem = fail_ioctl = false; ashmem_opens = closed_fds = ioctls = 0; }
 int main(void) {
     int fd; struct stat st;

@@ -5,14 +5,16 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 work=$(mktemp -d /tmp/neoproot-fake-id.XXXXXX)
 case "$work" in /tmp/neoproot-fake-id.*) ;; *) exit 1 ;; esac
 trap 'rm -rf -- "$work"' EXIT HUP INT TERM
-sources=
+# Keep compiler scratch files isolated from other concurrently running suites.
+export TMPDIR="$work"
+set --
 for source in "$root"/src/extension/fake_id0/*.c; do
-    case "$source" in */fake_id0.c) ;; *) sources="$sources $source" ;; esac
+    case "$source" in */fake_id0.c) ;; *) set -- "$@" "$source" ;; esac
 done
-# Word splitting expands only repository-controlled source paths.
+# TEST_CFLAGS may supply compiler instrumentation flags.
 ${CC:-clang} ${TEST_CFLAGS:-} -std=c2x -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -DUSERLAND \
     -ffunction-sections -fdata-sections -I"$root/src" \
-    "$root/tests/test-upstream-fake-id.c" $sources -ltalloc -Wl,--gc-sections -o "$work/handlers"
+    "$root/tests/test-upstream-fake-id.c" "$@" -ltalloc -Wl,--gc-sections -o "$work/handlers"
 mkdir "$work/root"
 "$work/handlers" "$work/root"
 mkdir -p "$work/include/linux"
