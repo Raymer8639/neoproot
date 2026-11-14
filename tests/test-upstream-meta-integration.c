@@ -11,6 +11,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
+#include <sys/resource.h>
+#include <signal.h>
 #include <unistd.h>
 #ifndef SYS_fchmodat2
 #define SYS_fchmodat2 452
@@ -42,9 +45,19 @@ static void set_record(const char *path,mode_t mode,uid_t uid,gid_t gid)
 { require(chown(path,uid,gid)==0,"virtual chown"); require(chmod(path,mode)==0,"virtual chmod"); metadata(path,mode,uid,gid); }
 static int native_capability(const char *path)
 {
-    create_file(path); errno=0;
-    int result=syscall(SYS_fchmodat2,AT_FDCWD,path,0600,0),error=errno;
-    require(result==0 || error==ENOSYS,"native fchmodat2 capability"); unlink(path); return result==0;
+    pid_t child=fork(); require(child>=0,"fork native 452 capability probe");
+    if(child==0) {
+        struct rlimit no_core={0}; (void)setrlimit(RLIMIT_CORE,&no_core);
+        create_file(path); errno=0;
+        int result=syscall(SYS_fchmodat2,AT_FDCWD,path,0600,0),error=errno;
+        _exit(result==0 ? 0 : error==ENOSYS ? 77 : 78);
+    }
+    int status; while(waitpid(child,&status,0)<0) require(errno==EINTR,"wait native 452 probe");
+    unlink(path);
+    if(WIFSIGNALED(status) && WTERMSIG(status)==SIGSYS) return 0;
+    if(WIFEXITED(status) && WEXITSTATUS(status)==77) return 0;
+    require(WIFEXITED(status) && WEXITSTATUS(status)==0,"native fchmodat2 capability");
+    return 1;
 }
 static void tracee(int native_fchmodat2)
 {
