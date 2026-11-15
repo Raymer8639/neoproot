@@ -3,6 +3,21 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v6.0.4.1] - 2026-11-15
+
+**修复：Release metadata 为空时一键安装中断**
+
+- 四段版本规则 `x.y.z.a` 的小补丁位 a+1。v6.0.4.0 的事务安装器在向 GitHub
+  查询 Release metadata 后，用 `set -- $_me_out` 拆分"大小 摘要"两个字段；若该
+  资产在 JSON 里存在但缺少 `size`/`digest`（空响应、限流桩、截断下载都会这样），
+  awk 只会输出空白，词法拆分得到 0 个字段，随后 `META_SIZE=$1` 在 `set -u` 下
+  报 `parameter not set` 并中断——此时事务已经备份完文件但尚未提交，真机更新
+  即停在这一步（回滚正常，设备仍停在旧版本）。
+- 现在把"没有字段"当作"没有 metadata"：metadata 只是交叉校验，缺失时继续用
+  Release 的 SHA256SUMS 校验内容，不再把安装打断。
+- 新增判别性回归：构造"资产条目存在但缺 size/digest"的 API 响应，旧脚本报
+  `$1: unbound variable`，新脚本正常完成安装。安装器事务套件由 20 项增至 21 项。
+
 ## [v6.0.4.0] - 2026-11-15
 
 **事务化一键安装、短性能门禁、no_new_privs 与 sendmmsg 修复**

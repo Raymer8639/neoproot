@@ -678,6 +678,26 @@ class InstallerTransaction(unittest.TestCase):
         self.assertIn("release metadata says 3", self.log(result))
         self.assert_untouched(prefix)
 
+    def test_whitespace_only_metadata_is_ignored(self):
+        """A successful-but-empty API reply must not abort the install.
+
+        The body is fetched fine yet has no fields once the shell splits it.
+        Reading $1 there aborted the transaction after backups had already been
+        made -- this happened on a real Termux update.  Metadata is only a
+        cross-check, so "no fields" has to mean "no metadata", not a crash.
+        """
+        (self.release / "api").mkdir(exist_ok=True)
+        # Pretty-printed like the real API: the parser walks it line by line.
+        (self.release / "api" / "release.json").write_text(json.dumps({
+            "tag_name": TAG,
+            "assets": [{"name": "neoproot"}, {"name": "libstatfast.so"}],
+        }, indent=2))
+        prefix = self.seed()
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, self.log(result))
+        self.assertNotIn("parameter not set", self.log(result))
+        self.assertIn("verified neoproot", self.log(result))
+
     def test_metadata_that_agrees_changes_nothing(self):
         self.write_release_metadata()
         prefix = self.seed()

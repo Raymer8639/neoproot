@@ -49,7 +49,7 @@
 #
 # Usage:
 #   curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/install.sh | sh
-#   sh install.sh --version v6.0.4.0 --prefix "$HOME/.local" --portable
+#   sh install.sh --version v6.0.4.1 --prefix "$HOME/.local" --portable
 set -eu
 
 REPO="Raymer8639/neoproot"
@@ -409,6 +409,12 @@ meta_expect() { # meta_expect NAME -> META_SIZE, META_DIGEST; 1 when unknown
 	' "$META_FILE" 2>/dev/null) || return 1
 	[ -n "$_me_out" ] || return 1
 	set -- $_me_out
+	# A body of nothing but whitespace is non-empty yet yields no fields after
+	# word splitting (an empty API reply, a rate-limit stub, a truncated
+	# download).  Reading $1 there aborts the whole install under `set -u`
+	# after the transaction has already backed files up; the metadata is only a
+	# cross-check, so treat "no fields" as "no metadata".
+	[ $# -ge 1 ] || return 1
 	META_SIZE=$1
 	META_DIGEST=
 	if [ $# -ge 2 ]; then META_DIGEST=$2; fi
