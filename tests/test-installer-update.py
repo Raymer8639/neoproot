@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise the release installer's runtime-only update without network or ptrace."""
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -15,28 +16,48 @@ BUNDLE = "https://github.com/Raymer8639/linux-um-arm64/releases/download/" + KER
 STANDALONE = "https://github.com/Raymer8639/passt-android/releases/download/" + PASST
 FILES = ("linux-bionic", "stub_exe", "umnet", "passt-bionic")
 
+# The installer verifies every payload before it touches the prefix, so the
+# fake release has to publish what a real one publishes: SHA256SUMS next to the
+# assets, and a MANIFEST (digests and sizes) for the UML runtime.  Serving the
+# assets without them would be testing a release that cannot exist.
 CURL = r'''#!/usr/bin/env python3
 import os
 from pathlib import Path
+import shutil
 import sys
+
 args = sys.argv[1:]
+if "-o" not in args:
+    # A metadata request (stdout): this fake release does not publish one.
+    sys.exit(91)
 out = Path(args[args.index("-o") + 1])
 url = args[-1]
 with open(os.environ["REQUEST_LOG"], "a") as log:
     log.write(url + "\n")
+
 bundle = os.environ["EXPECTED_BUNDLE"]
-standalone = os.environ["EXPECTED_STANDALONE"] + "/passt-android-arm64"
-if url.startswith(bundle + "/") and url.rsplit("/", 1)[1] in (
+standalone_dir = os.environ["EXPECTED_STANDALONE"]
+name = url.rsplit("/", 1)[1]
+
+if url == bundle + "/MANIFEST":
+    shutil.copyfile(os.environ["BUNDLE_MANIFEST"], out)
+elif url == bundle + "/SHA256SUMS":
+    shutil.copyfile(os.environ["BUNDLE_SUMS"], out)
+elif url == standalone_dir + "/SHA256SUMS":
+    shutil.copyfile(os.environ["STANDALONE_SUMS"], out)
+elif url == bundle + "/" + name and name in (
         "linux-bionic", "stub_exe", "umnet", "passt-bionic"):
-    if url.rsplit("/", 1)[1] == os.environ.get("FAIL_BUNDLE"):
+    if name == os.environ.get("FAIL_BUNDLE"):
         out.write_text("partial failed download\n")
         sys.exit(22)
-elif url != standalone:
+    shutil.copyfile(Path(os.environ["PAYLOADS"]) / name, out)
+elif url == standalone_dir + "/passt-android-arm64":
+    if os.environ.get("FAIL_STANDALONE") == "1":
+        out.write_text("partial failed download\n")
+        sys.exit(22)
+    shutil.copyfile(Path(os.environ["PAYLOADS"]) / "passt-android-arm64", out)
+else:
     sys.exit(91)
-if url == standalone and os.environ.get("FAIL_STANDALONE") == "1":
-    out.write_text("partial failed download\n")
-    sys.exit(22)
-out.write_text("#!/bin/sh\n# " + url + "\nexit 0\n")
 '''
 
 
@@ -52,10 +73,33 @@ class InstallerUpdate(unittest.TestCase):
         self.calls = self.work / "unexpected-build"
         (self.fakebin / "curl").write_text(CURL)
         (self.fakebin / "curl").chmod(0o755)
+        # A payload carries its own URL, so a file on disk says which release it
+        # came from; the digests below are computed from exactly those bytes.
+        self.payloads = self.work / "payloads"
+        self.payloads.mkdir()
+        sums = []
+        manifest = [
+            "manifest-format=1",
+            "project=Raymer8639/linux-um-arm64",
+            "tag=" + KERNEL,
+        ]
+        for name in FILES:
+            body = "#!/bin/sh\n# " + BUNDLE + "/" + name + "\nexit 0\n"
+            (self.payloads / name).write_text(body)
+            digest = hashlib.sha256(body.encode()).hexdigest()
+            sums.append("%s  %s" % (digest, name))
+            manifest.append("asset.%s.sha256=%s" % (name, digest))
+            manifest.append("asset.%s.size=%d" % (name, len(body)))
+        (self.work / "bundle-SHA256SUMS").write_text("\n".join(sums) + "\n")
+        (self.work / "bundle-MANIFEST").write_text("\n".join(manifest) + "\n")
+        passt = "#!/bin/sh\n# " + STANDALONE + "/passt-android-arm64\nexit 0\n"
+        (self.payloads / "passt-android-arm64").write_text(passt)
+        (self.work / "standalone-SHA256SUMS").write_text(
+            "%s  passt-android-arm64\n" % hashlib.sha256(passt.encode()).hexdigest())
         # A current-version update must never clone, build or install packages.
         for tool in ("git", "make", "clang", "pkg"):
             stub = self.fakebin / tool
-            stub.write_text('#!/bin/sh\nprintf "%s\n" "$0" >>"$BUILD_LOG"\nexit 99\n')
+            stub.write_text('#!/bin/sh\nprintf "%s\\n" "$0" >>"$BUILD_LOG"\nexit 99\n')
             stub.chmod(0o755)
 
     def seed(self, name, kernel=KERNEL, passt=PASST, with_um=1):
@@ -85,6 +129,10 @@ class InstallerUpdate(unittest.TestCase):
                    PREFIX=str(prefix), HOME=str(self.work), TMPDIR=str(self.work),
                    REQUEST_LOG=str(self.requests), BUILD_LOG=str(self.calls),
                    EXPECTED_BUNDLE=BUNDLE, EXPECTED_STANDALONE=STANDALONE,
+                   PAYLOADS=str(self.payloads),
+                   BUNDLE_MANIFEST=str(self.work / "bundle-MANIFEST"),
+                   BUNDLE_SUMS=str(self.work / "bundle-SHA256SUMS"),
+                   STANDALONE_SUMS=str(self.work / "standalone-SHA256SUMS"),
                    **extra)
         result = subprocess.run(
             ["sh", str(INSTALLER), "--update", "--version", TAG, "--mode", mode,
@@ -97,6 +145,11 @@ class InstallerUpdate(unittest.TestCase):
         self.assertFalse(list((prefix / "libexec/neoproot/um").glob(".*.new.*")))
         return self.requests.read_text().splitlines(), result.stdout + result.stderr
 
+    @staticmethod
+    def assets(requests):
+        """The asset downloads, without the manifest and checksum requests."""
+        return [url for url in requests if url.rsplit("/", 1)[1] in FILES]
+
     def assert_current(self, state):
         text = state.read_text()
         self.assertIn(f"um_kernel_tag={KERNEL}\n", text)
@@ -108,7 +161,8 @@ class InstallerUpdate(unittest.TestCase):
             with self.subTest(mode=mode):
                 prefix, runtime, state = self.seed(mode, "um-arm64-v0.3.0", "v0.3.1")
                 requests, _ = self.run_update(prefix, mode)
-                self.assertEqual(requests, [BUNDLE + "/" + name for name in FILES])
+                self.assertEqual(self.assets(requests),
+                                 [BUNDLE + "/" + name for name in FILES])
                 for name in FILES:
                     self.assertIn(BUNDLE, (runtime / name).read_text())
                     self.assertTrue(os.access(runtime / name, os.X_OK))
@@ -130,7 +184,7 @@ class InstallerUpdate(unittest.TestCase):
                 prefix, runtime, state = self.seed(name)
                 (runtime / name).unlink()
                 requests, _ = self.run_update(prefix)
-                self.assertEqual(len(requests), 4)
+                self.assertEqual(len(self.assets(requests)), 4)
                 self.assertTrue(os.access(runtime / name, os.X_OK))
                 self.assert_current(state)
 
@@ -138,7 +192,7 @@ class InstallerUpdate(unittest.TestCase):
         prefix, runtime, state = self.seed("non-executable")
         (runtime / "umnet").chmod(0o644)
         requests, _ = self.run_update(prefix)
-        self.assertEqual(len(requests), 4)
+        self.assertEqual(len(self.assets(requests)), 4)
         self.assertTrue(os.access(runtime / "umnet", os.X_OK))
         self.assert_current(state)
 
@@ -167,7 +221,7 @@ class InstallerUpdate(unittest.TestCase):
         self.assertNotIn("UML runtime installed into", log)
         self.assertIn("um_kernel_tag=\num_passt_tag=\n", state.read_text())
         requests, _ = self.run_update(prefix)
-        self.assertEqual(len(requests), 4)
+        self.assertEqual(len(self.assets(requests)), 4)
         self.assert_current(state)
 
     def test_failed_passt_sources_do_not_confirm_runtime(self):
