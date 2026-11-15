@@ -39,46 +39,43 @@ PASST_BASE = "https://github.com/Raymer8639/passt-android/releases/download/v0.4
 API_URL = "https://api.github.com/repos/Raymer8639/neoproot/releases/tags/" + TAG
 UM_FILES = ("linux-bionic", "stub_exe", "umnet", "passt-bionic")
 
-CURL = r'''#!/usr/bin/env python3
-import os
-from pathlib import Path
-import shutil
-import sys
-
-args = sys.argv[1:]
-if "-o" not in args:
-    # A stdout request (release metadata); this fake release has none unless a
-    # test put one in place.
-    sys.exit(91)
-out = Path(args[args.index("-o") + 1])
-url = args[-1]
-with open(os.environ["REQUEST_LOG"], "a") as log:
-    log.write(url + "\n")
-
-release = Path(os.environ["RELEASE"])
-name = url.rsplit("/", 1)[1]
-if url == os.environ["API_URL"]:
-    source = release / "api" / "release.json"
-elif url.startswith(os.environ["NEOPROOT_BASE"] + "/"):
-    source = release / name
-elif url.startswith(os.environ["UM_BASE"] + "/"):
-    source = release / "um" / name
-elif url.startswith(os.environ["PASST_BASE"] + "/"):
-    source = release / "passt" / name
-else:
-    sys.exit(91)
-if not source.is_file():
-    sys.exit(22)
-if name == os.environ.get("SLOW_ASSET"):
-    # Holding the prefix lock is what the install does first, so a download
-    # that takes a while is a deterministic way to keep the lock held while
-    # another installer runs.
-    import time
-    time.sleep(float(os.environ.get("SLOW_SECONDS", "5")))
-if name == os.environ.get("FAIL_ASSET"):
-    out.write_text("partial failed download\n")
-    sys.exit(22)
-shutil.copyfile(source, out)
+# A release served from a directory: no network, no build.  It is /bin/sh and
+# not "/usr/bin/env python3" on purpose -- Termux has no /usr/bin/env, and these
+# tests have to run there as well as in a container.
+CURL = r'''#!/bin/sh
+out=
+url=
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-o) out=$2; shift 2 ;;
+	-*) shift ;;
+	*) url=$1; shift ;;
+	esac
+done
+# A stdout request (release metadata); this fake release has none unless a test
+# put one in place.
+[ -n "$out" ] || exit 91
+printf '%s\n' "$url" >>"$REQUEST_LOG"
+name=${url##*/}
+case "$url" in
+"$API_URL") src=$RELEASE/api/release.json ;;
+"$NEOPROOT_BASE"/*) src=$RELEASE/$name ;;
+"$UM_BASE"/*) src=$RELEASE/um/$name ;;
+"$PASST_BASE"/*) src=$RELEASE/passt/$name ;;
+*) exit 91 ;;
+esac
+[ -f "$src" ] || exit 22
+if [ -n "${FAIL_ASSET:-}" ] && [ "$name" = "$FAIL_ASSET" ]; then
+	printf 'partial failed download\n' >"$out"
+	exit 22
+fi
+# Holding the prefix lock is what the install does first, so a download that
+# takes a while is a deterministic way to keep the lock held while another
+# installer runs.
+if [ -n "${SLOW_ASSET:-}" ] && [ "$name" = "$SLOW_ASSET" ]; then
+	sleep "${SLOW_SECONDS:-5}"
+fi
+cp "$src" "$out"
 '''
 
 # The installer switches each target with "mv -f <tmp> <target>", where <tmp>

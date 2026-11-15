@@ -20,44 +20,49 @@ FILES = ("linux-bionic", "stub_exe", "umnet", "passt-bionic")
 # fake release has to publish what a real one publishes: SHA256SUMS next to the
 # assets, and a MANIFEST (digests and sizes) for the UML runtime.  Serving the
 # assets without them would be testing a release that cannot exist.
-CURL = r'''#!/usr/bin/env python3
-import os
-from pathlib import Path
-import shutil
-import sys
-
-args = sys.argv[1:]
-if "-o" not in args:
-    # A metadata request (stdout): this fake release does not publish one.
-    sys.exit(91)
-out = Path(args[args.index("-o") + 1])
-url = args[-1]
-with open(os.environ["REQUEST_LOG"], "a") as log:
-    log.write(url + "\n")
-
-bundle = os.environ["EXPECTED_BUNDLE"]
-standalone_dir = os.environ["EXPECTED_STANDALONE"]
-name = url.rsplit("/", 1)[1]
-
-if url == bundle + "/MANIFEST":
-    shutil.copyfile(os.environ["BUNDLE_MANIFEST"], out)
-elif url == bundle + "/SHA256SUMS":
-    shutil.copyfile(os.environ["BUNDLE_SUMS"], out)
-elif url == standalone_dir + "/SHA256SUMS":
-    shutil.copyfile(os.environ["STANDALONE_SUMS"], out)
-elif url == bundle + "/" + name and name in (
-        "linux-bionic", "stub_exe", "umnet", "passt-bionic"):
-    if name == os.environ.get("FAIL_BUNDLE"):
-        out.write_text("partial failed download\n")
-        sys.exit(22)
-    shutil.copyfile(Path(os.environ["PAYLOADS"]) / name, out)
-elif url == standalone_dir + "/passt-android-arm64":
-    if os.environ.get("FAIL_STANDALONE") == "1":
-        out.write_text("partial failed download\n")
-        sys.exit(22)
-    shutil.copyfile(Path(os.environ["PAYLOADS"]) / "passt-android-arm64", out)
-else:
-    sys.exit(91)
+# /bin/sh, not "/usr/bin/env python3": Termux has no /usr/bin/env, and this
+# suite has to run there too.
+CURL = r'''#!/bin/sh
+out=
+url=
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-o) out=$2; shift 2 ;;
+	-*) shift ;;
+	*) url=$1; shift ;;
+	esac
+done
+# A metadata request (stdout): this fake release does not publish one.
+[ -n "$out" ] || exit 91
+printf '%s\n' "$url" >>"$REQUEST_LOG"
+bundle=$EXPECTED_BUNDLE
+standalone_dir=$EXPECTED_STANDALONE
+name=${url##*/}
+case "$url" in
+"$bundle"/MANIFEST) src=$BUNDLE_MANIFEST ;;
+"$bundle"/SHA256SUMS) src=$BUNDLE_SUMS ;;
+"$standalone_dir"/SHA256SUMS) src=$STANDALONE_SUMS ;;
+"$bundle"/*)
+	case "$name" in
+	linux-bionic|stub_exe|umnet|passt-bionic) ;;
+	*) exit 91 ;;
+	esac
+	if [ -n "${FAIL_BUNDLE:-}" ] && [ "$name" = "$FAIL_BUNDLE" ]; then
+		printf 'partial failed download\n' >"$out"
+		exit 22
+	fi
+	src=$PAYLOADS/$name
+	;;
+"$standalone_dir"/passt-android-arm64)
+	if [ "${FAIL_STANDALONE:-}" = 1 ]; then
+		printf 'partial failed download\n' >"$out"
+		exit 22
+	fi
+	src=$PAYLOADS/passt-android-arm64
+	;;
+*) exit 91 ;;
+esac
+cp "$src" "$out"
 '''
 
 
