@@ -16,6 +16,7 @@ CHECK_PROGS = test-auto-backend
 TEST_SCRIPTS = test-upstream-core.sh test-upstream-readlink.sh test-upstream-sendmmsg.sh test-upstream-proot-me.sh \
 	test-upstream-tracee.sh test-upstream-l2s-logic.sh test-upstream-fake-id.sh test-upstream-meta-tree.sh \
 	test-upstream-compat.sh test-upstream-l2s-integration.sh test-upstream-meta-integration.sh \
+	test-no-new-privs-commit.sh \
 	test-build-script.sh basic_test.sh advanced_test.sh \
 	test-runtime-bindings.sh test-security-regressions.sh \
 	test-link2symlink-dirent.sh test-link2symlink-stat-guard.sh \
@@ -90,6 +91,7 @@ test-auto-backend: test-auto-backend.c ../src/cli/auto_backend.c \
 # 运行所有测试
 test-host-tools:
 	python3 test-benchmark-first-output.py
+	python3 test-benchmark-short.py
 	python3 test-installer-update.py
 
 .PHONY: test-host-tools

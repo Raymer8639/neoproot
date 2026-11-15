@@ -136,6 +136,8 @@ jobs:
           python3 test-installer-update.py
           sh test-um-supervisor-net-auto.sh
           python3 test-benchmark-first-output.py
+          python3 test-benchmark-short.py
+          sh test-no-new-privs-commit.sh || test $? -eq 125
           PROOT=../src/neoproot sh test-exec-env-stack.sh
           PROOT=../src/neoproot sh test-version-branding.sh
           PROOT=../src/neoproot sh test-mount-setattr.sh
