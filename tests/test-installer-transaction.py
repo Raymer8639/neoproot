@@ -33,9 +33,27 @@ import unittest
 ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = Path(os.environ.get("NEOPROOT_TEST_INSTALLER", ROOT / "scripts/install.sh"))
 TAG = "vTEST"
+
+
+def _default_pin(name):
+    """Read the installer's own default instead of copying it into the test.
+
+    A release bumps these pins; a hardcoded copy turns a legitimate bump into a
+    test failure that says nothing about the installer.
+    """
+    import re
+    match = re.search(r"^\[ -n \"\$" + name + r"\" \] \|\| " + name + r"=([^\s]+)$",
+                      INSTALLER.read_text(encoding="utf-8"), re.M)
+    if match is None:
+        raise AssertionError("cannot read the default %s from %s" % (name, INSTALLER))
+    return match.group(1)
+
+
+UM_TAG = _default_pin("UM_KERNEL_TAG")
+PASST_TAG = _default_pin("PASST_TAG")
 NEOPROOT_BASE = "https://github.com/Raymer8639/neoproot/releases/download/" + TAG
-UM_BASE = "https://github.com/Raymer8639/linux-um-arm64/releases/download/um-arm64-v0.4.1"
-PASST_BASE = "https://github.com/Raymer8639/passt-android/releases/download/v0.4.0"
+UM_BASE = "https://github.com/Raymer8639/linux-um-arm64/releases/download/" + UM_TAG
+PASST_BASE = "https://github.com/Raymer8639/passt-android/releases/download/" + PASST_TAG
 API_URL = "https://api.github.com/repos/Raymer8639/neoproot/releases/tags/" + TAG
 UM_FILES = ("linux-bionic", "stub_exe", "umnet", "passt-bionic")
 
@@ -179,7 +197,7 @@ class InstallerTransaction(unittest.TestCase):
         um.mkdir()
         sums = []
         manifest = ["manifest-format=1", "project=Raymer8639/linux-um-arm64",
-                    "tag=um-arm64-v0.4.1"]
+                    "tag=" + UM_TAG]
         for name in UM_FILES:
             body = ("#!/bin/sh\n# " + UM_BASE + "/" + name + "\nexit 0\n")
             (um / name).write_text(body)
@@ -579,7 +597,7 @@ class InstallerTransaction(unittest.TestCase):
         state = (prefix / "libexec/neoproot/install-state").read_text()
         self.assertIn("version=" + TAG + "\n", state)
         self.assertIn("with_um=1\n", state)
-        self.assertIn("um_kernel_tag=um-arm64-v0.4.1\n", state)
+        self.assertIn("um_kernel_tag=" + UM_TAG + "\n", state)
         self.assertEqual(state.count("version="), 1)
         self.assertFalse(self.txn_dir(prefix).exists())
         self.assertEqual([], self.rolled_back(prefix))
