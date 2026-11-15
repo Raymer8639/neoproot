@@ -1266,9 +1266,9 @@ stage_shim_into() { # stage_shim_into ROOTFS TAG
 # thing: that is a broken or tampered release, and the install fails.
 # ---------------------------------------------------------------------------
 UM_KERNEL_TAG=$(printenv NEOPROOT_UM_KERNEL_TAG) || UM_KERNEL_TAG=
-[-n "$UM_KERNEL_TAG" ] || UM_KERNEL_TAG=um-arm64-v0.4.2
+[ -n "$UM_KERNEL_TAG" ] || UM_KERNEL_TAG=um-arm64-v0.4.2
 PASST_TAG=$(printenv NEOPROOT_UM_PASST_TAG) || PASST_TAG=
-[-n "$PASST_TAG" ] || PASST_TAG=v0.4.1
+[ -n "$PASST_TAG" ] || PASST_TAG=v0.4.1
 UM_KERNEL_REPO=Raymer8639/linux-um-arm64
 PASST_REPO=Raymer8639/passt-android
 

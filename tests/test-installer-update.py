@@ -10,8 +10,25 @@ import unittest
 ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = Path(os.environ.get("NEOPROOT_TEST_INSTALLER", ROOT / "scripts/install.sh"))
 TAG = "v6.0.3.0"
-KERNEL = "um-arm64-v0.4.1"
-PASST = "v0.4.0"
+
+
+def _default_pin(name):
+    """Read the installer's own default instead of copying it into the test.
+
+    A release bumps these pins; a hardcoded copy turns a legitimate bump into a
+    test failure that says nothing about the installer.  Parsing the script keeps
+    one source of truth and still fails loudly if the shape changes.
+    """
+    import re
+    match = re.search(r"^\[ -n \"\$" + name + r"\" \] \|\| " + name + r"=([^\s]+)$",
+                      INSTALLER.read_text(encoding="utf-8"), re.M)
+    if match is None:
+        raise AssertionError("cannot read the default %s from %s" % (name, INSTALLER))
+    return match.group(1)
+
+
+KERNEL = _default_pin("UM_KERNEL_TAG")
+PASST = _default_pin("PASST_TAG")
 BUNDLE = "https://github.com/Raymer8639/linux-um-arm64/releases/download/" + KERNEL
 STANDALONE = "https://github.com/Raymer8639/passt-android/releases/download/" + PASST
 FILES = ("linux-bionic", "stub_exe", "umnet", "passt-bionic")
