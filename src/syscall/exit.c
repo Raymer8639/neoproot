@@ -14,6 +14,7 @@
 #include "syscall/syscall.h"
 #include "syscall/sysnum.h"
 #include "syscall/socket.h"
+#include "syscall/compat_policy.h"
 #include "syscall/readlink_result.h"
 #include "syscall/chain.h"
 #include "syscall/heap.h"
@@ -967,6 +968,37 @@ write_back:
             }
             goto end;
         }
+        /* 上游 571a6c0：neoproot 在 execve 前必设真实 PR_SET_NO_NEW_PRIVS
+         * （seccomp 过滤器前提），真实标志恒为 1，所以 GET 的答案来自
+         * guest 自身意图（tracee->no_new_privs）。guest 意图只在这里——
+         * 内核真正接受 SET（返回 0）之后——提交；判定条件与理由见
+         * syscall/compat_policy.h 的 no_new_privs_set_committed()。
+         *
+         * 出口处理器覆盖所有停靠方式，且每种方式下都只对 guest 真正执行
+         * 的 syscall 调用一次：
+         *   - seccomp filter 模式：PR_prctl 是 FILTER_SYSEXIT，出口停靠
+         *     由 sysexit_pending/PTRACE_SYSCALL 保证；
+         *   - PROOT_NO_SECCOMP 全停靠模式：每次 syscall 都有 enter/exit
+         *     两次停靠；
+         *   - SIGSYS 直模拟：合成 sysexit 时 SYSARG_RESULT 仍是第 1 个
+         *     参数（PR_SET_NO_NEW_PRIVS = 38）而不是返回值，不等于 0，
+         *     因此不会误提交；
+         *   - chained syscall：链上的 syscall 不走 translate_syscall_exit，
+         *     而 guest 的 prctl 不会被链化，因此既不会漏也不会重复提交。
+         *
+         * 这里不做入口侧乐观置位 + 出口纠正：期间任何一次 GET 都会读到
+         * 错误值，而 guest 自己的 seccomp filter 让真实 SET 返回 EPERM 时
+         * 根本不会有纠正机会。 */
+        if (no_new_privs_set_committed(option,
+                peek_reg(tracee, ORIGINAL, SYSARG_2),
+                peek_reg(tracee, ORIGINAL, SYSARG_3),
+                peek_reg(tracee, ORIGINAL, SYSARG_4),
+                peek_reg(tracee, ORIGINAL, SYSARG_5),
+                get_sysnum(tracee, MODIFIED),
+                syscall_result,
+                tracee->seen_execve))
+            tracee->no_new_privs = true;
+
         goto end; /* preserve ordinary prctl results, errors and voided GET */
     }
 

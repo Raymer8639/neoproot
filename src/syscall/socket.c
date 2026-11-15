@@ -551,6 +551,135 @@ static int translate_sendmmsg_name(Tracee *tracee, uint8_t *header, struct socka
 	return translate_send_sockaddr(tracee, get_word(tracee, header), namelen, sockaddr, true);
 }
 
+/* Batches up to this size are scanned with stack buffers. */
+#define SENDMMSG_BULK_HEADERS 8
+
+/**
+ * Read the struct msghdr part of the *@count consecutive mmsghdr stored
+ * in the @tracee memory at @vector with a single process_vm_readv, one
+ * remote iovec per message, and put the copies in @headers.  A batch that
+ * needs no destination translation, like every batch sent on a connected
+ * socket, then costs one read instead of one per message.  Only the input
+ * header is read, never the output msg_len, as read_sendmmsg_header()
+ * does.  A short read means at least one header isn't readable as a
+ * whole: -EFAULT is returned and the caller reads the messages one by
+ * one, which is what decides how much of the readable prefix is still
+ * sent.  This function returns -errno if an error occurred, otherwise 0.
+ */
+static int sendmmsg_read_headers(Tracee *tracee, uint8_t *headers, word_t vector, word_t count)
+{
+	const size_t header_size = SIZEOF_MSGHDR(tracee);
+	const size_t message_size = SIZEOF_MMSGHDR(tracee);
+	struct iovec stack_local[SENDMMSG_BULK_HEADERS];
+	struct iovec stack_remote[SENDMMSG_BULK_HEADERS];
+	struct iovec *local = stack_local;
+	struct iovec *remote = stack_remote;
+	TALLOC_CTX *ctx = NULL;
+	word_t i;
+	int status = 0;
+
+	if (count == 0)
+		return 0;
+	/* The copied headers are contiguous, the messages aren't. */
+	if ((word_t)-1 - vector < (count - 1) * message_size + header_size)
+		return -EFAULT;
+
+	if (count > SENDMMSG_BULK_HEADERS) {
+		ctx = talloc_new(tracee->ctx);
+		local = talloc_array(ctx, struct iovec, count);
+		remote = talloc_array(ctx, struct iovec, count);
+		if (ctx == NULL || local == NULL || remote == NULL) {
+			talloc_free(ctx);
+			return -ENOMEM;
+		}
+	}
+
+	for (i = 0; i < count; i++) {
+		local[i].iov_base = headers + i * header_size;
+		local[i].iov_len = header_size;
+		remote[i].iov_base = (void *)(vector + i * message_size);
+		remote[i].iov_len = header_size;
+	}
+
+#ifdef __NR_process_vm_readv
+	{
+		ssize_t result = syscall(__NR_process_vm_readv, tracee->pid,
+					local, (int)count, remote, (int)count, 0);
+		if (result < 0)
+			status = -errno;
+		else if (result != (ssize_t)(count * header_size))
+			status = -EFAULT;
+	}
+#else
+	status = -ENOSYS;
+#endif
+	talloc_free(ctx);
+	return status;
+}
+
+/**
+ * Tell whether the batch stored in the @tracee memory at @vector needs a
+ * per-message translation, reading all of its headers at once.  This
+ * function returns -errno if an error occurred, 0 if the batch can be
+ * sent by the kernel as is, otherwise 1.
+ */
+static int scan_sendmmsg_batch(Tracee *tracee, word_t vector, word_t count)
+{
+	const size_t size = SIZEOF_MSGHDR(tracee);
+	uint8_t stack_headers[SENDMMSG_BULK_HEADERS * 7 * sizeof(word_t)];
+	struct sockaddr_un sockaddr;
+	uint8_t *headers = stack_headers;
+	TALLOC_CTX *ctx = NULL;
+	word_t i;
+	int status;
+
+	if (count > SENDMMSG_BULK_HEADERS) {
+		ctx = talloc_new(tracee->ctx);
+		headers = talloc_array(ctx, uint8_t, count * size);
+		if (ctx == NULL || headers == NULL) {
+			talloc_free(ctx);
+			return -ENOMEM;
+		}
+	}
+
+	status = sendmmsg_read_headers(tracee, headers, vector, count);
+	for (i = 0; status >= 0 && i < count; i++) {
+		status = translate_sendmmsg_name(tracee, headers + i * size, &sockaddr);
+		if (status != 0)
+			break;
+	}
+	talloc_free(ctx);
+
+	if (status < 0)
+		return status;
+	return i == count ? 0 : 1;
+}
+
+/**
+ * Same as scan_sendmmsg_batch(), reading one header at a time like the
+ * kernel walks the vector: the readable prefix decides what is sent, so a
+ * batch whose headers can't be read all at once must keep that order.
+ * This function returns -errno if an error occurred, 0 if the batch can be
+ * sent by the kernel as is, otherwise 1.
+ */
+static int scan_sendmmsg_messages(Tracee *tracee, word_t vector, word_t count)
+{
+	uint8_t header[7 * sizeof(word_t)];
+	struct sockaddr_un sockaddr;
+	word_t i;
+	int status;
+
+	for (i = 0; i < count; i++) {
+		status = read_sendmmsg_header(tracee, vector, i, header);
+		if (status < 0)
+			return status == -EFAULT ? 0 : status;
+		status = translate_sendmmsg_name(tracee, header, &sockaddr);
+		if (status != 0)
+			break;
+	}
+	return i == count ? 0 : 1;
+}
+
 static int prepare_sendmmsg_message(struct sendmmsg_pending *pending)
 {
 	Tracee *tracee = pending->tracee;
@@ -580,11 +709,9 @@ static int prepare_sendmmsg_message(struct sendmmsg_pending *pending)
  * send's result and the permission-respecting msg_len store are known. */
 int translate_sendmmsg_start(Tracee *tracee, word_t address, word_t vlen)
 {
-	uint8_t header[7 * sizeof(word_t)];
 	struct sockaddr_un sockaddr;
 	struct sendmmsg_pending *pending;
 	word_t count = MIN((unsigned int)vlen, UIO_MAXIOV);
-	word_t i;
 	int status;
 
 	if (address == 0 || count == 0)
@@ -593,18 +720,18 @@ int translate_sendmmsg_start(Tracee *tracee, word_t address, word_t vlen)
 		return -EBUSY;
 
 	/* Leave the complete native syscall intact if the readable prefix
-	 * needs no destination translation.  In particular a later bad
-	 * header must not discard the kernel's already-sent prefix. */
-	for (i = 0; i < count; i++) {
-		status = read_sendmmsg_header(tracee, address, i, header);
-		if (status < 0)
-			return status == -EFAULT ? 0 : status;
-		status = translate_sendmmsg_name(tracee, header, &sockaddr);
-		if (status != 0)
-			break;
-	}
-	if (i == count)
-		return 0;
+	 * needs no destination translation: the whole batch is then sent by
+	 * the kernel, in one syscall, as if Neoproot wasn't there.  Only
+	 * headers are read for this, and only once for the whole batch.  A
+	 * header that can't be read as a whole (a later bad header must not
+	 * discard the kernel's already-sent prefix) is left to the kernel
+	 * too, but it still has to be walked message by message to know
+	 * whether a translation precedes it. */
+	status = scan_sendmmsg_batch(tracee, address, count);
+	if (status == -EFAULT)
+		status = scan_sendmmsg_messages(tracee, address, count);
+	if (status <= 0)
+		return status;
 
 	pending = talloc_zero(tracee, struct sendmmsg_pending);
 	if (pending == NULL)

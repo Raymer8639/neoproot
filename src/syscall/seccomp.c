@@ -463,7 +463,13 @@ static FilteredSysnum proot_sysnums[] = {
     { PR_rmdir,         0 },
     { PR_sendto,        0 },
     { PR_sendmsg,       0 },
-    { PR_sendmmsg,      FILTER_SYSEXIT },
+    /* sendmmsg is lowered into sendmsg calls only when a message carries a
+     * destination to translate; that is decided at entry, and the entry
+     * translation asks for the syscall-exit stop itself (keep_pushed_args).
+     * A batch the kernel can send as is -- every batch on a connected
+     * socket -- keeps its single native call and must not pay for an exit
+     * stop nobody needs: one stop is 20-25% of such a batch here. */
+    { PR_sendmmsg,      0 },
     { PR_setrlimit,     FILTER_SYSEXIT },
     { PR_setxattr,      0 },
     { PR_socketcall,    FILTER_SYSEXIT },
@@ -500,7 +506,7 @@ static FilteredSysnum netlink_sysnums[] = {
     { PR_close,         0 },
     { PR_recvfrom,      0 },
     { PR_recvmsg,       0 },
-    { PR_sendmmsg,      FILTER_SYSEXIT },
+    { PR_sendmmsg,      0 },
     { PR_sendmsg,       0 },
     { PR_sendto,        0 },
     { PR_socket,        FILTER_SYSEXIT },
