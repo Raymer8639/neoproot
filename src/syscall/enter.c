@@ -3351,8 +3351,8 @@ int translate_syscall_enter(Tracee *tracee)
             status = 0;
         }
         /* 上游 571a6c0：neoproot 在 execve 前必设 PR_SET_NO_NEW_PRIVS
-         * （seccomp 过滤器前提），真实标志恒为 1——按 guest 自身意图
-         * 回答 PR_GET_NO_NEW_PRIVS，并观察 guest 自发的 SET。 */
+         * （seccomp 过滤器前提），真实标志恒为 1——PR_GET_NO_NEW_PRIVS
+         * 按 guest 自身意图（tracee->no_new_privs）回答。 */
         if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_GET_NO_NEW_PRIVS &&
             valid_no_new_privs_request(PR_GET_NO_NEW_PRIVS,
                 peek_reg(tracee, CURRENT, SYSARG_2), peek_reg(tracee, CURRENT, SYSARG_3),
@@ -3361,18 +3361,12 @@ int translate_syscall_enter(Tracee *tracee)
             set_sysnum(tracee, PR_void);
             status = 0;
         }
-        if (peek_reg(tracee, CURRENT, SYSARG_1) == PR_SET_NO_NEW_PRIVS) {
-            /* 真实标志已被 neoproot 提前设置（seccomp 过滤器前提），
-             * guest 的 SET 必然成功——enter 侧直接标记，无需 exit 停靠。
-             * （原 571a6c0 移植用 sysexit_pending+PTRACE_SYSCALL 强制
-             * 停靠：旧 seccomp 模式下会触发 IS_IN_SYSENTER 断言，改此
-             * 安全写法。）seen_execve 守卫：loader 在初始 execve 前也调
-             * SET，那次不算 guest 意图。 */
-            if (tracee->seen_execve && valid_no_new_privs_request(PR_SET_NO_NEW_PRIVS,
-                    peek_reg(tracee, CURRENT, SYSARG_2), peek_reg(tracee, CURRENT, SYSARG_3),
-                    peek_reg(tracee, CURRENT, SYSARG_4), peek_reg(tracee, CURRENT, SYSARG_5)))
-                tracee->no_new_privs = true;
-        }
+        /* PR_SET_NO_NEW_PRIVS 的虚拟状态**不在这里**提交：入口只能证明
+         * guest「想」设置它，真实 SET 仍可能被 guest 自己装的 seccomp
+         * filter 拒绝（EPERM），或被改写/取消。提交点在出口
+         * （translate_syscall_exit 的 PR_prctl 分支，内核真正返回 0 才
+         * 记录），判定条件与理由见 syscall/compat_policy.h 的
+         * no_new_privs_set_committed()。 */
         break;
 
 #ifdef __ANDROID__
