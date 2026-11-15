@@ -93,6 +93,7 @@ test-host-tools:
 	python3 test-benchmark-first-output.py
 	python3 test-benchmark-short.py
 	python3 test-installer-update.py
+	python3 test-installer-transaction.py
 
 .PHONY: test-host-tools
 
