@@ -122,4 +122,49 @@ status=$(run_install "$WORK/update-no-um.log" "$P4" --update)
 grep -qx 'version=vTEST' "$P4/libexec/neoproot/install-state" || fail 'version was not updated'
 grep -qx 'with_um=0' "$P4/libexec/neoproot/install-state" || fail 'fast-only choice was lost'
 
+# 5. The install lock must not need link(2).  Termux/Android refuses a hard link
+#    ("ln: failed to create hard link ...: Permission denied"), and the lock used
+#    to be built with exactly that call, so every install on a phone died before
+#    it installed anything.  An ln that refuses every hard link -- symlinks still
+#    work, and the neoproot-um alias needs one -- reproduces that without
+#    Android; the log it keeps proves the installer never asked for a hard link.
+REAL_LN=$(command -v ln)
+mkdir -p "$WORK/nohardlink"
+cat >"$WORK/nohardlink/ln" <<EOF
+#!/bin/sh
+for a in "\$@"; do
+	[ "\$a" = -s ] && exec "$REAL_LN" "\$@"
+done
+printf 'ln: failed to create hard link: Permission denied\n' >&2
+printf '%s\n' "\$*" >>"\$LN_REFUSED"
+exit 1
+EOF
+chmod 755 "$WORK/nohardlink/ln"
+
+run_install_no_hardlink() { # run_install_no_hardlink LOG PREFIX
+	_run_log=$1
+	_run_prefix=$2
+	set +e
+	PATH="$WORK/nohardlink:$WORK/fakebin:$PATH" \
+		LN_REFUSED="$WORK/ln-refused" \
+		FAKE_SHA256SUMS="$WORK/release/SHA256SUMS" \
+		FAKE_NEOPROOT="$WORK/release/neoproot" \
+		sh "$REPO_ROOT/scripts/install.sh" --version vTEST --mode linux -y \
+		--prefix "$_run_prefix" >"$_run_log" 2>&1
+	_run_status=$?
+	set -e
+	printf '%s\n' "$_run_status"
+}
+
+P5="$WORK/prefix-nohardlink"
+status=$(run_install_no_hardlink "$WORK/nohardlink.log" "$P5")
+[ "$status" = 0 ] || { cat "$WORK/nohardlink.log" >&2; fail "install without hard links failed ($status)"; }
+[ ! -e "$WORK/ln-refused" ] ||
+	fail "the installer asked for a hard link: $(cat "$WORK/ln-refused")"
+[ ! -e "$P5/libexec/neoproot/.install-lock" ] ||
+	fail 'the lock directory survived the install'
+assert_link "$P5/bin/neoproot-um"
+grep -qx 'version=vTEST' "$P5/libexec/neoproot/install-state" ||
+	fail 'the no-hardlink install did not record its state'
+
 printf '%s\n' 'installer link tests passed'

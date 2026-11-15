@@ -16,6 +16,8 @@ The cases map one-to-one onto the failure modes the transaction exists for:
     --recover must do exactly that;
   * two installers must not write the same prefix at once, and a lock left by
     a killed installer must not block the next run;
+  * the lock must work without link(2): Termux/Android refuses a hard link, so
+    every case here runs with an ln that fails that way (see LN);
   * a successful install writes install-state; a failed one does not.
 """
 import hashlib
@@ -25,6 +27,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -66,6 +69,12 @@ else:
     sys.exit(91)
 if not source.is_file():
     sys.exit(22)
+if name == os.environ.get("SLOW_ASSET"):
+    # Holding the prefix lock is what the install does first, so a download
+    # that takes a while is a deterministic way to keep the lock held while
+    # another installer runs.
+    import time
+    time.sleep(float(os.environ.get("SLOW_SECONDS", "5")))
 if name == os.environ.get("FAIL_ASSET"):
     out.write_text("partial failed download\n")
     sys.exit(22)
@@ -100,8 +109,30 @@ exec REAL_MV "$@"
 '''
 
 
+# Termux/Android refuses link(2) -- "ln: failed to create hard link ...:
+# Permission denied" -- everywhere a user can write, so any lock built on ln
+# kills the install before it touches anything.  This ln refuses a hard link
+# exactly like that and keeps symlinks working (the neoproot-um alias needs
+# one).  LN_LOG records every attempt, so a test can prove there was none.
+LN = r'''#!/bin/sh
+for a in "$@"; do
+	if [ "$a" = -s ]; then exec REAL_LN "$@"; fi
+done
+printf 'ln: failed to create hard link: Permission denied\n' >&2
+printf '%s\n' "$*" >>"$LN_LOG"
+exit 1
+'''
+
+
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def stop(proc):
+    """Kill an installer a failed case left running (a lock must not leak)."""
+    if proc.poll() is None:
+        proc.kill()
+        proc.communicate()
 
 
 class InstallerTransaction(unittest.TestCase):
@@ -122,6 +153,12 @@ class InstallerTransaction(unittest.TestCase):
         real_mv = shutil.which("mv")
         (self.fakebin / "mv").write_text(MV.replace("REAL_MV", real_mv))
         (self.fakebin / "mv").chmod(0o755)
+        # Hard links are unavailable in every case, the way Termux has them:
+        # the lock must not depend on link(2) for any of these tests to pass.
+        real_ln = shutil.which("ln")
+        if real_ln:
+            (self.fakebin / "ln").write_text(LN.replace("REAL_LN", real_ln))
+            (self.fakebin / "ln").chmod(0o755)
         # An install must never fall back to a source build in these tests.
         for tool in ("git", "make", "clang", "pkg"):
             stub = self.fakebin / tool
@@ -249,6 +286,7 @@ class InstallerTransaction(unittest.TestCase):
         env.update(PATH=str(self.fakebin) + os.pathsep + os.environ["PATH"],
                    HOME=str(self.work), TMPDIR=str(self.work),
                    REQUEST_LOG=str(self.requests), BUILD_LOG=str(self.calls),
+                   LN_LOG=str(self.work / "ln-refused"),
                    RELEASE=str(self.release),
                    NEOPROOT_BASE=NEOPROOT_BASE, UM_BASE=UM_BASE,
                    PASST_BASE=PASST_BASE, API_URL=API_URL)
@@ -398,26 +436,137 @@ class InstallerTransaction(unittest.TestCase):
             (prefix / "libexec/neoproot/um/linux-bionic").read_text(),
             "#!/bin/sh\n# " + UM_BASE + "/linux-bionic\nexit 0\n")
 
+    # -- the lock ---------------------------------------------------------
+    def lock_dir(self, prefix):
+        return prefix / "libexec/neoproot/.install-lock"
+
+    def write_lock(self, path, pid, start, purpose="test"):
+        """Record a holder the way the installer does: a directory + owner."""
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "owner").write_text(
+            "pid=%s\nstart=%s\npurpose=%s\nsince=now\n" % (pid, start, purpose))
+        return path
+
     def test_concurrent_installer_is_refused(self):
         prefix = self.seed()
-        lock = prefix / "libexec/neoproot/.install-lock"
-        lock.write_text("pid=%d\nstart=%s\npurpose=test\nsince=now\n"
-                        % (os.getpid(), self.proc_starttime(os.getpid())))
+        lock = self.write_lock(self.lock_dir(prefix), os.getpid(),
+                               self.proc_starttime(os.getpid()))
         result = self.install(prefix)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("another neoproot installer", self.log(result))
+        self.assertIn("pid %d is still running" % os.getpid(), self.log(result))
         self.assert_untouched(prefix)
-        self.assertTrue(lock.exists(), "the installer removed a live lock")
-        lock.unlink()
+        self.assertTrue((lock / "owner").is_file(),
+                        "the installer removed a live lock")
+        shutil.rmtree(lock)
 
-        # A lock whose process is gone is stale, not a reason to refuse.
-        lock.write_text("pid=999999\nstart=1\npurpose=test\nsince=old\n")
+    def test_stale_lock_from_a_dead_pid_is_removed(self):
+        prefix = self.seed()
+        lock = self.write_lock(self.lock_dir(prefix), 999999, "1")
         result = self.install(prefix, "--force")
         self.assertEqual(result.returncode, 0, self.log(result))
         self.assertIn("removing a stale lock", self.log(result))
         self.assertFalse(lock.exists())
         self.assertIn("version=" + TAG + "\n",
                       (prefix / "libexec/neoproot/install-state").read_text())
+
+    def test_lock_with_a_reused_pid_is_removed(self):
+        # The pid in the record is alive -- it is this test -- but its start
+        # time is not the recorded one, so the pid was reused and the lock is a
+        # leftover rather than a live holder.
+        prefix = self.seed()
+        lock = self.write_lock(self.lock_dir(prefix), os.getpid(), "1")
+        result = self.install(prefix, "--force")
+        self.assertEqual(result.returncode, 0, self.log(result))
+        self.assertIn("removing a stale lock", self.log(result))
+        self.assertFalse(lock.exists())
+
+    def test_legacy_file_lock_is_still_understood(self):
+        # An installer from before the mkdir lock wrote a plain file at the same
+        # path.  A live one is refused and a dead one is cleared, so an upgrade
+        # that races an old installer is neither broken nor ignored.
+        prefix = self.seed()
+        lock = self.lock_dir(prefix)
+        lock.write_text("pid=%d\nstart=%s\npurpose=test\nsince=now\n"
+                        % (os.getpid(), self.proc_starttime(os.getpid())))
+        result = self.install(prefix)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("another neoproot installer", self.log(result))
+        self.assertTrue(lock.is_file(), "the installer removed a live lock")
+        lock.write_text("pid=999999\nstart=1\npurpose=test\nsince=old\n")
+        result = self.install(prefix, "--force")
+        self.assertEqual(result.returncode, 0, self.log(result))
+        self.assertIn("removing a stale lock", self.log(result))
+        self.assertFalse(lock.exists())
+
+    def test_lock_without_an_owner_is_refused_until_it_is_old(self):
+        # A SIGKILL between mkdir and the owner rename leaves the directory
+        # without a record.  It must not be taken over while it is fresh (that
+        # could be a live installer in the middle of acquiring), and it is
+        # cleared once it is older than any acquire can take.
+        prefix = self.seed()
+        lock = self.lock_dir(prefix)
+        lock.mkdir(parents=True)
+        result = self.install(prefix)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("records no owner", self.log(result))
+        self.assertIn("remove it if no installer is running", self.log(result))
+        self.assert_untouched(prefix)
+        self.assertTrue(lock.is_dir(), "a fresh ownerless lock was removed")
+        old = time.time() - 3600
+        os.utime(lock, (old, old))
+        result = self.install(prefix, "--force")
+        self.assertEqual(result.returncode, 0, self.log(result))
+        self.assertIn("its owner record never appeared", self.log(result))
+        self.assertFalse(lock.exists())
+
+    def test_two_installers_really_race_for_one_prefix(self):
+        # Two real processes, not a hand-written lock: the first holds the lock
+        # while its download is slow, the second runs against the same prefix.
+        prefix = self.seed()
+        first = subprocess.Popen(
+            ["sh", str(INSTALLER), "--version", TAG, "--mode", "linux",
+             "--prefix", str(prefix), "--non-interactive"],
+            env=self.env(SLOW_ASSET="neoproot", SLOW_SECONDS="6"),
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(stop, first)
+        owner = self.lock_dir(prefix) / "owner"
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if owner.is_file() and ("pid=%d\n" % first.pid) in owner.read_text():
+                break
+            if first.poll() is not None:
+                out, err = first.communicate()
+                self.fail("the first installer exited before its lock: %s"
+                          % (out + err))
+            time.sleep(0.05)
+        else:
+            self.fail("the first installer never recorded its lock")
+        second = self.install(prefix, timeout=180)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("another neoproot installer", self.log(second))
+        self.assertTrue(owner.is_file(), "the refused installer removed the lock")
+        out, err = first.communicate(timeout=180)
+        self.assertEqual(first.returncode, 0, out + err)
+        self.assertFalse(self.lock_dir(prefix).exists(),
+                         "the lock survived a successful install")
+        self.assertIn("version=" + TAG + "\n",
+                      (prefix / "libexec/neoproot/install-state").read_text())
+
+    def test_install_succeeds_when_hard_links_are_refused(self):
+        # The regression this change is about: on Termux link(2) is EPERM and
+        # the old lock died on it.  Every case here runs with an ln that refuses
+        # hard links, so this one states the point and checks the record.
+        prefix = self.seed()
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, self.log(result))
+        refused = self.work / "ln-refused"
+        self.assertFalse(refused.exists(),
+                         "the installer asked for a hard link: %s"
+                         % (refused.read_text() if refused.exists() else ""))
+        self.assertTrue((prefix / "bin/neoproot-um").is_symlink(),
+                        "the neoproot-um alias did not become a symlink")
+        self.assertFalse(self.lock_dir(prefix).exists())
 
     @staticmethod
     def proc_starttime(pid):
@@ -468,9 +617,14 @@ class InstallerTransaction(unittest.TestCase):
         (rootfs / "opt/neoproot").mkdir(parents=True)
         guest = rootfs / "opt/neoproot/libstatfast.so"
         guest.write_text("old guest shim\n")
+        # The rest of /opt/neoproot belongs to the user: releasing the guest
+        # lock must not take anything but the lock away.
+        keep = rootfs / "opt/neoproot/keep-me"
+        keep.write_text("keep me\n")
         prefix = self.seed()
         result = self.install(prefix, "--shim-rootfs", str(rootfs))
         self.assertEqual(result.returncode, 0, self.log(result))
+        self.assertEqual(keep.read_text(), "keep me\n")
         self.assertEqual(guest.read_bytes(), shim)
         backups = list((rootfs / "opt/neoproot").glob("libstatfast.so.prev-*"))
         self.assertEqual(len(backups), 1, backups)
@@ -480,6 +634,26 @@ class InstallerTransaction(unittest.TestCase):
         self.assertIn("version=" + TAG + "\n",
                       (prefix / "libexec/neoproot/install-state").read_text())
         self.assertFalse(self.txn_dir(prefix).exists())
+
+    def test_live_guest_lock_is_refused(self):
+        # The guest lock is a lock like the prefix one: a live holder stops the
+        # run, and the failure path releases the prefix lock it already held.
+        rootfs = self.work / "rootfs-locked"
+        (rootfs / "lib").mkdir(parents=True)
+        (rootfs / "lib/ld-linux-aarch64.so.1").write_text("")
+        (rootfs / "opt/neoproot").mkdir(parents=True)
+        guest_lock = self.write_lock(rootfs / "opt/neoproot/.install-lock",
+                                     os.getpid(), self.proc_starttime(os.getpid()))
+        prefix = self.seed()
+        result = self.install(prefix, "--shim-rootfs", str(rootfs))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("another installer is replacing the shim",
+                      self.log(result))
+        self.assertTrue((guest_lock / "owner").is_file(),
+                        "the installer removed a live guest lock")
+        self.assert_untouched(prefix)
+        self.assertFalse(self.lock_dir(prefix).exists(),
+                         "the prefix lock was not released on the failure path")
 
     def test_release_metadata_mismatch_is_refused(self):
         self.write_release_metadata(sizes={"neoproot": 3})

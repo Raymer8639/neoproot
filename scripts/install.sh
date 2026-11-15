@@ -40,8 +40,9 @@
 # SIGKILL cannot be caught, so the *next* run of any action finds the open
 # transaction first, rolls it back (or, when every planned step had finished,
 # records it as complete instead), and only then does what it was asked to do;
-# --recover does only that and exits.  A prefix-level lock
-# (<prefix>/libexec/neoproot/.install-lock) keeps two installers from
+# --recover does only that and exits.  A prefix-level lock -- a directory,
+# <prefix>/libexec/neoproot/.install-lock, created with mkdir so that Termux,
+# which refuses link(2), can install at all -- keeps two installers from
 # committing into the same prefix, and a lock whose process is gone is
 # recognised as stale and removed.  The guarantee covers process interruption,
 # not sudden power loss: there is no fsync barrier.
@@ -465,13 +466,22 @@ verify_asset() { # verify_asset FILE NAME SUMSFILE [MANIFEST] [METAFILE]
 # ---------------------------------------------------------------------------
 # Locks
 #
-# One installer per prefix, and one per guest rootfs.  The lock is a file
-# created with link(2), so creating it is atomic and non-blocking: a second
-# installer is told to wait instead of being allowed to write the same files.
-# The file records the pid and the kernel start time of that pid, so a lock
-# left behind by a SIGKILLed installer is recognised as stale (pid gone, or
-# the pid was reused by another program) and removed instead of blocking
-# recovery forever.
+# One installer per prefix, and one per guest rootfs.  The lock is a *directory*
+# created with mkdir(2): mkdir either creates it or fails with EEXIST, which is
+# atomic on any filesystem whose mkdir is atomic.  link(2) does the same job with
+# a file, but Termux/Android refuses a hard link outright -- "ln: failed to
+# create hard link ...: Permission denied", link(2) returns EPERM under SELinux
+# -- so the old file lock made every install on a phone die before it installed
+# anything.  mkdir(2) is allowed there.
+#
+# The directory holds an "owner" file with the pid and the kernel start time of
+# the holder.  It is written under a temporary name inside the directory and
+# renamed into place, so a reader never sees half a record and takes a live lock
+# for a broken one.  A lock whose pid is gone, or whose pid now belongs to
+# another program (a reused pid), is stale: it is removed and the acquire is
+# retried.  A live holder is never removed; the run stops and names the path to
+# delete.  The directory is removed by its owner only, after the record is read
+# once more, so a release cannot take away a lock another installer just made.
 # ---------------------------------------------------------------------------
 _proc_starttime() { # _proc_starttime PID -> start time in clock ticks
 	[ -r "/proc/$1/stat" ] || return 1
@@ -491,59 +501,165 @@ _lock_holder_alive() { # _lock_holder_alive PID STARTTIME
 	return 1
 }
 
-_lock_acquire() { # _lock_acquire LOCKFILE PURPOSE -> 0 acquired, 1 held/failed ($_LK_WHY)
-	_lk_file=$1
+# A lock is a directory holding "owner".  An installer from before this change
+# used a plain file at the same path with the same keys; reading both means an
+# upgrade that races an old installer sees a live holder instead of a path it
+# cannot read, and an old leftover is still recognised as stale.
+_lock_owner_path() { # _lock_owner_path LOCK -> the file that records the holder
+	if [ -d "$1" ]; then
+		printf '%s/owner' "$1"
+	else
+		printf '%s' "$1"
+	fi
+}
+
+_lock_field() { # _lock_field OWNERFILE KEY -> value, empty when it is not there
+	sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n 1
+}
+
+# The record is renamed into place: mkdir and the write cannot be one step, and
+# a half-written "pid=12" would read like a stale lock that a second installer
+# may remove while this one is alive.
+_lock_write_owner() { # _lock_write_owner LOCKDIR PURPOSE
+	_lw_tmp=$1/owner.tmp.$$
+	if printf 'pid=%s\nstart=%s\npurpose=%s\nsince=%s\n' \
+		"$$" "$(_proc_starttime $$)" "$2" \
+		"$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$_lw_tmp" 2>/dev/null &&
+	   mv -f "$_lw_tmp" "$1/owner" 2>/dev/null; then
+		return 0
+	fi
+	rm -f "$_lw_tmp" 2>/dev/null
+	return 1
+}
+
+# A directory whose owner record never appeared is what a SIGKILL between mkdir
+# and the rename leaves behind.  It has no pid to judge, so it is left alone
+# unless it is old enough that no installer can still be in that window.  The
+# age test is not POSIX (GNU and busybox find have -mmin); when find cannot
+# answer, "not old" is the safe answer, and only a directory holding no more
+# than the half-written record is considered at all.
+_lock_dir_abandoned() { # _lock_dir_abandoned LOCKDIR -> 0 when it is old and ownerless
+	[ -d "$1" ] || return 1
+	[ -n "$(find "$1" -prune -mmin +2 2>/dev/null)" ] || return 1
+	# Only the half-written record of our own making may be inside; anything else
+	# is not ours to remove.  find rather than a glob: the prefix is a user path
+	# and may contain characters a glob would read as wildcards.
+	[ -z "$(find "$1" -mindepth 1 -maxdepth 1 ! -name 'owner.tmp.*' 2>/dev/null)" ] ||
+		return 1
+	return 0
+}
+
+_lock_acquire() { # _lock_acquire LOCK PURPOSE -> 0 acquired, 1 held/failed ($_LK_WHY)
+	_lk_lock=$1
 	_lk_purpose=$2
 	_lk_tries=0
+	_lk_removed=0
 	_LK_WHY=
-	mkdir -p "$(dirname "$_lk_file")" 2>/dev/null || {
-		_LK_WHY="cannot create $(dirname "$_lk_file")"
+	mkdir -p "$(dirname "$_lk_lock")" 2>/dev/null || {
+		_LK_WHY="cannot create $(dirname "$_lk_lock")"
 		return 1
 	}
 	while [ "$_lk_tries" -lt 3 ]; do
 		_lk_tries=$((_lk_tries + 1))
-		_lk_tmp=$_lk_file.tmp.$$
-		if ! printf 'pid=%s\nstart=%s\npurpose=%s\nsince=%s\n' \
-			"$$" "$(_proc_starttime $$)" "$_lk_purpose" \
-			"$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$_lk_tmp" 2>/dev/null; then
-			rm -f "$_lk_tmp"
-			_LK_WHY="cannot write $_lk_file"
+		# The atomic step: mkdir creates the lock, or fails because it is there.
+		if mkdir "$_lk_lock" 2>/dev/null; then
+			if _lock_write_owner "$_lk_lock" "$_lk_purpose"; then
+				return 0
+			fi
+			# We own the directory but cannot describe ourselves in it; leaving
+			# it behind would block the next run with nothing to diagnose.
+			rm -rf "$_lk_lock" 2>/dev/null || true
+			_LK_WHY="cannot write $_lk_lock/owner"
 			return 1
 		fi
-		if ln "$_lk_tmp" "$_lk_file" 2>/dev/null; then
-			rm -f "$_lk_tmp"
-			return 0
+		if [ ! -e "$_lk_lock" ] && [ ! -L "$_lk_lock" ]; then
+			# mkdir failed for a reason other than EEXIST, or the holder
+			# released the lock in between: the loop is what retries this.
+			_LK_WHY="cannot create $_lk_lock"
+			continue
 		fi
-		rm -f "$_lk_tmp"
-		_lk_pid=$(sed -n 's/^pid=//p' "$_lk_file" 2>/dev/null | head -n 1)
-		_lk_start=$(sed -n 's/^start=//p' "$_lk_file" 2>/dev/null | head -n 1)
+		_lk_pid=$(_lock_field "$(_lock_owner_path "$_lk_lock")" pid)
+		_lk_start=$(_lock_field "$(_lock_owner_path "$_lk_lock")" start)
 		if [ -z "$_lk_pid" ]; then
-			_LK_WHY="$_lk_file exists but is unreadable; remove it if no installer is running"
+			if _lock_dir_abandoned "$_lk_lock"; then
+				warn "removing a stale lock ($_lk_lock, its owner record never appeared)"
+				rm -rf "$_lk_lock" 2>/dev/null || true
+				_lk_removed=1
+				continue
+			fi
+			_LK_WHY="$_lk_lock exists but records no owner; remove it if no installer is running"
 			return 1
 		fi
 		if _lock_holder_alive "$_lk_pid" "$_lk_start"; then
 			_LK_WHY="pid $_lk_pid is still running"
 			return 1
 		fi
-		warn "removing a stale lock ($_lk_file, pid $_lk_pid is gone)"
-		rm -f "$_lk_file"
+		# The pid is gone, or the pid was reused by another program: a leftover.
+		# Read the record once more right before removing it, because a second
+		# installer may have cleared the stale lock and taken it over meanwhile.
+		if [ "$(_lock_field "$(_lock_owner_path "$_lk_lock")" pid)" != "$_lk_pid" ]; then
+			_LK_WHY="$_lk_lock changed hands while it was being examined"
+			return 1
+		fi
+		warn "removing a stale lock ($_lk_lock, pid $_lk_pid is gone)"
+		if [ -d "$_lk_lock" ]; then
+			rm -rf "$_lk_lock" 2>/dev/null || true
+		else
+			rm -f "$_lk_lock" 2>/dev/null || true
+		fi
+		_lk_removed=1
 	done
-	_LK_WHY="$_lk_file kept reappearing; remove it if no installer is running"
+	if [ "$_lk_removed" = 1 ]; then
+		_LK_WHY="$_lk_lock kept reappearing; remove it if no installer is running"
+	elif [ -z "$_LK_WHY" ]; then
+		_LK_WHY="cannot create $_lk_lock"
+	fi
 	return 1
+}
+
+# Remove only the lock this process wrote.  The record is checked again first:
+# an installer that judged this lock stale may have removed it and created its
+# own in its place, and taking that one away would hand the prefix to two
+# installers at once.
+_lock_release() { # _lock_release LOCK -> 0 released, 1 left alone
+	_lr_lock=$1
+	_lr_owner=$(_lock_owner_path "$_lr_lock")
+	_lr_pid=$(_lock_field "$_lr_owner" pid)
+	_lr_start=$(_lock_field "$_lr_owner" start)
+	if [ "$_lr_pid" != "$$" ]; then
+		warn "not removing $_lr_lock: it is held by pid ${_lr_pid:-nobody}, not $$"
+		return 1
+	fi
+	if [ -n "$_lr_start" ] && [ "$_lr_start" != "$(_proc_starttime $$)" ]; then
+		warn "not removing $_lr_lock: its start time is not this process's"
+		return 1
+	fi
+	if [ -d "$_lr_lock" ]; then
+		rm -rf "$_lr_lock" 2>/dev/null || {
+			warn "cannot remove $_lr_lock"
+			return 1
+		}
+	else
+		rm -f "$_lr_lock" 2>/dev/null || {
+			warn "cannot remove $_lr_lock"
+			return 1
+		}
+	fi
+	return 0
 }
 
 lock_prefix() { # lock_prefix PREFIX
 	[ "$LOCK_HELD" = 1 ] && return 0
 	LOCK_FILE=$(lock_for "$1")
 	_lock_acquire "$LOCK_FILE" "install into $1" ||
-		die "another neoproot installer is using $1 ($_LK_WHY); wait for it to finish, or remove $LOCK_FILE if you are sure it is gone"
+		die "another neoproot installer is using $1 ($_LK_WHY); wait for it to finish, or remove $LOCK_FILE (rm -rf) if you are sure it is gone"
 	LOCK_HELD=1
 	log "lock: $LOCK_FILE"
 }
 
 release_prefix_lock() {
 	if [ "$LOCK_HELD" = 1 ] && [ -n "$LOCK_FILE" ]; then
-		rm -f "$LOCK_FILE"
+		_lock_release "$LOCK_FILE" || true
 	fi
 	LOCK_HELD=0
 }
@@ -554,13 +670,13 @@ lock_guest() { # lock_guest ROOTFS
 		die "cannot create $_li_rootfs/opt/neoproot"
 	GUEST_LOCK_FILE=$_li_rootfs/opt/neoproot/.install-lock
 	_lock_acquire "$GUEST_LOCK_FILE" "shim into $_li_rootfs" ||
-		die "another installer is replacing the shim in $_li_rootfs ($_LK_WHY); wait for it, or remove $GUEST_LOCK_FILE if you are sure it is gone"
+		die "another installer is replacing the shim in $_li_rootfs ($_LK_WHY); wait for it, or remove $GUEST_LOCK_FILE (rm -rf) if you are sure it is gone"
 	GUEST_LOCK_HELD=1
 }
 
 release_guest_lock() {
 	if [ "$GUEST_LOCK_HELD" = 1 ] && [ -n "$GUEST_LOCK_FILE" ]; then
-		rm -f "$GUEST_LOCK_FILE"
+		_lock_release "$GUEST_LOCK_FILE" || true
 	fi
 	GUEST_LOCK_HELD=0
 }
