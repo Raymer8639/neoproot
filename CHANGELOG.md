@@ -3,6 +3,33 @@
 本项目从 Gitee 上游 [proot-scicat](https://gitee.com/scicat-team/proot-scicat) 接手维护。
 以下版本记录整理自上游 git 历史。
 
+## [v6.0.4.0] - 2026-11-15
+
+**事务化一键安装、短性能门禁、no_new_privs 与 sendmmsg 修复**
+
+- 按四段版本规则 `x.y.z.a` 将新功能位 z 从 3 增至 4，版本 **v6.0.4.0**。
+- **一键安装是事务**：每个下载资产按 Release 的 `SHA256SUMS` / UM `MANIFEST` 校验大小与
+  sha256；全部先落同前缀 staging；逐文件用"同目录临时文件 + rename"换新 inode，绝不 `cp`
+  覆盖正在映射的 live shim；事务日志 `begin/done` 逆序回滚；SIGKILL 后任何 action 先恢复，
+  `--recover` 可显式回滚；前缀锁与 guest 锁防并发。下载到但校验不符 → 硬失败并回滚；
+  下载不到或 ABI 不符 → 按既有语义警告跳过，runtime 组整体跳过且不写 current。
+- **安装器锁改为 `mkdir` 原子目录**：Android/Termux 禁止 `link(2)`，原"临时文件 + ln"的
+  锁在真机上永远创建失败，随后每次安装都会被判"锁被占用"而拒绝。现在锁目录含
+  `owner`（pid/starttime/purpose），死 pid 或 pid 复用才清理，释放只删自己那把锁。
+- **新增短性能门禁**：`tools/benchmark-short-probe.c`（guest 单 ELF）+ `tools/benchmark-short.py`
+  （JSON argv、ABBA 交错、每样本独立目录、marker/JSON/count/checksum 严格校验、median+MAD+
+  配对块、样本不足或噪声大时 inconclusive）+ 63 项 host 自测，已接入 Make/CI。
+- **no_new_privs 只在成功时提交**：入口不再乐观置位；`PR_prctl` 出口仅在 ORIGINAL 参数合法、
+  `MODIFIED` 仍是 `prctl`、真实返回 0 且已过初始 execve 时提交。基线在 guest 自行用 seccomp
+  拒绝 SET 的全停靠场景会错误返回 1，新版本返回 0（有判别性回归）。
+- **sendmmsg 快路径**：`sendmmsg` 不再被无条件强制出口停靠；入口改用一次
+  `process_vm_readv` 读整批 7-word msghdr（读不全才退回逐条），仅在确实需要逐消息处理时
+  才申请停靠。connected 批次的停靠次数 2→1、逐条预读 256→1，translated 目的语义与只读
+  msg_len/部分发送行为不变。
+- 已验证范围：真机（untraced Termux）集成候选 **0 失败**（24 个脚本 + 4 个 Python 套件，
+  仅 `fchmodat2` 按宿主能力 SKIP125）；容器内 bench 63 项、installer 事务 20 项/更新 8 项/
+  链接与 shim ABI 全过。未声明长 soak、真实故障注入或生产 SLA。
+
 ## [v6.0.3.0] - 2026-11-14
 
 **上游兼容性同步、UM 网络实态检查与一键安装更新**

@@ -23,7 +23,7 @@ GitHub Release 资产是 **ARM64 Linux（glibc）** CI 产物。Termux 必须用
 - [构建说明](#构建说明)
 - [贡献与支持](#贡献与支持)
 
-当前版本：**v6.0.3.0**（`x.y.z.a`）。本版包含上游兼容性同步、UM 网络实态检查和首条 guest 输出基准工具；已验证范围与保留边界见 [CHANGELOG](CHANGELOG.md)。
+当前版本：**v6.0.4.0**（`x.y.z.a`）。一键安装现在是事务（逐资产校验、暂存、逐文件原子替换、失败回滚、`--recover`）；安装器锁改为 `mkdir` 原子目录，在禁止 `link(2)` 的 Android 上可用；本版还加入新旧版本短性能门禁，并修复 `no_new_privs` 状态提交时机与 `sendmmsg` 快路径。已验证范围与保留边界见 [CHANGELOG](CHANGELOG.md)。
 
 ## 安装（一条命令）
 
@@ -99,7 +99,7 @@ sh scripts/install.sh --update --prefix DIR # 前缀不在默认位置时
 `<prefix>/libexec/neoproot/install-state`：
 
 ```
-version=v6.0.3.0
+version=v6.0.4.0
 prefix=/data/data/com.termux/files/usr
 portable=0
 with_um=1
@@ -115,10 +115,10 @@ installed_at=2026-11-14T04:30:00Z
 - **运行时能独立前进。** 内核有自己的 tag；Termux 和 Linux 都能在 Neoproot 版本相同时只刷新运行时，不重编译/替换二进制；缺失或不可执行的 helper 也会补装。
 - **不会复活过期的 `neoproot-um`。** 当初没装 um 后端，就不会被更新凭空装回来。
 
-直接用 v6.0.3.0 Release 的一键安装器更新：
+直接用 v6.0.4.0 Release 的一键安装器更新：
 
 ```sh
-curl -fsSL https://github.com/Raymer8639/neoproot/releases/download/v6.0.3.0/install.sh | sh -s -- --update --version v6.0.3.0
+curl -fsSL https://github.com/Raymer8639/neoproot/releases/download/v6.0.4.0/install.sh | sh -s -- --update --version v6.0.4.0
 ```
 
 运行时下载失败会保留旧目标文件，runtime pin 不记为已确认，下一次更新会重试。状态文件不保存 guest shim 路径；更新每个 guest 时须传 `--shim-rootfs DIR`。tracer 与 guest shim 必须来自同一 Release，更新后重启容器。tracer tag 已相同时，用 `--force --shim-rootfs DIR` 刷新 shim。

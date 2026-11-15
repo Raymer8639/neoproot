@@ -23,9 +23,11 @@ GitHub Release assets are **ARM64 Linux (glibc)** CI builds. Termux needs a **lo
 - [Build notes](#build-notes)
 - [Contributing and support](#contributing-and-support)
 
-Current release: **v6.0.3.0** (`x.y.z.a`). It includes upstream compatibility updates,
-UM network configuration checks and the first guest output benchmark tool. See the
-[CHANGELOG](CHANGELOG.md) for verified coverage and remaining boundaries.
+Current release: **v6.0.4.0** (`x.y.z.a`). The one-command install is now a transaction
+(verified downloads, staging, per-file atomic replacement, rollback, `--recover`), the
+installer lock works on Android where `link(2)` is denied, and this release adds the short
+old/new performance gate plus fixes for `no_new_privs` commit timing and the `sendmmsg`
+fast path. See the [CHANGELOG](CHANGELOG.md) for verified coverage and boundaries.
 
 ## Install (one command)
 
@@ -99,7 +101,7 @@ the recorded prefix, portable choice and UM choice. A normal install writes thos
 `<prefix>/libexec/neoproot/install-state`:
 
 ```
-version=v6.0.3.0
+version=v6.0.4.0
 prefix=/data/data/com.termux/files/usr
 portable=0
 with_um=1
@@ -121,10 +123,10 @@ What that buys:
 - **a stale `neoproot-um` is not left behind.** If the um backend was not
   installed, a leftover link from an earlier install is not resurrected.
 
-To update using the v6.0.3.0 release installer directly:
+To update using the v6.0.4.0 release installer directly:
 
 ```sh
-curl -fsSL https://github.com/Raymer8639/neoproot/releases/download/v6.0.3.0/install.sh | sh -s -- --update --version v6.0.3.0
+curl -fsSL https://github.com/Raymer8639/neoproot/releases/download/v6.0.4.0/install.sh | sh -s -- --update --version v6.0.4.0
 ```
 
 A failed runtime download preserves the old destination file and leaves runtime
