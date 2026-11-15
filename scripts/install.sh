@@ -49,7 +49,7 @@
 #
 # Usage:
 #   curl -fsSL https://github.com/Raymer8639/neoproot/releases/latest/download/install.sh | sh
-#   sh install.sh --version v6.0.4.0 --prefix "$HOME/.local" --portable
+#   sh install.sh --version v6.0.4.1 --prefix "$HOME/.local" --portable
 set -eu
 
 REPO="Raymer8639/neoproot"
